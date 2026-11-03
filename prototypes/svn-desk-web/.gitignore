@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+node_modules/
+.pytest_cache/
+src-tauri/target/
+.DS_Store
