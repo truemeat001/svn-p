@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import importlib
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import secrets
@@ -49,6 +50,7 @@ class ReadOnlyAdapter:
                 row = asdict(entry)
                 # UI receives metadata only. It cannot request arbitrary paths.
                 row["id"] = row["path"]
+                row["path"] = row["path"].replace(os.sep, "/")  # UI display only; preserve native ID.
                 row["kind"] = "unknown"  # status XML does not reliably identify node kinds.
                 rows.append(row)
             return {"mode": "live", "workspace": self.workspace.name,
@@ -99,7 +101,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {"error": "Query parameters are not supported."})
         if url.path.startswith("/api/"):
             origin = self.headers.get("Origin")
-            if (origin is not None and origin != self.server.origin) or not secrets.compare_digest(self.headers.get("X-SVN-Desk-Token", ""), self.server.token):
+            if (origin is not None and origin != self.server.origin) or not secrets.compare_digest(self.headers.get("X-SVN-Desk-Token", "").encode(), self.server.token.encode()):
                 return self.respond(403, {"error": "Session authorization required."})
             if url.path == "/api/config":
                 adapter = self.server.adapter

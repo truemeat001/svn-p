@@ -16,7 +16,7 @@ export function filteredRows(rows, {query='', filter='all', folder=''}={}) {
   const q = query.trim().toLocaleLowerCase();
   return rows.filter(row => (!q || `${row.path} ${row.changelist || ''}`.toLocaleLowerCase().includes(q))
     && (!folder || row.path === folder || row.path.startsWith(`${folder}/`))
-    && (filter === 'all' || (filter === 'conflicted' ? stateFor(row) === STATES.conflicted : row.item === filter)));
+    && (filter === 'all' || (filter === 'conflicted' ? stateFor(row) === STATES.conflicted : filter === 'modified' ? row.item === 'modified' || row.props === 'modified' : row.item === filter)));
 }
 export function groupsFor(rows) {
   const groups = new Map();

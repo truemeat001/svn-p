@@ -4,7 +4,8 @@ from pathlib import Path
 import sys
 import threading
 import unittest
-from unittest.mock import Mock
+from dataclasses import dataclass
+from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from server import PrototypeServer, ReadOnlyAdapter
 
@@ -31,6 +32,7 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn('Access-Control-Allow-Origin',headers)
     def test_api_rejects_missing_token(self):self.assertEqual(self.request('/api/status')[0],403)
     def test_api_rejects_wrong_token(self):self.assertEqual(self.request('/api/status',headers={'X-SVN-Desk-Token':'wrong'})[0],403)
+    def test_non_ascii_token_rejected_without_exception(self):self.assertEqual(self.request('/api/status',headers={'X-SVN-Desk-Token':'é'})[0],403)
     def test_cross_origin_rejected_even_with_token(self):self.assertEqual(self.request('/api/status',headers=self.auth(Origin='https://example.com'))[0],403)
     def test_cross_site_bootstrap_is_rejected(self):self.assertEqual(self.request(headers={'Sec-Fetch-Site':'cross-site'})[0],403)
     def test_dns_rebinding_host_rejected(self):self.assertEqual(self.request(headers={'Host':'evil.test'})[0],403)
@@ -62,5 +64,45 @@ class BridgeTests(unittest.TestCase):
         finally:self.server.adapter=None
     def test_missing_working_copy_refused_before_import(self):
         with self.assertRaises((ValueError,FileNotFoundError)):ReadOnlyAdapter(Path('/tmp/no-svn-wc-prototype'),Path('/tmp/no-backend'))
+
+@dataclass
+class Entry:
+    path: str
+    item: str = "modified"
+    props: str = "none"
+    revision: int = 23
+    changelist: str = "test"
+
+class AdapterTests(unittest.TestCase):
+    def adapter(self, entries):
+        adapter=ReadOnlyAdapter.__new__(ReadOnlyAdapter)
+        adapter.workspace=Path('/fixture/workspace')
+        adapter.client=Mock();adapter.client.status.return_value=entries
+        adapter._busy=threading.Lock()
+        return adapter
+    def test_snapshot_calls_only_local_status_and_preserves_native_identity(self):
+        adapter=self.adapter([Entry('Assets/Player/a.cs')])
+        result=adapter.snapshot()
+        adapter.client.status.assert_called_once_with(verbose=False)
+        self.assertEqual(result['mode'],'live')
+        self.assertEqual(result['rows'][0]['kind'],'unknown')
+        self.assertEqual(result['rows'][0]['id'],'Assets/Player/a.cs')
+    def test_windows_display_paths_normalized_without_changing_ids(self):
+        native=r'Assets\Player\a.cs'
+        adapter=self.adapter([Entry(native)])
+        with patch('server.os.sep','\\'):
+            row=adapter.snapshot()['rows'][0]
+        self.assertEqual(row['path'],'Assets/Player/a.cs')
+        self.assertEqual(row['id'],native)
+    def test_oversized_snapshot_rejected_and_lock_released(self):
+        adapter=self.adapter([Entry('a'),Entry('b')])
+        with patch('server.MAX_ROWS',1),self.assertRaises(ValueError):adapter.snapshot()
+        self.assertFalse(adapter._busy.locked())
+    def test_second_status_call_refused_not_queued(self):
+        adapter=self.adapter([]);adapter._busy.acquire()
+        try:
+            with self.assertRaises(BlockingIOError):adapter.snapshot()
+            adapter.client.status.assert_not_called()
+        finally:adapter._busy.release()
 
 if __name__=='__main__':unittest.main()

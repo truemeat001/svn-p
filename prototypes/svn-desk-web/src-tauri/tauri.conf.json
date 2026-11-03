@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SVN Desk Web Preview",
+  "version": "0.1.0",
+  "identifier": "dev.svndesk.webpreview",
+  "build": {"frontendDist": "../web"},
+  "app": {
+    "windows": [{"label": "main", "title": "SVN Desk · Web Preview (Demo)", "width": 1440, "height": 960, "minWidth": 760, "minHeight": 640}],
+    "security": {"csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'", "capabilities": []}
+  },
+  "bundle": {"active": false}
+}

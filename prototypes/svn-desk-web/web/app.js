@@ -23,7 +23,7 @@ const icon=(name)=>`<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><pa
 function paintIcons(root=document){root.querySelectorAll('[data-icon]').forEach(e=>{e.innerHTML=icon(e.dataset.icon);});}
 const token=document.querySelector('meta[name="svn-session"]').content;
 const standalone=token==='__SESSION_TOKEN__';
-const state={mode:standalone?'demo':'loading',rows:[],query:'',filter:'all',folder:'',selected:new Set(),focused:null,collapsed:new Set(),preview:'diff',logs:[],busy:false,failed:false,workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas'};
+const state={mode:standalone?'demo':'loading',rows:[],query:'',filter:'all',folder:'',selected:new Set(),focused:null,collapsed:new Set(['']),preview:'diff',logs:[],busy:false,failed:false,workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas'};
 let toastTimer;
 function notify(message){$('toast').textContent=message;$('toast').classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.add('hidden'),3500);}
 function log(message,level='INFO'){state.logs.push({time:new Date().toLocaleTimeString('en-GB'),message,level});state.logs=state.logs.slice(-100);$('activity-log').innerHTML=state.logs.map(r=>`<div class="log-row"><span class="log-time">${esc(r.time)}</span><span class="log-level ${r.level==='WARN'?'warn':''}">${esc(r.level)}</span><span class="log-text">${esc(r.message)}</span></div>`).join('');$('log-counter').textContent=state.logs.length;$('activity-log').scrollTop=$('activity-log').scrollHeight;}
@@ -34,9 +34,9 @@ const fileIcon=row=>/\.(png|jpg|jpeg|svg)$/i.test(row.path)?`<span class="file-i
 function renderTree(){
  const folders=new Set(['']);for(const row of state.rows){const parts=row.path.split('/');for(let i=1;i<parts.length;i++)folders.add(parts.slice(0,i).join('/'));}
  const sorted=[...folders].sort((a,b)=>a.localeCompare(b));
- $('folder-tree').innerHTML=sorted.map((folder,i)=>{const depth=folder?folder.split('/').length:0;const count=filteredRows(state.rows,{folder}).length;return `<button class="folder-item ${folder===state.folder?'selected':''}" data-folder-index="${i}" aria-label="筛选目录 ${esc(folder||'全部目录')}" style="--depth:${depth}"><span class="tree-arrow">${folder?'›':'⌄'}</span>${icon(folder?'folder':'computer')}<span class="folder-label">${esc(folder?fileName(folder):'Project Atlas')}</span><span class="folder-count">${count}</span></button>`;}).join('');
+ $('folder-tree').innerHTML=sorted.map((folder,i)=>{const depth=folder?folder.split('/').length:0;const count=filteredRows(state.rows,{folder}).length;return `<button class="folder-item ${folder===state.folder?'selected':''}" data-folder-index="${i}" aria-label="筛选目录 ${esc(folder||'全部目录')}"><span class="tree-arrow">${folder?'›':'⌄'}</span>${icon(folder?'folder':'computer')}<span class="folder-label">${esc(folder?fileName(folder):state.workspace)}</span><span class="folder-count">${count}</span></button>`;}).join('');
  // No inline style is needed under strict CSP: depth encoded with finite classes.
- $('folder-tree').querySelectorAll('button').forEach((button,i)=>{button.removeAttribute('style');button.classList.add(`depth-${Math.min(4,sorted[i]?sorted[i].split('/').length:0)}`);button.onclick=()=>{state.folder=sorted[i];render();};});
+ $('folder-tree').querySelectorAll('button').forEach((button,i)=>{button.removeAttribute('style');button.classList.add(`depth-${Math.min(4,sorted[i]?sorted[i].split('/').length:0)}`);button.onclick=()=>{state.folder=sorted[i];state.collapsed.clear();render();};});
 }
 function render(){
  const rows=matches(),groups=groupsFor(rows),visible=displayed(),counts=summary(state.rows);
@@ -48,6 +48,7 @@ function render(){
   tr.ondblclick=()=>{state.preview='diff';renderPreview();$('preview-panel').classList.remove('collapsed');};
   tr.onkeydown=e=>{if(!['ArrowDown','ArrowUp',' '].includes(e.key))return;e.preventDefault();if(e.key===' '){state.selected.has(row.id)?state.selected.delete(row.id):state.selected.add(row.id);}else{const idx=visible.findIndex(r=>r.id===row.id),target=visible[Math.max(0,Math.min(visible.length-1,idx+(e.key==='ArrowDown'?1:-1)))];state.focused=target.id;}render();const focusIndex=state.rows.findIndex(r=>r.id===state.focused);$('file-body').querySelector(`[data-row-index="${focusIndex}"]`)?.focus();};
  });
+ const allCollapsed=groups.length>0 && groups.every(([name])=>state.collapsed.has(name));$('collapse-all').innerHTML=`${icon('collapse')}${allCollapsed?'展开分组':'折叠分组'}`;
  const selectedVisible=visible.filter(r=>state.selected.has(r.id)).length,hiddenCount=state.selected.size-selectedVisible;
  $('select-visible').checked=visible.length>0 && selectedVisible===visible.length;$('select-visible').indeterminate=selectedVisible>0 && selectedVisible<visible.length;
  $('select-visible').disabled=!visible.length;$('empty-state').classList.toggle('hidden',rows.length>0);
@@ -92,13 +93,14 @@ function showHistory(){
 }
 function review(){const rows=reviewSelection(state.rows,state.selected);modal(`审查选中项 · ${rows.length} 个文件`,`<p>这是只读审查，不会提交。列表包含已选择但被筛选或折叠隐藏的文件；不会自动扩展目录范围。</p><div>${rows.map(r=>`<div class="review-file">${statusTag(r)}<span>${esc(r.path)}</span></div>`).join('')}</div><p class="history-disclaimer">${state.mode==='demo'?'当前为演示数据。':'当前为真实本地状态。'} 提交、还原、归组与 Shelf 操作均未接入。</p>`);log(`打开只读审查：${rows.length} 项明确选择；未发送写操作。`);}
 async function api(path){const r=await fetch(path,{headers:{'X-SVN-Desk-Token':token},cache:'no-store'});if(!r.ok)throw Error('只读状态请求失败。');return r.json();}
-function updateMode(){const demo=state.mode==='demo';$('mode-pill').innerHTML=`<span class="dot"></span>${demo?'演示数据 · 只读原型':state.mode==='live'?'真实本地状态 · 只读':'读取失败 · 状态未知'}`;$('status-text').textContent=demo?'演示数据，未连接仓库':state.mode==='live'?'只读本地状态 · 未检查仓库连接':'状态不可用，不代表工作副本干净';$('workspace-address').textContent=state.root;$('workspace-name').textContent=state.workspace;$('workspace-description').textContent=demo?'本地工作副本 · 示例':'启动时指定 · 只读';$('branch-label').textContent=demo?'trunk（示例）':'未查询分支';$('revision-label').textContent=demo?'BASE r2841（示例）':'修订见文件行';$('history-indicator').textContent=demo?'示例':'未接入';}
+function updateMode(){const demo=state.mode==='demo';$('mode-pill').innerHTML=`<span class="dot"></span>${state.failed?'读取失败 · 状态未知':demo?'演示数据 · 只读原型':state.mode==='live'?'真实本地状态 · 只读':'正在读取状态'}`;$('status-text').textContent=demo?'演示数据，未连接仓库':state.mode==='live'?'只读本地状态 · 未检查仓库连接':'状态不可用，不代表工作副本干净';$('workspace-address').textContent=state.root;$('workspace-name').textContent=state.workspace;$('context-workspace').textContent=state.workspace;$('workspace-description').textContent=demo?'本地工作副本 · 示例':'启动时指定 · 只读';$('branch-label').textContent=demo?'trunk（示例）':'未查询分支';$('revision-label').textContent=demo?'BASE r2841（示例）':'修订见文件行';$('history-indicator').textContent=demo?'示例':'未接入';}
 async function refresh(initial=false){
  if(state.busy)return;state.busy=true;$('refresh').disabled=true;$('read-time').textContent='正在读取…';
  try{
-  if(initial&&!standalone){const config=await api('/api/config');state.mode=config.mode;state.workspace=config.workspace;state.root=config.root;}
+  const config=standalone?{mode:'demo',workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas'}:await api('/api/config');
   const payload=standalone?{mode:'demo'}:await api('/api/status');
-  if(state.mode==='live' && payload.mode!=='live')throw Error('Live mode mismatch');
+  if(config.mode!==payload.mode || !['demo','live'].includes(config.mode))throw Error('Mode mismatch');
+  state.workspace=payload.workspace||config.workspace;state.root=payload.root||config.root;
   state.rows=payload.mode==='demo'?structuredClone(demoRows):payload.rows;
   if(!Array.isArray(state.rows))throw Error('Invalid rows');
   state.mode=payload.mode;state.failed=false;$('live-error').classList.add('hidden');
@@ -111,9 +113,9 @@ async function refresh(initial=false){
 }
 function clearFilters(){state.query='';state.filter='all';state.folder='';$('search').value='';render();}
 paintIcons();
-$('refresh').onclick=()=>refresh();$('search').addEventListener('input',e=>{state.query=e.target.value;render();});
-document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;render();});
-$('pending-nav').onclick=clearFilters;$('pending-tab').onclick=clearFilters;$('conflict-nav').onclick=()=>{state.filter='conflicted';state.folder='';state.query='';$('search').value='';render();};
+$('refresh').onclick=()=>refresh();$('search').addEventListener('input',e=>{state.query=e.target.value;state.collapsed.clear();render();});
+document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;state.collapsed.clear();render();});
+$('pending-nav').onclick=clearFilters;$('pending-tab').onclick=clearFilters;$('conflict-nav').onclick=()=>{state.filter='conflicted';state.collapsed.clear();state.folder='';state.query='';$('search').value='';render();};
 $('workspace-home').onclick=clearFilters;$('clear-filters').onclick=clearFilters;$('empty-reset').onclick=clearFilters;
 $('select-visible').onchange=e=>{for(const row of displayed()){e.target.checked?state.selected.add(row.id):state.selected.delete(row.id);}render();};
 $('collapse-all').onclick=()=>{const groups=groupsFor(matches()),all=groups.every(([name])=>state.collapsed.has(name));for(const [name]of groups){all?state.collapsed.delete(name):state.collapsed.add(name);}$('collapse-all').innerHTML=`${icon('collapse')}${all?'折叠分组':'展开分组'}`;render();};

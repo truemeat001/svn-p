@@ -9,5 +9,8 @@
     "test:ui": "node tests/browser.test.cjs",
     "tauri": "tauri"
   },
-  "devDependencies": { "@tauri-apps/cli": "^2" }
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "playwright": "1.62.1"
+  }
 }

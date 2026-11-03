@@ -12,3 +12,5 @@ test('review contains only explicit selection including filtered-hidden files',(
 test('no arbitrary stale selections included in review',()=>assert.equal(reviewSelection(demoRows,new Set(['../../private'])).length,0));
 test('HTML-sensitive filenames are escaped',()=>assert.equal(safeText('<img src=x onerror="x">&\''),'&lt;img src=x onerror=&quot;x&quot;&gt;&amp;&#39;'));
 test('file names handle Windows display separators',()=>assert.equal(fileName('C:\\Work\\a.cs'),'a.cs'));
+
+test('modified filter includes property-only changes in normal/none states',()=>{const rows=[{path:'a',item:'normal',props:'modified'},{path:'b',item:'none',props:'modified'},{path:'c',item:'normal',props:'none'}];assert.equal(filteredRows(rows,{filter:'modified'}).length,2);});
