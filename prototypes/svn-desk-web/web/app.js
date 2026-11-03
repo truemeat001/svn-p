@@ -23,8 +23,9 @@ const icon=(name)=>`<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><pa
 function paintIcons(root=document){root.querySelectorAll('[data-icon]').forEach(e=>{e.innerHTML=icon(e.dataset.icon);});}
 const token=document.querySelector('meta[name="svn-session"]').content;
 const standalone=token==='__SESSION_TOKEN__';
-const state={mode:standalone?'demo':'loading',rows:[],query:'',filter:'all',folder:'',selected:new Set(),focused:null,collapsed:new Set(['']),preview:'diff',logs:[],busy:false,failed:false,workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas'};
+const state={mode:standalone?'demo':'loading',rows:[],query:'',filter:'all',folder:'',selected:new Set(),focused:null,collapsed:new Set(['']),preview:'diff',logs:[],busy:false,failed:false,workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas',workspaceId:null,selectionVersion:0};
 let toastTimer;
+let modalView='',workspaceRequest=0,workspaceCatalog=null;
 function notify(message){$('toast').textContent=message;$('toast').classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.add('hidden'),3500);}
 function log(message,level='INFO'){state.logs.push({time:new Date().toLocaleTimeString('en-GB'),message,level});state.logs=state.logs.slice(-100);$('activity-log').innerHTML=state.logs.map(r=>`<div class="log-row"><span class="log-time">${esc(r.time)}</span><span class="log-level ${r.level==='WARN'?'warn':''}">${esc(r.level)}</span><span class="log-text">${esc(r.message)}</span></div>`).join('');$('log-counter').textContent=state.logs.length;$('activity-log').scrollTop=$('activity-log').scrollHeight;}
 const matches=()=>filteredRows(state.rows,state);
@@ -58,7 +59,9 @@ function render(){
  for(const id of ['conflict-count','filter-conflict-count'])$(id).textContent=counts.conflicted;
  $('selected-count').textContent=state.selected.size;$('review').disabled=!state.selected.size||state.failed;$('view-diff').disabled=!state.focused||state.failed;
  $('scope-note').textContent=`${groupsFor(state.rows).length} 个本地变更列表 · ${state.mode==='demo'?'示例工作副本':'仅当前工作副本'}`;
- $('status-summary').textContent=`${counts.total} 项状态 · ${counts.conflicted} 个冲突`;
+ $('status-summary').textContent=state.failed?'状态未知':state.mode==='select'?'待选工作区':`${counts.total} 项状态 · ${counts.conflicted} 个冲突`;
+ $('empty-state').querySelector('strong').textContent=state.failed?'状态未知，未显示结果':state.mode==='select'?'请选择一个授权工作区':'没有匹配的更改';
+ $('empty-state').querySelector('p').textContent=state.failed?'读取失败不代表工作副本干净。':state.mode==='select'?'点击上方打开工作区，仅从已授权目录中选择。':'试试其他关键词，或清除目录和状态筛选。';
  $('folder-scope').classList.toggle('hidden',!state.folder);$('folder-scope').innerHTML=`目录范围：${esc(state.folder)} <button id="reset-folder">清除</button>`;if($('reset-folder'))$('reset-folder').onclick=()=>{state.folder='';render();};
  document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));
  $('conflict-nav').classList.toggle('active',state.filter==='conflicted');$('pending-nav').classList.toggle('active',state.filter!=='conflicted');
@@ -83,7 +86,7 @@ function renderPreview(){
   $('diff-content').innerHTML=demoDiff.map(([kind,code])=>{const oldNo=kind==='h'||kind==='+'?'':old++,newNo=kind==='h'||kind==='-'?'':working++;return `<div class="diff-line ${kind==='+'?'add':kind==='-'?'remove':kind==='h'?'hunk':''}"><span class="line-no">${oldNo}</span><span class="line-no">${newNo}</span><span class="line-sign">${kind==='h'?'':esc(kind)}</span><span class="line-code">${esc(code)}</span></div>`;}).join('');
  }else{$('diff-content').innerHTML=`<div class="diff-empty">${demo?'该示例没有内置差异内容。选择 PlayerController.cs 可体验文本差异预览。':'此原型只接入本地 status 元数据，未读取真实文件内容或执行 diff。'}<br>文件：${esc(row.path)}</div>`;}
 }
-function modal(title,content){$('modal-title').textContent=title;$('modal-content').innerHTML=content;if(!$('modal').open)$('modal').showModal();}
+function modal(title,content){modalView='generic';workspaceRequest++;$('modal-title').textContent=title;$('modal-content').innerHTML=content;if(!$('modal').open)$('modal').showModal();}
 function showHistory(){
  const row=state.rows.find(r=>r.id===state.focused);
  if(!row)return notify('先选择一个文件。');
@@ -92,24 +95,91 @@ function showHistory(){
  modal('PlayerController.cs · 示例历史',`<p class="history-disclaimer">以下是虚构历史，用于体验布局。未访问真实仓库。</p><div class="history-list">${demoHistory.map(h=>`<div class="history-item"><strong>r${h.revision}</strong><small>${esc(h.author)} · ${esc(h.time)}</small><p>${esc(h.message)}</p></div>`).join('')}</div>`);
 }
 function review(){const rows=reviewSelection(state.rows,state.selected);modal(`审查选中项 · ${rows.length} 个文件`,`<p>这是只读审查，不会提交。列表包含已选择但被筛选或折叠隐藏的文件；不会自动扩展目录范围。</p><div>${rows.map(r=>`<div class="review-file">${statusTag(r)}<span>${esc(r.path)}</span></div>`).join('')}</div><p class="history-disclaimer">${state.mode==='demo'?'当前为演示数据。':'当前为真实本地状态。'} 提交、还原、归组与 Shelf 操作均未接入。</p>`);log(`打开只读审查：${rows.length} 项明确选择；未发送写操作。`);}
-async function api(path){const r=await fetch(path,{headers:{'X-SVN-Desk-Token':token},cache:'no-store'});if(!r.ok)throw Error('只读状态请求失败。');return r.json();}
-function updateMode(){const demo=state.mode==='demo';$('mode-pill').innerHTML=`<span class="dot"></span>${state.failed?'读取失败 · 状态未知':demo?'演示数据 · 只读原型':state.mode==='live'?'真实本地状态 · 只读':'正在读取状态'}`;$('status-text').textContent=demo?'演示数据，未连接仓库':state.mode==='live'?'只读本地状态 · 未检查仓库连接':'状态不可用，不代表工作副本干净';$('workspace-address').textContent=state.root;$('workspace-name').textContent=state.workspace;$('context-workspace').textContent=state.workspace;$('workspace-description').textContent=demo?'本地工作副本 · 示例':'启动时指定 · 只读';$('branch-label').textContent=demo?'trunk（示例）':'未查询分支';$('revision-label').textContent=demo?'BASE r2841（示例）':'修订见文件行';$('history-indicator').textContent=demo?'示例':'未接入';}
+async function api(path,body){
+ const options={headers:{'X-SVN-Desk-Token':token},cache:'no-store'};
+ if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
+ const r=await fetch(path,options);let data;try{data=await r.json();}catch{throw Error('本地服务返回了无效响应。');}
+ if(!r.ok)throw Error(data.error||'本地请求失败。');return data;
+}
+function updateMode(){
+ const demo=state.mode==='demo',choose=state.mode==='select';
+ $('mode-pill').innerHTML=`<span class="dot"></span>${state.failed?'读取失败 · 状态未知':demo?'演示数据 · 只读原型':choose?'真实模式 · 待选工作区':state.mode==='live'?'真实本地状态 · 只读':'正在读取状态'}`;
+ $('status-text').textContent=state.failed?'状态不可用，不代表工作副本干净':demo?'演示数据，未连接仓库':choose?'尚未选择工作副本，未运行 SVN':'只读本地状态 · 未检查仓库连接';
+ $('workspace-address').textContent=state.root;$('workspace-name').textContent=state.workspace;$('context-workspace').textContent=state.workspace;
+ $('workspace-description').textContent=demo?'本地工作副本 · 示例':choose?'仅可选择授权候选':'当前工作副本 · 只读';
+ $('branch-label').textContent=demo?'trunk（示例）':'未查询分支';$('revision-label').textContent=demo?'BASE r2841（示例）':'修订见文件行';$('history-indicator').textContent=demo?'示例':'未接入';
+}
+function resetWorkspaceScope(){state.selected.clear();state.focused=null;state.folder='';state.query='';state.filter='all';state.collapsed.clear();$('search').value='';}
+function applySnapshot(payload,initial=false){
+ if(!['demo','live','select'].includes(payload.mode))throw Error('状态模式无效。');
+ const rows=payload.mode==='demo'?structuredClone(demoRows):payload.rows;
+ if(!Array.isArray(rows)||rows.some(r=>!r||typeof r.id!=='string'||typeof r.path!=='string'))throw Error('状态行无效。');
+ const changed=state.workspaceId!==(payload.workspaceId||null)||state.mode!==payload.mode||state.selectionVersion!==(payload.selectionVersion||0);
+ if(changed)resetWorkspaceScope();
+ state.workspaceId=payload.workspaceId||null;state.selectionVersion=payload.selectionVersion||0;
+ state.workspace=payload.workspace||state.workspace;state.root=payload.root||state.root;
+ state.rows=rows;state.mode=payload.mode;state.failed=false;$('live-error').classList.add('hidden');
+ const ids=new Set(rows.map(r=>r.id));state.selected=new Set([...state.selected].filter(id=>ids.has(id)));
+ if(!ids.has(state.focused)){state.focused=state.mode==='demo'?demoRows[0].id:rows[0]?.id||null;if(initial&&state.mode==='demo'&&state.focused)state.selected.add(state.focused);}
+ // Retain the original demo's initial folded default group.
+ if(initial&&state.mode==='demo')state.collapsed.add('');
+ updateMode();render();$('read-time').textContent=state.mode==='select'?'等候选择':`已读取 ${new Date().toLocaleTimeString('en-GB')}`;
+}
+function failSnapshot(message){state.failed=true;state.rows=[];state.selected.clear();state.focused=null;if(state.mode==='loading')state.mode='error';$('live-error').textContent=message;$('live-error').classList.remove('hidden');updateMode();render();$('read-time').textContent='状态未知';}
+function setBusy(busy){state.busy=busy;$('refresh').disabled=busy;$('open-workspace').disabled=busy;}
 async function refresh(initial=false){
- if(state.busy)return;state.busy=true;$('refresh').disabled=true;$('read-time').textContent='正在读取…';
+ if(state.busy)return;setBusy(true);$('read-time').textContent='正在读取…';
  try{
   const config=standalone?{mode:'demo',workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas'}:await api('/api/config');
+  // Identity is known even if the subsequent status read fails.
+  state.workspace=config.workspace;state.root=config.root;
+  if(config.mode==='live'||config.mode==='select')state.mode=config.mode;
   const payload=standalone?{mode:'demo'}:await api('/api/status');
-  if(config.mode!==payload.mode || !['demo','live'].includes(config.mode))throw Error('Mode mismatch');
-  state.workspace=payload.workspace||config.workspace;state.root=payload.root||config.root;
-  state.rows=payload.mode==='demo'?structuredClone(demoRows):payload.rows;
-  if(!Array.isArray(state.rows))throw Error('Invalid rows');
-  state.mode=payload.mode;state.failed=false;$('live-error').classList.add('hidden');
-  const ids=new Set(state.rows.map(r=>r.id));state.selected=new Set([...state.selected].filter(id=>ids.has(id)));
-  if(!ids.has(state.focused)){state.focused=state.mode==='demo'?demoRows[0].id:state.rows[0]?.id||null;if(initial&&state.focused)state.selected.add(state.focused);}
-  updateMode();render();$('read-time').textContent=`已读取 ${new Date().toLocaleTimeString('en-GB')}`;
-  log(state.mode==='demo'?`加载 ${state.rows.length} 项内置演示状态；未运行 SVN。`:`完成本地 svn status：${state.rows.length} 项状态；未查询远程。`);
- }catch(error){state.failed=true;state.rows=[];state.selected.clear();state.focused=null;if(state.mode==='loading')state.mode='error';$('live-error').textContent='状态读取失败，未显示任何部分或缓存结果。请检查服务、工作副本和 SVN 安装后重试。';$('live-error').classList.remove('hidden');updateMode();$('status-text').textContent='状态读取失败，不代表工作副本干净';render();$('read-time').textContent='读取失败';log('状态读取失败；没有返回部分状态，没有切换到演示数据。','WARN');}
- finally{state.busy=false;$('refresh').disabled=false;}
+  if(config.mode!==payload.mode||config.workspaceId!==payload.workspaceId||config.selectionVersion!==payload.selectionVersion)throw Error('工作区在读取期间发生变化，请重新刷新。');
+  applySnapshot({...config,...payload},initial);
+  log(state.mode==='demo'?`加载 ${state.rows.length} 项内置演示状态；未运行 SVN。`:state.mode==='select'?'尚未选择工作副本；请打开工作区选择器。':`完成本地 svn status：${state.rows.length} 项状态；未查询远程。`);
+ }catch(error){failSnapshot('状态读取失败，未显示任何部分或缓存结果。请检查服务、工作副本和 SVN 安装后重试。');log('状态读取失败；没有返回部分状态，没有切换到演示数据。','WARN');}
+ finally{setBusy(false);}
+}
+const workspaceInstructions=()=>`<p>当前为演示模式，没有扫描本机目录。若要启用真实只读工作区，请使用可信后端和已安装的 SVN 启动：</p><code>python server.py --scan-parent "C:\\Work" --backend-source "C:\\Tools\\svn-desk"</code><p>可重复 --workspace 或 --scan-parent。可选 --settings-file 指定扫描范围外的专用偏好文件，父目录需已存在。网页不能输入任意路径，不能检出、提交或还原。</p>`;
+function renderWorkspaceCatalog(data){
+ workspaceCatalog=data;
+ if(!data.enabled){$('modal-content').innerHTML=workspaceInstructions();return;}
+ const candidates=data.candidates||[];
+ $('modal-content').innerHTML=`<p>仅扫描启动时授权的目录，寻找已有 .svn 标记。候选不代表仓库身份验证成功；选择后仅运行本地 status，不访问仓库。</p><div class="workspace-tools"><button class="subtle-button" id="rescan-workspaces">重新扫描授权目录</button><span>${data.persistenceEnabled?'成功选择后保存本地偏好':'本次会话选择，不保存偏好'}</span></div>${data.warning?`<p class="workspace-warning" role="alert">${esc(data.warning)}</p>`:''}<div class="workspace-scan-notes">${(data.scans||[]).map(scan=>`<p>${esc(scan.name)}：${scan.complete?'扫描范围内完成':'扫描不完整'} · ${scan.count} 个候选${scan.reasons?.length?` · ${esc(scan.reasons.join(', '))}`:''}${scan.skippedLinks?` · 跳过 ${scan.skippedLinks} 个链接`:''}</p>`).join('')}</div><div class="workspace-candidates">${candidates.length?candidates.map((c,i)=>`<div class="workspace-candidate"><div><strong>${esc(c.name)}</strong><small>${esc(c.path)}</small><span>${c.relation==='nested'?'嵌套候选，不等于 external':'本地候选'} · 仓库身份未验证${c.id===data.selectedId?' · 当前':''}</span></div><button class="primary-button" data-workspace-index="${i}">选择并读取状态</button></div>`).join(''):'<p class="workspace-warning">没有找到可选工作区。扫描不完整时不代表目录中没有其他副本。</p>'}</div><p id="workspace-result" role="status"></p><p class="history-disclaimer">切换成功会清空文件选区、目录和搜索范围。差异、历史、提交、还原与 Shelf 均未接入。</p>`;
+ $('rescan-workspaces').onclick=loadWorkspaceCatalog;
+ document.querySelectorAll('[data-workspace-index]').forEach(button=>button.onclick=()=>selectWorkspace(candidates[Number(button.dataset.workspaceIndex)].id));
+}
+async function loadWorkspaceCatalog(){
+ const request=++workspaceRequest;
+ $('modal-content').innerHTML='<p role="status">正在扫描已授权目录… 不读取文件内容，不运行 SVN。</p>';
+ try{const data=await api('/api/workspaces');if(request===workspaceRequest&&$('modal').open&&modalView==='workspaces'){
+  if(data.current&&data.current.selectionVersion!==state.selectionVersion){
+   if(data.current.mode==='select')applySnapshot({...data.current,rows:[]});
+   else{state.workspace=data.current.workspace;state.root=data.current.root;resetWorkspaceScope();failSnapshot('当前工作区已改变，请刷新状态后继续。');}
+  }
+  renderWorkspaceCatalog(data);
+ }}
+ catch(error){if(request===workspaceRequest&&$('modal').open&&modalView==='workspaces'){$('modal-content').innerHTML=`<p class="workspace-warning" role="alert">${esc(error.message)}</p><button class="subtle-button" id="retry-workspaces">重试扫描</button>`;$('retry-workspaces').onclick=loadWorkspaceCatalog;}}
+}
+async function openWorkspaces(){
+ if(state.busy)return;
+ modal('选择只读工作区',standalone?workspaceInstructions():'');modalView='workspaces';
+ if(!standalone)await loadWorkspaceCatalog();
+}
+async function selectWorkspace(id){
+ if(state.busy)return;setBusy(true);
+ document.querySelectorAll('[data-workspace-index],#rescan-workspaces').forEach(b=>b.disabled=true);
+ $('workspace-result').textContent='正在读取此候选的本地状态…';
+ state.rows=[];state.selected.clear();state.focused=null;render();$('read-time').textContent='正在切换…';
+ try{
+  const payload=await api('/api/workspace-selection',{id});
+  applySnapshot(payload);log('已切换只读工作区；文件选区与筛选范围已清空。');
+  const result=payload.warning|| (payload.selectionSaved?'工作区已选择，本地偏好已保存。':'工作区已选择，仅用于本次会话。');
+  if($('modal').open&&modalView==='workspaces'){if(workspaceCatalog)renderWorkspaceCatalog({...workspaceCatalog,selectedId:payload.workspaceId,selectionVersion:payload.selectionVersion});$('workspace-result').textContent=result;}
+  notify(result);
+ }catch(error){failSnapshot('工作区选择未能确认。请刷新状态以确认当前工作区；没有显示缓存或演示结果。');if($('modal').open&&modalView==='workspaces')$('workspace-result').textContent=error.message;log('工作区选择未能确认，请刷新当前状态。','WARN');}
+ finally{setBusy(false);document.querySelectorAll('[data-workspace-index],#rescan-workspaces').forEach(b=>b.disabled=false);}
 }
 function clearFilters(){state.query='';state.filter='all';state.folder='';$('search').value='';render();}
 paintIcons();
@@ -129,8 +199,9 @@ $('nav-toggle').onclick=()=>$('sidebar').classList.toggle('force-visible');
 $('workspace-tab').onclick=()=>{$('workspace-tab').classList.add('active');$('repository-tab').classList.remove('active');$('repository-notice').classList.add('hidden');$('folder-tree').classList.remove('hidden');};
 $('repository-tab').onclick=()=>{$('repository-tab').classList.add('active');$('workspace-tab').classList.remove('active');$('repository-notice').classList.remove('hidden');$('folder-tree').classList.add('hidden');};
 $('history-tab').onclick=showHistory;
-$('open-workspace').onclick=()=>modal('打开真实工作副本',`<p>原型固定读取启动时指定的工作副本，不提供网页任意路径输入。以下方式仅运行本地 status：</p><code>python server.py --workspace "C:\\Work\\Project" \\\n  --backend-source "C:\\Tools\\svn-desk"</code><p>需要已有 SVN 工作副本、可信 SVN 命令行程序和原版 SVN Desk 后端。此环境尚未验证真实 SVN；当前示例不证明连接成功。</p>`);
+$('open-workspace').onclick=openWorkspaces;
 $('help').onclick=()=>modal('SVN Desk · Web 原型',`<p>现代 Web 视觉，保留工作区树、原生 changelist 分组、选中项审查、详情与独立日志的桌面工作流。</p><ul><li>真实可用：筛选、选中、折叠分组、目录范围、只读审查与布局切换。</li><li>演示：选定示例文件的差异、历史与工作副本身份。</li><li>可选桥接：复用原后端读取真实本地 status。</li><li>未实现：提交、还原、归组、Shelf、远程仓库浏览。</li></ul><p>快捷键：Ctrl/Cmd K 搜索 · F5 刷新 · ↑ ↓ 浏览 · 空格选择 · Esc 关闭弹窗</p><p>运行方式：浏览器原型。Tauri 壳仅提供源码，尚未编译或完成 Windows 验收。</p>`);
+$('modal').addEventListener('close',()=>{workspaceRequest++;modalView='';});
 $('modal-close').onclick=$('modal-done').onclick=()=>$('modal').close();$('modal').addEventListener('click',e=>{if(e.target===$('modal')){const r=$('modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('modal').close();}});
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('search').focus();}if(e.key==='F5'){e.preventDefault();refresh();}});
 log('启动只读 Web 原型；所有 SVN 写操作均未接入。','WARN');await refresh(true);

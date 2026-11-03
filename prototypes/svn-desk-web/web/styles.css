@@ -9,3 +9,16 @@
 .folder-item.depth-0{padding-left:9px}.folder-item.depth-1{padding-left:21px}.folder-item.depth-2{padding-left:34px}.folder-item.depth-3{padding-left:47px}.folder-item.depth-4{padding-left:59px}
 /* Keep the file list useful on short laptop displays, not just large monitors. */
 @media(max-height:820px){.app-header{height:46px}.toolbar{min-height:44px;padding-top:6px;padding-bottom:6px}.addressbar{min-height:29px}.content-tabs{min-height:38px}.content-tabs>button:not(.icon-button){height:38px}.side-tabs,.details-heading{height:38px}.content-header{padding:12px 17px 11px}.content-header .eyebrow{margin-bottom:5px}.content-header h1{font-size:18px}.content-header p{margin-top:5px}.filterbar{padding-bottom:10px}.preview-panel{height:147px}.list-footer{min-height:26px}.activity-panel{height:76px}.activity-log{height:43px;padding-top:4px;padding-bottom:4px}.file-table td{height:32px}.group-row td,.group-row button{height:31px}.details-panel.force-visible{top:119px;bottom:101px}.sidebar.force-visible{top:119px;bottom:101px}}
+
+/* Workspace selection uses the existing modal; no arbitrary path input. */
+.workspace-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0;color:var(--muted);font-size:12px}
+.workspace-scan-notes{font-size:12px;color:var(--muted);margin:8px 0 16px}
+.workspace-scan-notes p{margin:4px 0}
+.workspace-candidates{display:grid;gap:10px;max-height:320px;overflow:auto}
+.workspace-candidate{display:flex;align-items:center;justify-content:space-between;gap:14px;border:1px solid var(--border);border-radius:8px;padding:13px}
+.workspace-candidate>div{min-width:0;display:grid;gap:5px}
+.workspace-candidate small{overflow-wrap:anywhere;color:var(--muted)}
+.workspace-candidate span{font-size:11px;color:var(--muted)}
+.workspace-candidate button{flex-shrink:0}
+.workspace-warning,#workspace-result{color:#a76718;overflow-wrap:anywhere}
+@media(max-width:700px){.workspace-candidate{align-items:flex-start;flex-direction:column}}

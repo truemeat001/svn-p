@@ -78,6 +78,7 @@ class AdapterTests(unittest.TestCase):
         adapter=ReadOnlyAdapter.__new__(ReadOnlyAdapter)
         adapter.workspace=Path('/fixture/workspace')
         adapter.client=Mock();adapter.client.status.return_value=entries
+        adapter._check_workspace=Mock()
         adapter._busy=threading.Lock()
         return adapter
     def test_snapshot_calls_only_local_status_and_preserves_native_identity(self):
