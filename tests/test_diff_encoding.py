@@ -1,4 +1,6 @@
 """Diff display preserves UTF-8 segments without guessing mixed native encodings."""
+from contextlib import ExitStack
+import locale
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,10 +15,16 @@ from svn_client.history_ui import comparison_preview
 class DiffDecodingTests(unittest.TestCase):
     def test_utf8_is_unchanged_across_platform_locales(self):
         raw = 'Index: 中文.txt\r\n@@ -1 +1 @@\r\n-旧值\r\n+新内容\t✓😀\r\n'.encode()
-        for locale in ['cp936', 'cp1252', 'cp932', 'UTF-8']:
-            with self.subTest(locale=locale), patch('locale.getencoding', return_value=locale):
+        for encoding in ['cp936', 'cp1252', 'cp932', 'UTF-8']:
+            with self.subTest(locale=encoding), ExitStack() as mocks:
+                mocks.enter_context(patch('locale.getpreferredencoding', return_value=encoding))
+                # Python 3.10 has only getpreferredencoding; do not invent the
+                # newer API or skip the same decoding assertions on that runtime.
+                if hasattr(locale, 'getencoding'):
+                    mocks.enter_context(patch('locale.getencoding', return_value=encoding))
                 text, unknown, controls = decode_diff_output(raw)
-            self.assertEqual(text.encode(), raw); self.assertEqual((unknown, controls), (0, 0))
+                self.assertEqual(text.encode(), raw)
+                self.assertEqual((unknown, controls), (0, 0))
 
     def test_native_cp936_headers_do_not_corrupt_utf8_hunks(self):
         header = 'Index: 中文.txt\n--- 中文.txt\n+++ 中文.txt\n'.encode('cp936')
