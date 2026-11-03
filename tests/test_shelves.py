@@ -7,11 +7,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import zlib
 
 from svn_client.shelves import ShelfConflict, ShelfError, ShelfManager, _safe_relative
 
@@ -131,6 +133,216 @@ class ShelvesTests(unittest.TestCase):
         data = json.loads(path.read_text())
         fn(data)
         path.write_text(json.dumps(data))
+
+    def test_compressed_large_file_and_binary_properties_roundtrip(self):
+        content = b"line\x00\xff\r\n" * (384 * 1024)
+        properties = {"custom:binary": enc(bytes(range(256)))}
+        self.manager.node("large.bin", "modified", content=content, props=properties)
+        shelf = self.manager.create("compressed")
+        manifest = json.loads(self.manifest_path(shelf).read_text())
+        entry = manifest["entries"][0]
+        self.assertEqual(manifest["format"], 2)
+        self.assertEqual(entry["blob_encoding"], "zlib")
+        self.assertLess(entry["stored_size"], len(content) // 100)
+        self.assertEqual((self.store / shelf["id"] / "blobs" / entry["blob"]).stat().st_size, entry["stored_size"])
+        self.manager.clean()
+        self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "large.bin").read_bytes(), content)
+        self.assertEqual(self.manager.current_props["large.bin"], properties)
+
+    def test_incompressible_small_and_empty_files_use_raw_fallback(self):
+        contents = {"random.bin": random.Random(42).randbytes(2 * 1024 * 1024),
+                    "tiny.txt": b"tiny" * 20, "empty": b""}
+        for name, content in contents.items():
+            self.manager.node(name, "modified", content=content)
+        shelf = self.manager.create("raw fallback")
+        entries = self.manager.details(shelf["id"])["entries"]
+        for entry in entries:
+            self.assertEqual(entry["blob_encoding"], "raw")
+            self.assertEqual(entry["stored_size"], len(contents[entry["path"]]))
+        self.manager.clean()
+        self.manager.restore(shelf["id"])
+        for name, content in contents.items():
+            self.assertEqual((self.wc / name).read_bytes(), content)
+
+    def test_representative_synthetic_storage_savings(self):
+        size = 4 * 1024 * 1024
+        line = b'{"asset":"Characters/Hero","state":"modified","revision":1234}\r\n'
+        random_data = random.Random(42).randbytes(size)
+        samples = {"structured_text": (line * (size // len(line) + 1))[:size],
+                   "repeated_binary": bytes(range(256)) * (size // 256),
+                   "random_binary": random_data,
+                   "already_compressed": zlib.compress(random_data, 6)}
+        for name, content in samples.items():
+            self.manager.node(name, "modified", content=content)
+        shelf = self.manager.create("synthetic storage measurement")
+        entries = self.manager.details(shelf["id"])["entries"]
+        for entry in entries:
+            if entry["path"] in ("structured_text", "repeated_binary"):
+                self.assertEqual(entry["blob_encoding"], "zlib")
+                self.assertLess(entry["stored_size"], entry["size"] // 100)
+            else:
+                self.assertEqual(entry["blob_encoding"], "raw")
+                self.assertEqual(entry["stored_size"], entry["size"])
+        self.manager.clean()
+        self.manager.restore(shelf["id"])
+        for name, content in samples.items():
+            self.assertEqual((self.wc / name).read_bytes(), content)
+
+    def test_duplicate_compressed_content_uses_one_blob(self):
+        content = b"shared bytes\x00\xff" * 10000
+        self.manager.node("first", "modified", content=content)
+        self.manager.node("second", "modified", content=content)
+        shelf = self.manager.create("deduplicated within shelf")
+        self.assertEqual(len(list((self.store / shelf["id"] / "blobs").iterdir())), 1)
+        self.manager.clean()
+        self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "first").read_bytes(), content)
+        self.assertEqual((self.wc / "second").read_bytes(), content)
+
+    def test_legacy_format_one_is_readable_without_rewrite(self):
+        content = b"legacy\x00\xff\r\n" * 10000
+        self.manager.node("legacy.bin", "modified", content=content,
+                          props={"binary": enc(b"\x00\xff\r\n")})
+        shelf = self.manager.create("legacy fixture")
+        manifest = json.loads(self.manifest_path(shelf).read_text())
+        manifest["format"] = 1
+        for entry in manifest["entries"]:
+            (self.store / shelf["id"] / "blobs" / entry["blob"]).write_bytes(content)
+            del entry["blob_encoding"], entry["stored_size"]
+        self.manifest_path(shelf).write_text(json.dumps(manifest))
+        before = self.manifest_path(shelf).read_bytes()
+        self.assertEqual(self.manager.list()[0]["id"], shelf["id"])
+        self.manager.details(shelf["id"])
+        self.manager.clean()
+        self.manager.preflight_restore(shelf["id"])
+        self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "legacy.bin").read_bytes(), content)
+        self.assertEqual(self.manager.current_props["legacy.bin"]["binary"], enc(b"\x00\xff\r\n"))
+        self.assertEqual(self.manifest_path(shelf).read_bytes(), before)
+
+    def test_large_file_paths_do_not_use_read_bytes(self):
+        self.manager.node("large", "modified", content=b"abc\x00\xff" * (512 * 1024))
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded file read")):
+            self.manager.preflight_create()
+            shelf = self.manager.create("streaming")
+            self.manager.details(shelf["id"])
+            self.manager.clean()
+            self.manager.preflight_restore(shelf["id"])
+            self.manager.restore(shelf["id"])
+
+    def test_compressed_corruption_truncation_and_trailing_streams_are_refused(self):
+        self.manager.node("large", "modified", content=b"compressible\x00\xff" * 10000)
+        shelf = self.manager.create("validate compression")
+        self.manager.clean()
+        manifest = json.loads(self.manifest_path(shelf).read_text())
+        entry = manifest["entries"][0]
+        blob = self.store / shelf["id"] / "blobs" / entry["blob"]
+        original = blob.read_bytes()
+        variants = (original[:-1], original + b"garbage", original + zlib.compress(b"second stream"),
+                    b"\x00" + original[1:])
+        for content in variants:
+            with self.subTest(content_length=len(content)):
+                blob.write_bytes(content)
+                self.mutate_manifest(shelf, lambda data: data["entries"][0].update(stored_size=len(content)))
+                with self.assertRaisesRegex(ShelfError, "damaged"):
+                    self.manager.restore(shelf["id"])
+                self.assertEqual((self.wc / "large").read_bytes(), b"base")
+                self.assertTrue(self.manifest_path(shelf).exists())
+
+    def test_expansion_stops_at_declared_size_without_replacing_destination(self):
+        self.manager.node("bomb", "modified", content=b"A" * (2 * 1024 * 1024))
+        shelf = self.manager.create("bounded expansion")
+        self.manager.clean()
+        self.mutate_manifest(shelf, lambda data: data["entries"][0].update(size=8192))
+        with self.assertRaisesRegex(ShelfError, "expanded size exceeds"):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "bomb").read_bytes(), b"base")
+        self.assertEqual(list(self.wc.glob(".svn-restore-*")), [])
+
+    def test_manifest_size_limits_are_checked_before_decompression(self):
+        self.manager.node("large", "modified", content=b"A" * 4096)
+        shelf = self.manager.create("size limits")
+        with patch("svn_client.shelves._MAX_FILE_BYTES", 1024), \
+             patch.object(self.manager, "_copy_verified_blob", side_effect=AssertionError("must not decompress")):
+            with self.assertRaisesRegex(ShelfError, "size limits"):
+                self.manager.details(shelf["id"])
+        with patch("svn_client.shelves._MAX_SHELF_BYTES", 1024), \
+             patch.object(self.manager, "_copy_verified_blob", side_effect=AssertionError("must not decompress")):
+            with self.assertRaisesRegex(ShelfError, "size limits"):
+                self.manager.details(shelf["id"])
+
+    def test_create_size_limits_preserve_sources_and_existing_shelves(self):
+        shelf = self.simple()
+        with patch("svn_client.shelves._MAX_FILE_BYTES", 1):
+            with self.assertRaisesRegex(ShelfError, "limit"):
+                self.manager.create("too large")
+        with patch("svn_client.shelves._MAX_SHELF_BYTES", 1):
+            with self.assertRaisesRegex(ShelfError, "limit"):
+                self.manager.preflight_create()
+        self.assertEqual(self.manager.list()[0]["id"], shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"changed\x00\xff\r\n")
+        self.assertEqual(list(self.store.glob(".creating-*")), [])
+
+    def test_invalid_encoding_and_inconsistent_duplicate_metadata_are_rejected(self):
+        shelf = self.simple()
+        original = self.manifest_path(shelf).read_text()
+        for update in ({"blob_encoding": "unknown"}, {"stored_size": True},
+                       {"stored_size": -1}, {"stored_size": 0}, {"size": True}):
+            with self.subTest(update=update):
+                self.manifest_path(shelf).write_text(original)
+                self.mutate_manifest(shelf, lambda data: data["entries"][0].update(update))
+                with self.assertRaises(ShelfError):
+                    self.manager.details(shelf["id"])
+        self.manifest_path(shelf).write_text(original)
+        def duplicate(data):
+            extra = copy.deepcopy(data["entries"][0])
+            extra.update(path="second", size=extra["size"] + 1, stored_size=extra["stored_size"] + 1)
+            data["entries"].append(extra)
+        self.mutate_manifest(shelf, duplicate)
+        with self.assertRaisesRegex(ShelfError, "Inconsistent duplicate"):
+            self.manager.details(shelf["id"])
+
+    def test_compressed_blob_changed_after_preflight_preserves_destination(self):
+        self.manager.node("large", "modified", content=b"A" * 4096)
+        shelf = self.manager.create("concurrent blob damage")
+        self.manager.clean()
+        original = self.manager._preflight
+        def preflight(manifest):
+            result = original(manifest)
+            blob = self.store / shelf["id"] / "blobs" / manifest["entries"][0]["blob"]
+            blob.write_bytes(b"corruption")
+            return result
+        with patch.object(self.manager, "_preflight", side_effect=preflight):
+            with self.assertRaisesRegex(ShelfError, "damaged"):
+                self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "large").read_bytes(), b"base")
+        self.assertEqual(list(self.wc.glob(".svn-restore-*")), [])
+        self.assertTrue(self.manifest_path(shelf).exists())
+
+    def test_failed_atomic_publish_does_not_remove_existing_shelves(self):
+        shelf = self.simple()
+        with patch("svn_client.shelves.os.replace", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                self.manager.create("cannot publish")
+        self.assertEqual([item["id"] for item in self.manager.list()], [shelf["id"]])
+        self.assertEqual(list(self.store.glob(".creating-*")), [])
+        self.assertFalse((self.store / ".operation.lock").exists())
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"changed\x00\xff\r\n")
+
+    def test_other_manager_operation_and_abandoned_temporary_are_not_removed(self):
+        shelf = self.simple()
+        abandoned = self.store / ".creating-abandoned"
+        abandoned.mkdir()
+        (abandoned / "recoverable").write_bytes(b"keep me")
+        other = FakeManager(self.wc, self.store)
+        with self.manager._locked():
+            with self.assertRaisesRegex(ShelfError, "Another shelf operation"):
+                other.delete(shelf["id"])
+            self.assertTrue((self.store / ".operation.lock").exists())
+        self.manager.create("another shelf")
+        self.assertEqual((abandoned / "recoverable").read_bytes(), b"keep me")
+        self.assertEqual(len(self.manager.list()), 2)
 
     def test_lossless_roundtrip_and_backup_never_reverts(self):
         m = self.manager
@@ -564,6 +776,20 @@ class RealSvnShelfTests(unittest.TestCase):
         self.svn("revert", "translated.txt")
         self.manager.restore(shelf["id"])
         self.assertEqual(path.read_bytes(), expected)
+
+    def test_real_compressed_binary_and_property_roundtrip(self):
+        content = bytes(range(256)) * 8192
+        (self.wc / "file.bin").write_bytes(content)
+        prop = self.root / "prop.bin"
+        prop.write_bytes(b"\x00\xff\r\n")
+        self.svn("propset", "custom:binary", "--file", str(prop), "file.bin")
+        shelf = self.manager.create("compressed real integration")
+        entry = self.manager.details(shelf["id"])["entries"][0]
+        self.assertEqual(entry["blob_encoding"], "zlib")
+        self.svn("revert", "file.bin")
+        self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), content)
+        self.assertEqual(self.svn("propget", "--strict", "custom:binary", "file.bin"), b"\x00\xff\r\n")
 
     def test_real_local_conflict_refuses_entire_restore(self):
         (self.wc / "file.bin").write_bytes(b"edit")

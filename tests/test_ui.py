@@ -6,7 +6,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from svn_client.backend import StatusEntry
-from svn_client.ui import (ChangelistDialog, SvnDesk, WrapToolbar, directory_entries, fit_window, grouped_entries, has_local_changes,
+from svn_client.ui import (ChangelistDialog, CheckoutDialog, WorkspaceDiscoveryDialog, WorkspaceManagerDialog,
+                           SvnDesk, WrapToolbar, directory_entries, fit_window, grouped_entries, has_local_changes,
                            local_files, read_groupable_status, read_preview, status_label)
 
 
@@ -325,7 +326,7 @@ class NavigationTests(unittest.TestCase):
         """Catch incomplete UI snapshots before a display is available."""
         import ast
         import inspect
-        for cls in (SvnDesk, ChangelistDialog, WrapToolbar):
+        for cls in (SvnDesk, ChangelistDialog, CheckoutDialog, WorkspaceDiscoveryDialog, WorkspaceManagerDialog, WrapToolbar):
             tree = ast.parse(inspect.getsource(cls))
             targets = set()
             for node in ast.walk(tree):

@@ -1,8 +1,10 @@
 """Small, dependency-free interface to the installed Subversion CLI.
 
-The CLI is always invoked as an argument vector, never through a shell. The
-client uses SVN's existing credential cache, never prompts, and never accepts a
-password argument. Authentication must be configured with a trusted SVN client.
+The CLI is always invoked as an argument vector, never through a shell. SVN's
+own prompts are disabled and existing credentials are reused without accepting
+password arguments. External transports can have their own prompt behavior;
+the dedicated checkout helper therefore excludes svn+ssh. Authentication must
+be configured with a trusted SVN client.
 This module is a local desktop utility, not a sandbox for untrusted commands.
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import locale
+import math
 import os
 from pathlib import Path
 import re
@@ -667,3 +670,115 @@ class SvnClient:
 
     def version(self) -> str:
         return self.command(["version", "--quiet"]).stdout.strip()
+
+
+def _check_checkout_path_components(destination: Path) -> None:
+    for component in reversed((destination, *destination.parents)):
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError("The checkout destination cannot be inspected safely.") from error
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        ):
+            raise ValueError("Checkout destinations cannot contain symbolic links or junctions.")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("The checkout destination and its existing parents must be directories.")
+
+
+def validate_checkout_destination(destination: str | os.PathLike[str]) -> Path:
+    """Read-only validation for an explicit new or empty checkout directory.
+
+    Its immediate parent must already exist. This does not create directories,
+    delete anything, or reserve the path against another process changing it.
+    """
+    value = os.fspath(destination)
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise ValueError("Choose a nonempty local checkout destination.")
+    path = Path(os.path.abspath(Path(value).expanduser()))
+    if path.name.lower() == ".svn":
+        raise ValueError("The SVN administrative directory name cannot be used as a checkout destination.")
+    _check_checkout_path_components(path)
+    if not path.parent.is_dir():
+        raise ValueError("The checkout destination's parent directory must already exist.")
+    for ancestor in (path, *path.parents):
+        if os.path.lexists(ancestor / ".svn"):
+            raise ValueError("Checkout cannot be nested inside an existing SVN working copy.")
+    if path.exists():
+        try:
+            if any(path.iterdir()):
+                raise ValueError("Checkout requires a new or empty directory; existing contents will not be overwritten.")
+        except OSError as error:
+            raise ValueError("The checkout destination cannot be inspected safely.") from error
+    return path
+
+
+def validate_checkout_url(url: str) -> str:
+    """Validate a repository URL locally, without logging it or contacting it."""
+    if not isinstance(url, str) or not url or url != url.strip() or any(ord(c) < 32 or ord(c) == 127 for c in url):
+        raise ValueError("Enter a repository URL without surrounding whitespace or control characters.")
+    try:
+        parsed = urlsplit(url)
+        password, hostname = parsed.password, parsed.hostname
+    except ValueError as error:
+        # Do not include the supplied URL or urllib's input-bearing diagnostics.
+        raise ValueError("The repository URL is invalid.") from error
+    if password is not None:
+        raise ValueError("Passwords in repository URLs are not allowed. Use SVN's existing credential cache.")
+    if parsed.scheme.lower() == "svn+ssh":
+        raise ValueError("Built-in checkout does not run svn+ssh because an external SSH helper can prompt or outlive the SVN timeout. Check out with your trusted SVN/SSH client, then add that existing working copy.")
+    if "://" not in url or parsed.scheme.lower() not in {"http", "https", "svn", "file"} or (parsed.scheme.lower() != "file" and not hostname):
+        raise ValueError("Use an http, https, svn, or file repository URL.")
+    if parsed.fragment or parsed.query or (parsed.scheme.lower() == "file" and not parsed.path):
+        raise ValueError("Repository URLs cannot contain a query or fragment; encode literal filename characters in the URL.")
+    return url
+
+
+def checkout_working_copy(url: str, destination: str | os.PathLike[str], *,
+                          executable: str | os.PathLike[str] | None = None,
+                          timeout: float = 300) -> CommandResult:
+    """Perform an explicitly authorized checkout, retaining all partial output.
+
+    Callers must obtain confirmation of URL and destination before invoking this
+    mutating helper. Externals are excluded. Credentials and certificates must
+    be configured in a trusted SVN client, not supplied in the URL. No automatic
+    retry, force-overwrite, authentication caching, or failure cleanup is done.
+    A timeout or failed verification is not evidence that nothing was created.
+    svn+ssh is deliberately unsupported here because external SSH helpers can
+    prompt independently and survive termination of the SVN parent process.
+    """
+    url = validate_checkout_url(url)
+    try:
+        valid_timeout = not isinstance(timeout, bool) and isinstance(timeout, (int, float)) and math.isfinite(timeout) and timeout > 0
+    except OverflowError:
+        valid_timeout = False
+    if not valid_timeout:
+        raise ValueError("Checkout timeout must be a finite positive number.")
+    path = validate_checkout_destination(destination)
+    client = SvnClient(path.parent, executable=executable, timeout=timeout)
+    with client._lock:
+        validate_checkout_destination(path)
+        try:
+            # Unlike normal SVN targets, checkout's explicit local destination
+            # is not peg-parsed. Preserve every literal '@' without a suffix.
+            result = client.command(["checkout", "--ignore-externals", "--", url, str(path)])
+        except SvnError as error:
+            raise SvnError(
+                "Checkout did not finish successfully. Any files created at the destination were retained; "
+                "inspect that directory before retrying. " + str(error), error.result
+            ) from error
+        try:
+            _check_checkout_path_components(path)
+            info = SvnClient(path, executable=client.executable, timeout=timeout).info()
+            actual_root = str(info.get("wc_root") or "")
+            if not actual_root or os.path.normcase(os.path.abspath(actual_root)) != os.path.normcase(str(path)):
+                raise ValueError("SVN did not report the selected destination as the working-copy root.")
+        except (SvnError, ValueError, OSError) as error:
+            raise SvnError(
+                "The checkout command completed, but working-copy verification failed. "
+                "The destination was retained; inspect it before retrying. " + str(error)
+            ) from error
+        return result

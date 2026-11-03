@@ -6,7 +6,7 @@ submits changes, reverts files, or restores a shelf without an explicit dialog.
 from __future__ import annotations
 
 import argparse
-import json
+import copy
 import os
 from pathlib import Path
 import queue
@@ -19,6 +19,9 @@ from urllib.parse import quote
 from .backend import SvnClient, discover_svn
 from .display import configure_display, enable_high_dpi
 from .shelves import ShelfManager
+from .workspaces import (load_settings, normalize_settings, remember_workspace,
+                         remove_workspace, rename_workspace, save_settings,
+                         startup_workspace, validate_name)
 
 
 APP_NAME = "SVN Desk"
@@ -343,6 +346,173 @@ class WrapToolbar(ttk.Frame):
             used += requested
 
 
+class WorkspaceManagerDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.result = None
+        self.display = parent.display
+        self.title("本地工作区管理")
+        self.transient(parent)
+        fit_window(self, self.display, 850, 480, 650, 380)
+        body = ttk.Frame(self, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="已登记的 SVN 工作副本", style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(body, text="一个工作区对应一个独立工作副本。这里保存名称和路径，不创建 P4V 式服务器工作区。",
+                  wraplength=self.display.px(780)).pack(anchor="w", pady=(8, 12))
+        tree_frame = ttk.Frame(body)
+        tree_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tree_frame, columns=("name", "path", "state"), show="headings", selectmode="browse")
+        for key, title, width in (("name", "名称", 170), ("path", "本地目录", 470), ("state", "状态", 120)):
+            self.tree.heading(key, text=title, anchor="w")
+            self.tree.column(key, width=self.display.px(width), minwidth=80)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ybar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        xbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+        for record in parent.settings.get("workspaces", []):
+            state = "当前打开" if record["id"] == parent._active_workspace_id else "上次打开" if record["id"] == parent.settings.get("last_workspace_id") else "已登记"
+            if record["id"] in parent._workspace_errors:
+                state = "上次打开失败"
+            self.tree.insert("", "end", iid=record["id"], values=(record["name"], record["path"], state))
+            if record["id"] == parent._active_workspace_id:
+                self.tree.selection_set(record["id"])
+        self.restore_var = tk.BooleanVar(value=parent.settings.get("restore_last_workspace", True))
+        ttk.Checkbutton(body, text="启动时自动恢复上次成功打开的工作区", variable=self.restore_var).pack(anchor="w", pady=(10, 8))
+        buttons = WrapToolbar(body)
+        buttons.pack(fill="x")
+        for label, action in (("打开 / 切换", "open"), ("重命名", "rename"), ("重新定位目录…", "relink"),
+                              ("移除记录…", "remove"), ("添加已有副本…", "add"), ("新建 / 检出…", "checkout"),
+                              ("扫描父目录…", "discover"), ("关闭", "close")):
+            button = ttk.Button(buttons, text=label, command=lambda a=action: self._accept(a))
+            buttons.add_button(button)
+        ttk.Label(body, text="移除记录不会删除文件；路径失效时可重新定位。多个副本分别打开和提交，不合并修改范围。",
+                  wraplength=self.display.px(780), style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        self.tree.bind("<Double-1>", lambda event: self._accept("open"))
+        self.bind("<Escape>", lambda event: self._accept("close"))
+        self.protocol("WM_DELETE_WINDOW", lambda: self._accept("close"))
+        self.grab_set()
+        self.wait_window()
+
+    def _accept(self, action):
+        selection = self.tree.selection()
+        if action in {"open", "rename", "relink", "remove"} and not selection:
+            messagebox.showinfo("选择工作区", "请先选择一条工作区记录。", parent=self)
+            return
+        self.result = (action, selection[0] if selection else None, self.restore_var.get())
+        self.destroy()
+
+
+class CheckoutDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.result = None
+        self.display = parent.display
+        self.title("新建本地 SVN 工作区")
+        self.transient(parent)
+        fit_window(self, self.display, 720, 370, 600, 340)
+        body = ttk.Frame(self, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="从仓库检出到新的本地目录", style="Heading.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(body, text="这会下载一个 SVN 工作副本，并保存其名称和本地路径。不是创建服务器上的仓库或工作区。",
+                  wraplength=self.display.px(660)).pack(anchor="w", pady=(0, 12))
+        self.name_var, self.url_var, self.path_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        for label, variable in (("工作区名称", self.name_var), ("仓库 URL", self.url_var), ("本地目录", self.path_var)):
+            row = ttk.Frame(body)
+            row.pack(fill="x", pady=5)
+            ttk.Label(row, text=label, width=12).pack(side="left")
+            ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
+            if variable is self.path_var:
+                ttk.Button(row, text="浏览…", command=self._choose_path).pack(side="left", padx=(6, 0))
+        ttk.Label(body, text="目录必须为空或尚不存在，不能位于已有工作副本内。支持 http/https/svn/file，不支持内置 svn+ssh 检出。\nURL 不得含密码、查询参数或片段。@修订按 SVN 语法生效；字面 @ 路径需在末尾再加 @。\n使用已配置的认证，不下载 externals；失败后保留目标目录中的文件。",
+                  wraplength=self.display.px(660), style="Muted.TLabel").pack(anchor="w", pady=(12, 15))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="取消", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="检查并继续…", style="Primary.TButton", command=self._accept).pack(side="right", padx=8)
+        self.bind("<Escape>", lambda event: self.destroy())
+        self.grab_set()
+        self.wait_window()
+
+    def _choose_path(self):
+        folder = filedialog.askdirectory(title="选择空目录，或在输入框填写一个新目录", parent=self)
+        if folder:
+            self.path_var.set(folder)
+
+    def _accept(self):
+        try:
+            name = validate_name(self.name_var.get())
+        except ValueError as error:
+            messagebox.showwarning("名称无效", str(error), parent=self)
+            return
+        url, path = self.url_var.get().strip(), self.path_var.get().strip()
+        if not url or not path:
+            messagebox.showwarning("信息不完整", "请填写仓库 URL 和本地目录。", parent=self)
+            return
+        self.result = name, url, path
+        self.destroy()
+
+
+class WorkspaceDiscoveryDialog(tk.Toplevel):
+    def __init__(self, parent, discovery):
+        super().__init__(parent)
+        self.result = None
+        self.display = parent.display
+        self.title("父目录中的工作副本候选")
+        self.transient(parent)
+        fit_window(self, self.display, 900, 510, 670, 400)
+        body = ttk.Frame(self, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"找到 {len(discovery.working_copies)} 个候选工作副本", style="Heading.TLabel").pack(anchor="w")
+        bounds = "扫描范围内已完成" if discovery.complete else "扫描未覆盖全部目录，结果仅为已发现部分"
+        ttk.Label(body, text=f"{bounds} · 扫描 {discovery.directories_scanned} 个目录 · 跳过 {discovery.skipped_links} 个链接\n父目录：{discovery.parent}",
+                  wraplength=self.display.px(830)).pack(anchor="w", pady=(8, 10))
+        tree_frame = ttk.Frame(body)
+        tree_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tree_frame, columns=("path", "relation"), show="headings", selectmode="extended")
+        self.tree.heading("path", text="候选路径（还需 SVN 验证）", anchor="w")
+        self.tree.heading("relation", text="目录关系", anchor="w")
+        self.tree.column("path", width=self.display.px(620), minwidth=280)
+        self.tree.column("relation", width=self.display.px(200), minwidth=140)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ybar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        xbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+        self.candidates = {}
+        for index, candidate in enumerate(discovery.working_copies):
+            iid = f"candidate{index}"
+            self.candidates[iid] = candidate.path
+            self.tree.insert("", "end", iid=iid, values=(candidate.path, "嵌套候选，来源未判定" if candidate.relation == "nested" else "独立根候选"))
+        notes = "每个候选先单独验证再登记。嵌套关系不代表已确认 svn:externals；不会扫描链接或进入 .svn，也不会批量更新或跨副本提交。"
+        if discovery.reasons:
+            notes += "\n扫描边界：" + "、".join(discovery.reasons)
+        if discovery.issues:
+            notes += f"\n有 {len(discovery.issues)} 条访问或扫描提示，详见操作记录。"
+        ttk.Label(body, text=notes, wraplength=self.display.px(830), style="Muted.TLabel").pack(anchor="w", pady=(10, 12))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        for label, action in (("关闭", "close"), ("验证并登记选中项", "register"), ("打开一个选中项", "open")):
+            ttk.Button(buttons, text=label, command=lambda a=action: self._accept(a)).pack(side="right", padx=5)
+        self.bind("<Escape>", lambda event: self.destroy())
+        self.grab_set()
+        self.wait_window()
+
+    def _accept(self, action):
+        paths = [self.candidates[iid] for iid in self.tree.selection()]
+        if action != "close" and (not paths or action == "open" and len(paths) != 1):
+            messagebox.showinfo("选择工作副本", "打开时请选择一个候选；登记时可选择多个。各副本的操作范围始终独立。", parent=self)
+            return
+        self.result = action, paths
+        self.destroy()
+
+
 class SvnDesk(tk.Tk):
     def __init__(self, working_copy=None, *, demo=False):
         enable_high_dpi()
@@ -387,7 +557,11 @@ class SvnDesk(tk.Tk):
         self._log_lookup = {}
         self._shelf_lookup = {}
         self._settings_file = Path.home() / ".svn-desk" / "settings.json"
-        self.settings = self._read_settings()
+        self._settings_warning = None
+        self._active_workspace_id = None
+        self._workspace_errors = {}
+        self._manual_open_requested = False
+        self.settings = normalize_settings({}) if demo else self._read_settings()
         self._make_style()
         self._make_menu()
         self._build_ui()
@@ -395,26 +569,36 @@ class SvnDesk(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(100, self._drain_queue)
         self._set_busy(False)
+        self._update_workspace_choices()
         if demo:
             self.after(50, self._load_demo)
         elif working_copy:
             self.after(50, lambda: self.open_workspace(working_copy))
         else:
-            self._show_preview("欢迎使用 SVN Desk", "打开一个已有的 SVN 工作副本开始。\n\n左侧切换工作视图，上方处理常用操作，下方查看差异与操作记录。\n\n本地 Shelf 保存修改的副本，不会自动清空工作区，也不会上传到服务器。\n\n首次使用：安装 SVN 命令行工具，或在“设置”中选择 svn.exe。")
+            self.after(50, self._restore_saved_workspace)
+        if self._settings_warning:
+            self._append_log("本地设置未能读取：" + self._settings_warning)
 
     def _read_settings(self):
         try:
-            data = json.loads(self._settings_file.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            return {}
+            return load_settings(self._settings_file)
+        except (OSError, ValueError) as error:
+            self._settings_warning = str(error)
+            return normalize_settings({})
 
     def _save_settings(self):
+        if self.demo:
+            return False
+        if self._settings_warning and not messagebox.askyesno("重建本地设置？", "原设置文件无法读取。是否用当前工作区登记重建它？\n\n这会替换本地设置文件，不会删除或移动任何工作副本。选择“否”会保留原文件，但本次设置不会持久保存。", default="no", parent=self):
+            return False
         try:
-            self._settings_file.parent.mkdir(parents=True, exist_ok=True)
-            self._settings_file.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError as error:
+            save_settings(self._settings_file, self.settings)
+            self._settings_warning = None
+            return True
+        except (OSError, ValueError) as error:
             self._append_log(f"无法保存本地设置：{error}")
+            messagebox.showwarning("工作区设置未能保存", "当前会话可以继续，但下次启动可能无法恢复这些更改。\n\n" + str(error), parent=self)
+            return False
 
     def _make_style(self):
         style = ttk.Style(self)
@@ -444,6 +628,9 @@ class SvnDesk(tk.Tk):
         menu = tk.Menu(self)
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="打开工作副本…", accelerator="Ctrl+O", command=self.choose_workspace)
+        file_menu.add_command(label="工作区管理…", command=self.manage_workspaces)
+        file_menu.add_command(label="新建工作区 / 检出…", command=self.create_workspace)
+        file_menu.add_command(label="扫描含多个副本的父目录…", command=self.discover_workspaces)
         file_menu.add_command(label="设置 SVN 程序…", command=self.configure_svn)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self._close)
@@ -513,10 +700,23 @@ class SvnDesk(tk.Tk):
         self.title_label = ttk.Label(heading, text="待提交更改", style="Heading.TLabel")
         self.title_label.pack(side="left")
         ttk.Label(heading, text="原生 SVN  ·  本地优先", style="Muted.TLabel").pack(side="right")
+        workspace_row = ttk.Frame(content)
+        workspace_row.pack(fill="x", pady=(12, 0))
+        ttk.Label(workspace_row, text="工作区").pack(side="left", padx=(0, 9))
+        self.workspace_choice_var = tk.StringVar()
+        self.workspace_choice = ttk.Combobox(workspace_row, textvariable=self.workspace_choice_var, state="readonly")
+        self.workspace_choice.pack(side="left", fill="x", expand=True)
+        self.workspace_choice.bind("<<ComboboxSelected>>", self._switch_workspace_choice)
+        manage_button = ttk.Button(workspace_row, text="管理…", command=self.manage_workspaces)
+        manage_button.pack(side="left", padx=(8, 0))
+        self._controls.append((manage_button, True))
+        create_button = ttk.Button(workspace_row, text="新建 / 检出…", command=self.create_workspace)
+        create_button.pack(side="left", padx=(8, 0))
+        self._controls.append((create_button, True))
         location = ttk.Frame(content)
         location.pack(fill="x", pady=(15, 12))
         self.path_var = tk.StringVar()
-        ttk.Label(location, text="工作副本").pack(side="left", padx=(0, 9))
+        ttk.Label(location, text="本地目录").pack(side="left", padx=(0, 9))
         self.path_entry = ttk.Entry(location, textvariable=self.path_var)
         self.path_entry.pack(side="left", fill="x", expand=True, ipady=5)
         self.path_entry.bind("<Return>", lambda event: self.open_workspace(self.path_var.get()))
@@ -906,6 +1106,7 @@ class SvnDesk(tk.Tk):
         for button, always in self._controls:
             button.configure(state="normal" if not busy and (always or ready) else "disabled")
         self.path_entry.configure(state="disabled" if busy else "normal")
+        self.workspace_choice.configure(state="disabled" if busy else "readonly")
         if busy:
             self.status_var.set(label + "…")
             self.progress.start(12)
@@ -949,7 +1150,7 @@ class SvnDesk(tk.Tk):
         for action, button in self._action_buttons.items():
             button.configure(state="normal" if self._action_available(action) else "disabled")
 
-    def _run(self, label, work, done=None, *, mutation=False):
+    def _run(self, label, work, done=None, *, mutation=False, on_error=None):
         if self._busy or self._closing:
             self.bell()
             return
@@ -957,16 +1158,16 @@ class SvnDesk(tk.Tk):
         self._append_log("› " + label)
         def worker():
             try:
-                self._queue.put((True, work(), done, label, mutation))
+                self._queue.put((True, work(), done, label, mutation, on_error))
             except Exception as error:
-                self._queue.put((False, error, done, label, mutation))
+                self._queue.put((False, error, done, label, mutation, on_error))
         threading.Thread(target=worker, daemon=True).start()
 
     def _drain_queue(self):
         if self._closing:
             return
         try:
-            ok, result, done, label, mutation = self._queue.get_nowait()
+            ok, result, done, label, mutation, on_error = self._queue.get_nowait()
         except queue.Empty:
             pass
         else:
@@ -985,7 +1186,10 @@ class SvnDesk(tk.Tk):
                 if self.root_path:
                     self.path_var.set(str(self.root_path))
                 note = "\n\n操作可能已部分执行。将重新读取本地状态，请确认结果后再操作。" if mutation else ""
-                messagebox.showerror(label + "失败", str(result) + note, parent=self)
+                if on_error:
+                    on_error(result)
+                else:
+                    messagebox.showerror(label + "失败", str(result) + note, parent=self)
                 if mutation and self.client:
                     self.refresh()
         self._drain_tree_queue()
@@ -1018,19 +1222,194 @@ class SvnDesk(tk.Tk):
     def choose_workspace(self):
         if self._busy:
             return
+        self._manual_open_requested = True
         folder = filedialog.askdirectory(title="选择 SVN 工作副本", initialdir=str(self.root_path or self.settings.get("last_workspace", Path.home())), parent=self)
         if folder:
             self.open_workspace(folder)
 
-    def open_workspace(self, folder):
+    def _restore_saved_workspace(self):
+        if self.demo or self._busy or self.client or self._manual_open_requested:
+            return
+        record = startup_workspace(self.settings)
+        if record:
+            self.open_workspace(record["path"], record_id=record["id"], auto_restore=True)
+        else:
+            warning = "\n\n本地设置读取失败，原文件未修改；请通过工作区管理重新打开副本。" if self._settings_warning else ""
+            self._show_preview("欢迎使用 SVN Desk", "打开一个已有工作副本，或点击“新建 / 检出”从仓库下载。\n\n工作副本会登记名称和路径，下次启动自动恢复上次成功打开的工作区。\n\n一个父目录包含多个副本时，请在“工作区管理”中扫描父目录；各副本始终分别打开、更新和提交。\n\n本地工作区登记不是 P4V 服务器工作区，设置中不保存仓库 URL 或认证信息。" + warning)
+
+    def _update_workspace_choices(self):
+        records = sorted(self.settings.get("workspaces", []), key=lambda record: (record["name"].casefold(), record["path"]))
+        self._workspace_choice_ids = [record["id"] for record in records]
+        self.workspace_choice.configure(values=[f"{record['name']}  ·  {record['path']}" for record in records])
+        if self._active_workspace_id in self._workspace_choice_ids:
+            self.workspace_choice.current(self._workspace_choice_ids.index(self._active_workspace_id))
+            active = next(record for record in records if record["id"] == self._active_workspace_id)
+            self.workspace_name.configure(text=active["name"])
+        else:
+            self.workspace_choice_var.set("当前副本未登记" if self.client else "选择已登记工作区…")
+
+    def _switch_workspace_choice(self, event=None):
+        if self._busy:
+            return
+        index = self.workspace_choice.current()
+        if 0 <= index < len(self._workspace_choice_ids):
+            identifier = self._workspace_choice_ids[index]
+            record = next((item for item in self.settings.get("workspaces", []) if item["id"] == identifier), None)
+            if record:
+                self.open_workspace(record["path"], record_id=identifier)
+
+    def manage_workspaces(self):
+        if self._busy:
+            return
+        self._manual_open_requested = True
+        if self.demo:
+            messagebox.showinfo("演示模式", "演示模式不读取实际副本，也不会修改工作区登记或本地设置。", parent=self)
+            return
+        dialog = WorkspaceManagerDialog(self)
+        if not dialog.result:
+            return
+        action, identifier, restore = dialog.result
+        if self.settings.get("restore_last_workspace", True) != restore:
+            self.settings["restore_last_workspace"] = restore
+            self._save_settings()
+        record = next((item for item in self.settings.get("workspaces", []) if item["id"] == identifier), None)
+        if action == "open" and record:
+            self.open_workspace(record["path"], record_id=identifier)
+        elif action == "rename" and record:
+            name = simpledialog.askstring("重命名工作区", "只更改登记名称，不移动目录：", initialvalue=record["name"], parent=self)
+            if name is not None:
+                try:
+                    rename_workspace(self.settings, identifier, name)
+                except ValueError as error:
+                    messagebox.showwarning("名称无效", str(error), parent=self)
+                else:
+                    self._save_settings()
+                    self._update_workspace_choices()
+        elif action == "relink" and record:
+            folder = filedialog.askdirectory(title="重新定位已有 SVN 工作副本（不移动文件）", parent=self)
+            if folder:
+                self.open_workspace(folder, record_id=identifier)
+        elif action == "remove" and record:
+            if messagebox.askokcancel("只移除工作区记录", f"移除“{record['name']}”的本地登记？\n\n不会删除、移动或还原目录中的任何文件。当前打开的副本可继续使用。", parent=self):
+                remove_workspace(self.settings, identifier)
+                self._workspace_errors.pop(identifier, None)
+                if identifier == self._active_workspace_id:
+                    self._active_workspace_id = None
+                self._save_settings()
+                self._update_workspace_choices()
+        elif action == "add":
+            self.choose_workspace()
+        elif action == "checkout":
+            self.create_workspace()
+        elif action == "discover":
+            self.discover_workspaces()
+
+    def create_workspace(self):
+        if self._busy:
+            return
+        self._manual_open_requested = True
+        if self.demo:
+            messagebox.showinfo("演示模式", "演示模式不会检出文件或保存工作区。", parent=self)
+            return
+        dialog = CheckoutDialog(self)
+        if not dialog.result:
+            return
+        name, url, destination = dialog.result
+        executable = self.settings.get("svn_executable") or None
+        def preflight():
+            from .backend import validate_checkout_destination, validate_checkout_url
+            return validate_checkout_url(url), validate_checkout_destination(destination)
+        def checked(data):
+            safe_url, path = data
+            if not messagebox.askokcancel("确认检出新的工作副本", f"名称：{name}\n仓库：{safe_url}\n本地目录：{path}\n\n按所填 URL 检出；未指定 @修订时使用 HEAD。URL 尾部 @修订按 SVN 语法生效。\n不下载 externals，不保存认证信息。失败可能留下部分工作副本，不会自动删除。是否继续？", parent=self):
+                return
+            def checkout():
+                from .backend import checkout_working_copy
+                return checkout_working_copy(safe_url, path, executable=executable)
+            def complete(result):
+                if result.stdout:
+                    self._append_log(result.stdout)
+                self.open_workspace(path, workspace_name=name)
+            def failed(error):
+                messagebox.showerror("检出未完成", "检出结果可能不完整，目标目录中的文件已保留。请先检查结果，不要盲目重试或删除。\n\n" + str(error), parent=self)
+                self._show_preview("检出未完成", f"目标目录：{path}\n\n当前工作区未被替换，新目录没有登记为成功的工作区。\n请使用外部 SVN 客户端检查或恢复此目录后，再选择“打开已有副本”。")
+            self._run("检出新的工作副本", checkout, complete, on_error=failed)
+        self._run("检查检出路径", preflight, checked)
+
+    def discover_workspaces(self, folder=None):
+        if self._busy:
+            return
+        self._manual_open_requested = True
+        if self.demo:
+            messagebox.showinfo("演示模式", "演示模式不扫描实际目录，也不会保存工作区。", parent=self)
+            return
+        folder = folder or filedialog.askdirectory(title="选择包含多个 SVN 工作副本的父目录", parent=self)
+        if not folder:
+            return
+        def scan():
+            from .discovery import discover_working_copies
+            return discover_working_copies(folder)
+        def found(result):
+            for issue in result.issues:
+                self._append_log(f"扫描提示 [{issue.code}] {issue.path}: {issue.message}")
+            dialog = WorkspaceDiscoveryDialog(self, result)
+            if not dialog.result:
+                return
+            action, paths = dialog.result
+            if action == "open":
+                self.open_workspace(paths[0])
+            elif action == "register":
+                self._register_discovered_paths(paths)
+        self._run("扫描工作副本候选（有范围限制）", scan, found)
+
+    def _register_discovered_paths(self, paths):
+        executable = self.settings.get("svn_executable") or None
+        def verify():
+            verified, errors = [], []
+            program = discover_svn(executable)
+            for supplied in paths:
+                try:
+                    client = SvnClient(supplied, executable=program)
+                    info = client.info()
+                    root = str(info.get("wc_root") or "")
+                    if not root or os.path.normcase(os.path.abspath(root)) != os.path.normcase(os.path.abspath(supplied)):
+                        raise ValueError("候选路径不是 SVN 报告的独立工作副本根。")
+                    verified.append(root)
+                except Exception as error:
+                    errors.append((str(supplied), str(error)))
+            return verified, errors
+        def registered(result):
+            verified, errors = result
+            new_settings = copy.deepcopy(self.settings)
+            for path in verified:
+                remember_workspace(new_settings, path, set_last=False)
+            if verified:
+                self.settings = new_settings
+                saved = self._save_settings()
+                self._update_workspace_choices()
+            else:
+                saved = False
+            for path, error in errors:
+                self._append_log(f"未登记 {path}: {error}")
+            self._show_preview("父目录工作区登记结果", f"已验证 {len(verified)} 个独立工作副本，{len(errors)} 个候选未通过。\n"
+                               + ("记录已保存。" if saved else "没有新增已保存的记录，请查看操作记录。")
+                               + "\n\n可从上方工作区选择器逐个打开。扫描和登记不更新、不合并、不提交这些副本。"
+                               + "\n外部引用定义与固定修订未自动导入；选中的嵌套副本仍作为独立范围操作。")
+        self._run("逐个验证工作副本根", verify, registered)
+
+    def open_workspace(self, folder, *, workspace_name=None, record_id=None, auto_restore=False):
         if self._busy or not str(folder).strip():
             return
         if self.demo:
             messagebox.showinfo("演示模式", "当前仅展示示例数据。关闭后不带 --demo 参数启动，即可打开真实工作副本。", parent=self)
             return
+        if not auto_restore:
+            self._manual_open_requested = True
         candidate = Path(folder).expanduser()
         executable = self.settings.get("svn_executable") or None
         def load():
+            if not candidate.is_dir():
+                raise FileNotFoundError("工作副本目录不存在或不是文件夹。请在工作区管理中重新定位，原记录会保留。")
             client = SvnClient(candidate, executable=discover_svn(executable))
             info = client.info()
             root = Path(info.get("wc_root") or candidate).resolve()
@@ -1040,14 +1419,21 @@ class SvnDesk(tk.Tk):
             shelves = ShelfManager(client)
             return client, shelves, root, info, read_groupable_status(client, root), shelves.list()
         def loaded(data):
+            new_settings = copy.deepcopy(self.settings)
+            record = remember_workspace(new_settings, str(data[2]), name=workspace_name, record_id=record_id)
             self._clear_workspace_selection()
             self.client, self.shelf_manager, self.root_path, self.info, status_data, self.shelves = data
             self.entries, self.changelist_candidates = status_data
             self.all_files = []
             self.path_var.set(str(self.root_path))
-            self.workspace_name.configure(text=self.root_path.name)
-            self.settings["last_workspace"] = str(self.root_path)
-            self._save_settings()
+            changed = new_settings != self.settings
+            self.settings = new_settings
+            self._active_workspace_id = record["id"]
+            self._workspace_errors.pop(record["id"], None)
+            self.workspace_name.configure(text=record["name"])
+            if changed:
+                self._save_settings()
+            self._update_workspace_choices()
             self._repo_url = ""
             self.repo_var.set("选择“仓库浏览”加载当前仓库目录。")
             self.repository.delete(*self.repository.get_children())
@@ -1059,7 +1445,18 @@ class SvnDesk(tk.Tk):
             self._set_busy(False)
             self._show_preview("工作副本信息", self._info_text())
             self.select_tab(0)
-        self._run("打开工作副本", load, loaded)
+        def failed(error):
+            if record_id:
+                self._workspace_errors[record_id] = str(error)
+            self._update_workspace_choices()
+            self.path_var.set(str(self.root_path) if self.root_path else "")
+            self._show_preview("工作区未打开", f"请求目录：{candidate}\n\n{error}\n\n原有工作区记录与当前打开的副本保持不变。\n可在“管理”中重新定位、打开其他副本，或扫描包含多个独立副本的父目录。\n如果缺少 svn.exe，请在“文件 → 设置 SVN 程序”中配置。")
+            if not auto_restore and "E155007" in str(error):
+                if messagebox.askyesno("此目录不是一个工作副本", "这个目录可能包含多个独立的 SVN 副本。要扫描此父目录并逐个选择吗？\n\n扫描有深度、数量和时间限制，不修改文件。", parent=self):
+                    self.discover_workspaces(candidate)
+            else:
+                messagebox.showwarning("未能恢复上次工作区" if auto_restore else "无法打开工作区", str(error) + "\n\n记录已保留。可使用“工作区管理”重新定位或打开其他副本。", parent=self)
+        self._run("恢复上次工作区" if auto_restore else "打开工作副本", load, loaded, on_error=failed)
 
     def refresh(self):
         if self.demo:
@@ -1614,14 +2011,15 @@ class SvnDesk(tk.Tk):
     def configure_svn(self):
         if self._busy:
             return
+        self._manual_open_requested = True
         if self.demo:
             messagebox.showinfo("演示模式", "演示模式不会修改本地设置。请正常启动后设置 SVN 程序。", parent=self)
             return
         path = filedialog.askopenfilename(title="选择 SVN 命令行程序（svn.exe）", filetypes=[("SVN 程序", "svn.exe"), ("所有文件", "*")], parent=self)
         if path:
             self.settings["svn_executable"] = path
-            self._save_settings()
-            messagebox.showinfo("已保存", "SVN 程序路径已保存。重新打开工作副本后生效。", parent=self)
+            if self._save_settings():
+                messagebox.showinfo("已保存", "SVN 程序路径已保存。重新打开工作副本后生效。", parent=self)
 
     def show_help(self):
         self._show_preview("使用说明", "1. 安装 SVN 命令行工具，打开已有工作副本。\n2. 点击“+ 新建变更列表”，输入名称、选择已版本化文件，点击“创建并归组”。\n3. 也可先按 Ctrl / Shift 多选文件，再点击“移动到列表”。已有列表可从下拉框选择。\n4. 选中分组标题，点击“提交所选列表”，核对全部成员并填写提交说明。筛选隐藏的成员也会列入确认。\n5. “移回未分组”只清除分组标签，不还原、不删除文件；未版本化文件请先添加。\n6. 双击文件查看差异，双击分组查看全部成员。文件操作只作用于明确选中的文件行。\n7. 重要修改可以创建本地 Shelf。创建只备份，不清空修改。恢复前请备份现有工作。\n\nSVN 与 P4V 的差别\n• SVN 变更列表仅在本机工作副本保存；不是服务器上的编号提交单。\n• 列表仅支持文件，每个文件只能归属一个列表；目录无法归组。\n• SVN 不保存空列表，移走最后一个文件后列表自动消失。\n• 提交成功后，已提交文件的标签默认移除。干净的已归组文件仍可显示，但不计入待提交修改数。\n• 分组不保存文件内容，也不锁定文件；Shelf 才是本地内容备份。\n• 新增目录等依赖无法只通过文件分组隔离；SVN 拒绝时不会自动扩大提交范围。\n\n快捷键：Ctrl+O 打开工作副本 · F5 刷新 · Ctrl+D 查看选中差异\n\n安全提示\n• 还原会丢弃未提交更改，删除 Shelf 会永久删除备份。\n• 本地 Shelf 不是服务器备份；不会同步到其他电脑。\n• SVN 身份验证由安装的 SVN 客户端处理，本程序不保存密码。\n• 本界面没有通用 SVN 命令输入框。未覆盖的命令请使用外部 SVN 客户端。")
@@ -1631,6 +2029,7 @@ class SvnDesk(tk.Tk):
         self.root_path = Path("D:/Projects/OrionGame")
         self.path_var.set(str(self.root_path))
         self.workspace_name.configure(text="OrionGame\n开发工作副本")
+        self.workspace_choice_var.set("演示工作区 · OrionGame")
         self.info = {"revision": "248", "url": "https://svn.example.com/OrionGame/trunk", "repository_root": "https://svn.example.com/OrionGame"}
         rows = [("src/player/controller.py", "modified", "248"), ("src/game/session.py", "modified", "246"),
                 ("assets/ui/inventory.png", "added", ""), ("docs/release-notes.md", "unversioned", ""),

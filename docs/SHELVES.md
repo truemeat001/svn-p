@@ -19,6 +19,67 @@ manifest validity before publishing a shelf. File data is flushed to disk. POSIX
 also flushes directory metadata. An interrupted operation may leave a temporary
 folder or operation lock; no working-copy data is automatically reverted.
 
+## Storage and compression
+
+New shelves use manifest format **2**. Each file records its uncompressed SHA-256
+`blob`, exact `size`, `blob_encoding` (`raw` or `zlib`), and `stored_size`. Data is
+compressed with standard-library zlib, level 6, only if it saves at least 5% and
+256 bytes. Tiny files, empty files, and incompressible/already-compressed data use
+raw bytes, so compression never increases the final blob size. Exact duplicate
+file content shares one blob **within that shelf**, as before. Properties remain
+binary-safe base64 in the manifest and are not converted or compressed.
+
+Existing format-1 shelves remain readable, verifiable, restorable and deletable.
+They are not rewritten or migrated automatically. Older application versions
+that only understand format 1 cannot read new format-2 shelves. Back up the entire
+shelf directory, including `manifest.json` and `blobs/`, together.
+
+File capture, checksums and blob decoding use 1 MiB chunks instead of loading an
+entire file into memory. New shelves allow at most **16 GiB per file and 64 GiB of
+total file content per shelf**, counting duplicate destinations toward the total.
+These limits are checked before decoding. Decoding refuses output beyond the
+declared size, invalid checksums, truncated streams, extra bytes and concatenated
+compressed streams. No unbounded decompressor flush is used. Legacy raw shelves
+have no compression expansion, so these new size caps do not block old shelves.
+SVN command output and the manifest/properties are still held in memory; this is
+not a claim of bounded memory for every SVN or metadata operation.
+
+To preserve a single source snapshot, creation stages raw and compressed
+candidates for one file at a time, then keeps only the smaller eligible candidate.
+Allow temporary free space for roughly **two copies of the current file**, plus
+already-staged blobs and metadata. A restore needs temporary free space for the
+decoded destination file. Insufficient space aborts without publishing a new shelf
+or replacing that destination; earlier restored entries may already be changed.
+Only verified, flushed data is published via the existing atomic directory rename.
+Restore rechecks streamed data into a private temporary file before replacing the
+destination. It retains the shelf on success and failure.
+
+There is no cross-shelf shared blob pool, automatic migration, eviction, garbage
+collection, or removal of abandoned crash folders/locks. Deleting one shelf cannot
+invalidate another shelf. The operation lock continues to serialize cooperating
+writers. After a crash, inspect leftover files and verify no operation is active
+before manually removing a stale lock. External file edits are still not locked
+out; never modify the storage or working copy while restoring.
+
+### Reproducible synthetic measurements
+
+The `test_representative_synthetic_storage_savings` filesystem test creates and
+round-trips four deterministic fixtures. Measured blob sizes in this development
+environment (Python 3.12.14, zlib 1.3.2):
+
+| Fixture | Original bytes | Stored blob bytes | Saving |
+| --- | ---: | ---: | ---: |
+| Repeated JSON-style text, 4 MiB | 4,194,304 | 12,282 | 99.707% |
+| Repeated 0–255 binary pattern, 4 MiB | 4,194,304 | 16,601 | 99.604% |
+| Seeded pseudo-random binary, 4 MiB | 4,194,304 | 4,194,304 | 0% (raw) |
+| That random data already zlib-compressed | 4,195,590 | 4,195,590 | 0% (raw) |
+
+These are synthetic **blob-byte** savings, excluding manifest/directory overhead
+and filesystem allocation. They are not measurements of a real project, overall
+disk usage, SVN performance, or Windows compatibility. Actual compression varies
+with content and zlib version. The test checks conservative savings and byte-exact
+restoration rather than requiring implementation-specific compressed sizes.
+
 ## Deliberately refused
 
 Copies and moves with history, replacements, deleted directories, missing paths,
@@ -80,6 +141,9 @@ shelves.delete(shelf["id"])
 SVN executable lazily. A manager cannot store shelves inside its working copy.
 Returned summaries have `id`, `name`, `created_at`, `paths`, `files`, `entry_count`,
 `backup_only`, and `repository_url`. `ShelfConflict` is a `ShelfError` subclass.
+Method signatures and summary fields are unchanged by storage format 2. Verified
+file entries returned by `details()` additionally carry the encoding and stored
+size when the shelf uses format 2.
 
 ## Read-only planning API
 
@@ -89,6 +153,9 @@ but does not create a shelf. It returns `operation: "create"`, `dry_run: true`,
 `can_create: true`, `paths`, `files`, `entry_count`, `entries`, repository identity,
 and `warnings`. A shelf name is not an argument to this method; clients should
 validate their requested name separately (nonblank, at most 200 characters).
+Creation preflight hashes sources but does not compress or stage them; its file
+entries use raw sizes as a conservative storage plan. Actual creation may choose
+compression. The preflight is not a free-disk-space check.
 
 `preflight_restore(shelf_id)` verifies the shelf hashes and performs the same
 repository, BASE, clean-content, collision, and path checks as restoration. It

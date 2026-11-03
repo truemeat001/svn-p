@@ -26,6 +26,7 @@ import tempfile
 import threading
 import uuid
 import xml.etree.ElementTree as ET
+import zlib
 
 
 class ShelfError(RuntimeError):
@@ -36,7 +37,13 @@ class ShelfConflict(ShelfError):
     """A restore was refused without changing the working copy."""
 
 
-_FORMAT = 1
+_FORMAT = 2
+_CHUNK_SIZE = 1024 * 1024
+_MIN_COMPRESSION_SAVING = 256
+# Format 2 limits bound even a malicious manifest's decompression request.
+# Legacy raw shelves do not need an expansion limit and remain readable.
+_MAX_FILE_BYTES = 16 * 1024 ** 3
+_MAX_SHELF_BYTES = 64 * 1024 ** 3
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$", re.I)
@@ -45,6 +52,36 @@ _UNSAFE_STATUS = {"conflicted", "obstructed", "incomplete", "missing", "replaced
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _file_signature(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+@contextlib.contextmanager
+def _open_regular(path):
+    """Read one stable regular file, refusing final-component link swaps."""
+    before = path.lstat()
+    if _special(before) or not stat.S_ISREG(before.st_mode):
+        raise ShelfError(f"Unsafe or non-regular file: {path.name}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if _special(opened) or not stat.S_ISREG(opened.st_mode) or _file_signature(before) != _file_signature(opened):
+            raise ShelfError(f"File changed while being read; retry: {path.name}")
+        yield stream
+        if (_file_signature(opened) != _file_signature(os.fstat(stream.fileno()))
+                or _file_signature(opened) != _file_signature(path.lstat())):
+            raise ShelfError(f"File changed while being read; retry: {path.name}")
+
+
+def _file_digest(path):
+    checksum = hashlib.sha256()
+    with _open_regular(path) as stream:
+        while chunk := stream.read(_CHUNK_SIZE):
+            checksum.update(chunk)
+    return checksum.hexdigest()
 
 
 def _encoded(data: bytes) -> str:
@@ -337,7 +374,7 @@ class ShelfManager:
                       self._target(path), str(destination))
             if not destination.is_file() or _special(destination.lstat()):
                 raise ShelfError(f"Cannot verify translated BASE content: {path}")
-            return _digest(destination.read_bytes())
+            return _file_digest(destination)
 
     def _base(self, path: str, info=None) -> dict:
         info = info or self._info(path)
@@ -389,8 +426,109 @@ class ShelfManager:
                 parent = str(PurePosixPath(parent).parent)
         return repository, status_entries, selected
 
+    @staticmethod
+    def _capture_file(path, blobs=None):
+        """Stream a stable source; keep compression only when it saves space.
+
+        Raw and compressed candidates are private to the unpublished shelf. The
+        raw candidate is also the fallback, so no second, potentially different
+        read of the working file is used to choose its storage representation.
+        """
+        checksum, size = hashlib.sha256(), 0
+        with contextlib.ExitStack() as stack:
+            source = stack.enter_context(_open_regular(path))
+            if os.fstat(source.fileno()).st_size > _MAX_FILE_BYTES:
+                raise ShelfError(f"File exceeds the 16 GiB shelf limit: {path.name}")
+            if blobs is not None:
+                candidates = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".packing-", dir=blobs)))
+                raw_path, packed_path = candidates / "raw", candidates / "zlib"
+                raw = stack.enter_context(open(raw_path, "xb"))
+                packed = stack.enter_context(open(packed_path, "xb"))
+                compressor = zlib.compressobj(level=6)
+            while chunk := source.read(_CHUNK_SIZE):
+                size += len(chunk)
+                if size > _MAX_FILE_BYTES:
+                    raise ShelfError(f"File exceeds the 16 GiB shelf limit: {path.name}")
+                checksum.update(chunk)
+                if blobs is not None:
+                    raw.write(chunk)
+                    packed.write(compressor.compress(chunk))
+            result = {"blob": checksum.hexdigest(), "size": size,
+                      "blob_encoding": "raw", "stored_size": size}
+            if blobs is not None:
+                packed.write(compressor.flush())
+                packed_size = packed.tell()
+                use_packed = packed_size <= size * 95 // 100 and size - packed_size >= _MIN_COMPRESSION_SAVING
+                chosen = packed if use_packed else raw
+                chosen.flush()
+                os.fsync(chosen.fileno())
+                raw.close()
+                packed.close()
+                if use_packed:
+                    result.update(blob_encoding="zlib", stored_size=packed_size)
+                destination = blobs / result["blob"]
+                if destination.exists():
+                    # Duplicate content within this shelf shares one immutable
+                    # blob. Verify rather than overwriting a pre-existing blob.
+                    ShelfManager._copy_verified_blob(result, blobs.parent, _FORMAT)
+                else:
+                    os.rename(packed_path if use_packed else raw_path, destination)
+        return result
+
+    @staticmethod
+    def _copy_verified_blob(entry, folder, shelf_format, output=None):
+        """Verify/decode in bounded chunks, optionally into a private temp file.
+
+        No output beyond the declared, capped size is written. A single complete
+        zlib stream is required: truncation, trailing bytes and concatenated
+        streams are errors. Never call an unbounded decompressor flush().
+        """
+        blob_dir = folder / "blobs"
+        if _special(blob_dir.lstat()) or not stat.S_ISDIR(blob_dir.lstat().st_mode):
+            raise ShelfError("Unsafe shelf blob directory")
+        encoding = entry["blob_encoding"] if shelf_format == 2 else "raw"
+        expected = entry["size"]
+        stored_size = entry["stored_size"] if shelf_format == 2 else expected
+        checksum, size = hashlib.sha256(), 0
+
+        def consume(chunk):
+            nonlocal size
+            size += len(chunk)
+            if size > expected:
+                raise ShelfError("Shelf data is damaged: expanded size exceeds its declared limit")
+            checksum.update(chunk)
+            if output is not None:
+                output.write(chunk)
+
+        try:
+            with _open_regular(blob_dir / entry["blob"]) as source:
+                if os.fstat(source.fileno()).st_size != stored_size:
+                    raise ShelfError("Shelf data is damaged: stored size mismatch")
+                decoder = zlib.decompressobj() if encoding == "zlib" else None
+                while chunk := source.read(_CHUNK_SIZE):
+                    if decoder is None:
+                        consume(chunk)
+                        continue
+                    pending = chunk
+                    while True:
+                        limit = min(_CHUNK_SIZE, expected - size + 1)
+                        decoded = decoder.decompress(pending, limit)
+                        consume(decoded)
+                        if decoder.unused_data:
+                            raise ShelfError("Shelf data is damaged: trailing compressed data")
+                        pending = decoder.unconsumed_tail
+                        if not pending and len(decoded) < limit:
+                            break
+                if decoder is not None and not decoder.eof:
+                    raise ShelfError("Shelf data is damaged: truncated compressed stream")
+        except zlib.error as exc:
+            raise ShelfError("Shelf data is damaged: invalid compressed stream") from exc
+        if size != expected or checksum.hexdigest() != entry["blob"]:
+            raise ShelfError("Shelf data is damaged: checksum or decoded size mismatch")
+
     def _capture_create_entries(self, selected, blobs=None):
         entries = []
+        total_size = 0
         for relative, status_entry in sorted(selected.items(), key=lambda item: (item[0].count("/"), item[0])):
             path = self._path(relative)
             item = status_entry["item"]
@@ -414,21 +552,12 @@ class ShelfManager:
                     raise ShelfError(f"Nested working copy is unsupported: {relative}")
                 entry["mode"] = stat.S_IMODE(st.st_mode) & 0o777
                 if kind == "file":
-                    data = path.read_bytes()
-                    after = path.stat()
-                    if (st.st_size, st.st_mtime_ns, st.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
-                        raise ShelfError(f"File changed while being backed up; retry: {relative}")
-                    checksum = _digest(data)
-                    entry.update(blob=checksum, size=len(data))
-                    if blobs is not None:
-                        blob_path = blobs / checksum
-                        if not blob_path.exists():
-                            with open(blob_path, "xb") as stream:
-                                stream.write(data)
-                                stream.flush()
-                                os.fsync(stream.fileno())
-                        if _digest(blob_path.read_bytes()) != checksum:
-                            raise ShelfError(f"Backup verification failed: {relative}")
+                    if total_size + st.st_size > _MAX_SHELF_BYTES:
+                        raise ShelfError("Shelf exceeds the 64 GiB total file-content limit")
+                    entry.update(self._capture_file(path, blobs))
+                    total_size += entry["size"]
+                    if total_size > _MAX_SHELF_BYTES:
+                        raise ShelfError("Shelf exceeds the 64 GiB total file-content limit")
             entries.append(entry)
         return entries
 
@@ -444,7 +573,7 @@ class ShelfManager:
                 if source.exists():
                     raise ShelfError(f"Deleted path appeared during backup: {relative}")
                 continue
-            if entry["kind"] == "file" and _digest(source.read_bytes()) != entry["blob"]:
+            if entry["kind"] == "file" and _file_digest(source) != entry["blob"]:
                 raise ShelfError(f"File changed while being backed up; retry: {relative}")
             if stat.S_IMODE(source.stat().st_mode) & 0o777 != entry["mode"]:
                 raise ShelfError(f"Permissions changed during backup; retry: {relative}")
@@ -535,8 +664,9 @@ class ShelfManager:
         return path
 
     def _validate_manifest(self, manifest, folder, verify_blobs=False):
-        if not isinstance(manifest, dict) or manifest.get("format") != _FORMAT:
+        if not isinstance(manifest, dict) or type(manifest.get("format")) is not int or manifest["format"] not in (1, 2):
             raise ShelfError("Unsupported shelf format")
+        shelf_format = manifest["format"]
         if not isinstance(manifest.get("id"), str) or not _ID.fullmatch(manifest["id"]):
             raise ShelfError("Invalid manifest shelf ID")
         if not isinstance(manifest.get("name"), str) or not isinstance(manifest.get("created_at"), str):
@@ -547,7 +677,8 @@ class ShelfManager:
         entries = manifest.get("entries")
         if not isinstance(entries, list) or not entries or len(entries) > 100000:
             raise ShelfError("Invalid shelf entries")
-        seen = set()
+        seen, blobs = set(), {}
+        total_size = 0
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ShelfError("Invalid shelf entry")
@@ -584,13 +715,28 @@ class ShelfManager:
                     checksum = entry.get("blob", "")
                     if not isinstance(checksum, str) or not _HASH.fullmatch(checksum) or type(entry.get("size")) is not int or entry["size"] < 0:
                         raise ShelfError(f"Invalid blob metadata: {path}")
-                    if verify_blobs:
-                        blob_dir, blob = folder / "blobs", folder / "blobs" / checksum
-                        if _special(blob_dir.lstat()) or _special(blob.lstat()) or not stat.S_ISREG(blob.lstat().st_mode):
-                            raise ShelfError(f"Unsafe shelf blob: {path}")
-                        data = blob.read_bytes()
-                        if len(data) != entry["size"] or _digest(data) != checksum:
-                            raise ShelfError(f"Shelf data is damaged: {path}")
+                    total_size += entry["size"]
+                    if shelf_format == 2:
+                        encoding, stored = entry.get("blob_encoding"), entry.get("stored_size")
+                        if encoding not in ("raw", "zlib") or type(stored) is not int or not 0 <= stored <= entry["size"]:
+                            raise ShelfError(f"Invalid encoded blob metadata: {path}")
+                        if (encoding == "raw" and stored != entry["size"]) or (encoding == "zlib" and stored == 0):
+                            raise ShelfError(f"Invalid encoded blob size: {path}")
+                        if entry["size"] > _MAX_FILE_BYTES or total_size > _MAX_SHELF_BYTES:
+                            raise ShelfError("Shelf exceeds the supported decompression size limits (16 GiB/file, 64 GiB/shelf)")
+                    previous = blobs.get(checksum)
+                    if previous is not None and any(entry.get(k) != previous.get(k) for k in
+                                                    ("size", "blob_encoding", "stored_size")):
+                        raise ShelfError(f"Inconsistent duplicate blob metadata: {path}")
+                    blobs[checksum] = entry
+        # Validate all metadata and total limits before reading/decompressing any
+        # content. Duplicate file contents need verification only once per pass.
+        if verify_blobs:
+            for entry in blobs.values():
+                try:
+                    self._copy_verified_blob(entry, folder, shelf_format)
+                except ShelfError as exc:
+                    raise ShelfError(f"{exc}: {entry['path']}") from exc
 
     def _load(self, shelf_id, verify_blobs=False):
         folder = self._shelf_path(shelf_id)
@@ -694,7 +840,7 @@ class ShelfManager:
                 st = target.lstat()
                 if (entry["kind"] == "file") != stat.S_ISREG(st.st_mode):
                     raise ShelfConflict(f"Restore target kind changed: {rel}")
-                actual_hash = _digest(target.read_bytes()) if entry["kind"] == "file" else None
+                actual_hash = _file_digest(target) if entry["kind"] == "file" else None
                 if actual_hash is not None and actual_hash != entry["base"]["working_sha256"]:
                     raise ShelfConflict(f"Local file bytes differ from translated BASE: {rel}")
                 observations[rel] = {"mode": stat.S_IMODE(st.st_mode), "inode": st.st_ino,
@@ -709,7 +855,7 @@ class ShelfManager:
         else:
             st = path.lstat()
             if st.st_ino != observation["inode"] or stat.S_IMODE(st.st_mode) != observation["mode"] or (
-                observation["sha256"] is not None and _digest(path.read_bytes()) != observation["sha256"]
+                observation["sha256"] is not None and _file_digest(path) != observation["sha256"]
             ):
                 raise ShelfConflict(f"Target changed during restore: {entry['path']}")
 
@@ -756,16 +902,10 @@ class ShelfManager:
                             path.mkdir(mode=0o700)
                             changed.append(rel)
                     else:
-                        payload_path = folder / "blobs" / entry["blob"]
-                        if _special(payload_path.lstat()) or not stat.S_ISREG(payload_path.lstat().st_mode):
-                            raise ShelfError(f"Shelf blob changed during restore: {rel}")
-                        payload = payload_path.read_bytes()
-                        if len(payload) != entry["size"] or _digest(payload) != entry["blob"]:
-                            raise ShelfError(f"Shelf data changed during restore: {rel}")
                         fd, temporary = tempfile.mkstemp(prefix=".svn-restore-", dir=path.parent)
                         try:
                             with os.fdopen(fd, "wb") as stream:
-                                stream.write(payload)
+                                self._copy_verified_blob(entry, folder, manifest["format"], stream)
                                 stream.flush()
                                 os.fsync(stream.fileno())
                             self._check_observation(entry, observations[rel])
