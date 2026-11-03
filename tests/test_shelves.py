@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 import random
 import shutil
+import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -357,11 +359,33 @@ class ShelvesTests(unittest.TestCase):
     def test_batch_targets_refuse_symlink_ancestors_before_svn(self):
         outside = self.root / "outside"
         outside.mkdir()
-        (self.wc / "link").symlink_to(outside, target_is_directory=True)
+        try:
+            (self.wc / "link").symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                self.skipTest("Creating symlinks requires a Windows privilege unavailable in this environment")
+            raise
         manager = ShelfManager(self.wc, self.store)
         with patch.object(manager, "_svn", side_effect=AssertionError("unsafe SVN target")):
             with self.assertRaisesRegex(ShelfError, "Symlink"):
                 manager._properties_many(["link/file"])
+
+    def test_batch_targets_reject_link_metadata_without_symlink_privilege(self):
+        link = self.wc / "link"
+        link.mkdir()
+        manager = ShelfManager(self.wc, self.store)
+        original_lstat = Path.lstat
+        for mode, attributes in ((stat.S_IFLNK | 0o777, 0), (stat.S_IFDIR | 0o755, 0x400)):
+            def metadata(path, *args, **kwargs):
+                if path == link:
+                    return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+                return original_lstat(path, *args, **kwargs)
+            for method in (manager._infos, manager._properties_many):
+                with self.subTest(mode=mode, attributes=attributes, method=method.__name__):
+                    with patch.object(Path, "lstat", metadata), patch.object(manager, "_svn") as svn:
+                        with self.assertRaisesRegex(ShelfError, "Symlink"):
+                            method(["link/file"])
+                        svn.assert_not_called()
 
     def test_oversized_file_is_refused_before_buffered_base_cat(self):
         manager = XmlManager(self.wc, self.store)

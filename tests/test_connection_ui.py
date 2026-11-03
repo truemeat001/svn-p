@@ -18,7 +18,7 @@ from svn_client.ui import SvnDesk
 URL = 'https://repo.test/project/trunk'
 UUID = '12345678-1234-1234-1234-123456789abc'
 REPOSITORY = RepositoryIdentity(URL, 'https://repo.test/project', UUID, 7, 'dir')
-CONTEXT = DiagnosticContext('/working-copy', '/trusted/svn', None)
+CONTEXT = DiagnosticContext(str(Path('/working-copy')), '/trusted/svn', None)
 
 
 def report(remote=False, *, mismatch=False):
@@ -158,7 +158,7 @@ class DiagnosticWorkflowTests(unittest.TestCase):
         manager.assert_not_called()
         manager.return_value.probe.return_value = report()
         text = app.pending[-1][1]()
-        manager.assert_called_once_with('/working-copy', executable='/trusted/svn', timeout=15)
+        manager.assert_called_once_with(str(Path('/working-copy')), executable='/trusted/svn', timeout=15)
         manager.return_value.probe.assert_called_once_with()
         self.assertTrue(app.pending[-1][3]['preserve_view_on_error'])
         app.finish(text)
