@@ -74,3 +74,21 @@ export function validateFileResponse(data,scope,kind,revision){
  }
  return data;
 }
+
+// Native changelists are local file labels, never server-side numbered changes.
+export function parseChangelistTarget(action,value){
+ if(action==='remove')return null;
+ if(action!=='assign'||typeof value!=='string'||/[\uD800-\uDFFF]/u.test(value)||/[\u0000-\u001f\u007f-\u009f]/u.test(value))throw Error('请输入不含控制字符的变更列表名称。');
+ const name=value.trim();
+ if(!name||[...name].length>128)throw Error('名称须为 1–128 个字符；前后空白会移除。');
+ return name;
+}
+export function validateChangelistPlan(data,request,rows){
+ const bad=()=>{throw Error('归组预检结果与当前工作区、选区或目标不匹配，请重新预检。');};
+ if(data?.mode!=='live'||!['workspaceId','selectionVersion','snapshotToken','action','name'].every(key=>data[key]===request[key])||data.localOnly!==true||typeof data.planToken!=='string'||!data.planToken||data.planToken.length>64||/[\u0000-\u001f\u007f-\u009f]/u.test(data.planToken)||data.expiresIn!==120||!Array.isArray(data.files)||data.files.length!==request.ids.length||request.ids.length<1||request.ids.length>100||new Set(request.ids).size!==request.ids.length)bad();
+ const expected=new Map(rows.filter(row=>request.ids.includes(row.id)).map(row=>[row.id,row]));
+ if(expected.size!==request.ids.length)bad();
+ for(const file of data.files){const row=expected.get(file?.id);if(!row||file.path!==row.path||file.fromChangelist!==(row.changelist||null))bad();expected.delete(file.id);}
+ if(expected.size)bad();return data;
+}
+export function canRelabelFile(row){return !!row&&['normal','none','modified','added','deleted','replaced'].includes(row.item)&&row.props!=='conflicted'&&!['switched','file_external','tree_conflicted','wc_locked'].some(key=>row[key])&&(!row.kind||['file','unknown'].includes(row.kind));}

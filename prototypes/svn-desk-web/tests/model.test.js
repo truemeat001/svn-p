@@ -91,3 +91,32 @@ test('diff requires bounded consistent encoding metadata, also for truncated pre
   for(const count of [1,8388608])for(const truncated of [false,true])assert.doesNotThrow(()=>check({...diffResponse,[field]:count,textEncoding:'utf-8-visible-escapes',truncated,sourceUtf8Bytes:truncated?4:3}));
  }
 });
+
+import {parseChangelistTarget,validateChangelistPlan} from '../web/model.js';
+test('changelist names trim only, preserve exact Unicode and case, and reject controls/oversize',()=>{
+ assert.equal(parseChangelistTarget('assign','  用户 UI <标签>  '),'用户 UI <标签>');
+ assert.equal(parseChangelistTarget('assign','😀'.repeat(128)),'😀'.repeat(128));
+ for(const name of ['', '  ', 'a\nb','a\x00b','a\x7fb','a\x85b','\ud800','\udc00','😀'.repeat(129)])assert.throws(()=>parseChangelistTarget('assign',name));
+ assert.equal(parseChangelistTarget('remove','ignored'),null);assert.throws(()=>parseChangelistTarget('delete','x'));
+});
+test('changelist preflight binds exact IDs, full paths, source labels, action, target, scope and expiry',()=>{
+ const rows=[{id:'one',path:'folder/a.txt',changelist:'old'},{id:'two',path:'hidden/b.txt',changelist:null}];
+ const request={workspaceId:'a',selectionVersion:1,snapshotToken:'snapshot',ids:['one','two'],action:'assign',name:'new'};
+ const plan={...request,mode:'live',planToken:'opaque',expiresIn:120,localOnly:true,files:rows.map(r=>({id:r.id,path:r.path,fromChangelist:r.changelist}))};
+ assert.equal(validateChangelistPlan(plan,request,rows),plan);
+ for(const patch of [{workspaceId:'b'},{selectionVersion:2},{snapshotToken:'stale'},{action:'remove'},{name:'New'},{mode:'demo'},{planToken:''},{planToken:'x'.repeat(65)},{planToken:'x\ny'},{expiresIn:121},{localOnly:false},{files:plan.files.slice(1)},{files:[plan.files[0],plan.files[0]]},{files:[{...plan.files[0],path:'other'},plan.files[1]]},{files:[{...plan.files[0],fromChangelist:'unknown'},plan.files[1]]}])assert.throws(()=>validateChangelistPlan({...plan,...patch},request,rows));
+ assert.throws(()=>validateChangelistPlan(plan,{...request,ids:['one','one']},rows));
+});
+test('moving final file removes named group; removal uses default group without expanding paths',()=>{
+ const rows=[{id:'a',path:'dir/a',changelist:'old'},{id:'b',path:'dir/b',changelist:null}];
+ const selected=new Set(['a']);const moved=rows.map(r=>selected.has(r.id)?{...r,changelist:'new'}:r);
+ assert.deepEqual(groupsFor(moved).map(([n])=>n),['','new']);assert.equal(moved[1],rows[1]);
+ assert.deepEqual(groupsFor(moved.map(r=>({...r,changelist:null}))).map(([n])=>n),['']);
+});
+import {canRelabelFile} from '../web/model.js';
+test('known unsupported changelist rows are disabled before preflight; unknown kind requires server validation',()=>{
+ const row={item:'modified',props:'none',kind:'unknown'};assert.equal(canRelabelFile(row),true);
+ for(const item of ['conflicted','missing','obstructed','unversioned','ignored','external','incomplete'])assert.equal(canRelabelFile({...row,item}),false);
+ for(const key of ['switched','file_external','tree_conflicted','wc_locked'])assert.equal(canRelabelFile({...row,[key]:true}),false);
+ assert.equal(canRelabelFile({...row,props:'conflicted'}),false);assert.equal(canRelabelFile({...row,kind:'dir'}),false);
+});

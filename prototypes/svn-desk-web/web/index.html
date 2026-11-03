@@ -6,12 +6,12 @@
     <button class="icon-button mobile-nav" id="nav-toggle" aria-label="切换导航栏" data-icon="panel"></button>
     <div class="brand"><img src="./favicon.svg" alt="" width="26" height="26"><strong>SVN <span>Desk</span></strong><span class="prototype">WEB PREVIEW</span></div>
     <div class="header-context"><span id="context-workspace">Project Atlas</span><span class="slash">/</span><span>工作副本</span></div>
-    <div class="header-end"><span class="mode-pill" id="mode-pill"><span class="dot"></span>演示数据 · 只读原型</span><button class="icon-button" id="help" aria-label="原型能力与快捷键" data-icon="help"></button></div>
+    <div class="header-end"><span class="mode-pill" id="mode-pill"><span class="dot"></span>演示数据 · 本地模拟</span><button class="icon-button" id="help" aria-label="原型能力与快捷键" data-icon="help"></button></div>
   </header>
   <div class="toolbar">
     <div class="tool-section"><button id="refresh" class="tool-button" title="刷新本地状态 (F5)"><span data-icon="refresh"></span>刷新<span class="keycap">F5</span></button><button class="tool-button" id="open-workspace"><span data-icon="folder"></span>工作副本<span data-icon="chevron-down"></span></button></div>
-    <div class="tool-section"><button class="tool-button" id="view-diff"><span data-icon="diff"></span>查看差异</button><button class="tool-button" id="review"><span data-icon="checklist"></span>审查选中项<span class="selection-badge" id="selected-count">1</span></button></div>
-    <div class="toolbar-spacer"></div><button class="tool-button" id="revert" disabled title="原型未接入写操作"><span data-icon="undo"></span>还原</button><button class="primary-button" disabled title="提交尚未接入，原型不会修改 SVN"><span data-icon="upload"></span>提交更改<span class="tiny-lock" data-icon="lock"></span></button>
+    <div class="tool-section"><button class="tool-button" id="view-diff"><span data-icon="diff"></span>查看差异</button><button class="tool-button" id="review"><span data-icon="checklist"></span>审查选中项<span class="selection-badge" id="selected-count">1</span></button><button class="tool-button" id="move-changelist" disabled><span data-icon="layers"></span>移动到变更列表</button></div>
+    <div class="toolbar-spacer"></div><button class="tool-button" id="revert" disabled title="还原尚未接入"><span data-icon="undo"></span>还原</button><button class="primary-button" disabled title="提交尚未接入；本地归组需单独确认"><span data-icon="upload"></span>提交更改<span class="tiny-lock" data-icon="lock"></span></button>
   </div>
   <div class="addressbar"><span data-icon="computer"></span><span class="address-label">工作副本</span><span id="workspace-address">D:\Workspace\ProjectAtlas</span><span class="address-right"><span data-icon="branch"></span><span id="branch-label">trunk</span><span class="separator">|</span><span id="revision-label">BASE r2841</span></span></div>
   <main class="workbench">
@@ -25,7 +25,7 @@
         <div id="folder-tree" class="folder-tree"></div>
         <div id="repository-notice" class="repository-notice hidden"><span data-icon="server"></span><strong>仓库浏览未接入</strong><p>这轮只读取本地状态，不自动访问仓库。示例 trunk 不是连接结果。</p></div>
       </div>
-      <div class="sidebar-foot"><span data-icon="shield"></span><div><strong>安全只读模式</strong><small>没有提交、还原或 Shelf 写入</small></div></div>
+      <div class="sidebar-foot"><span data-icon="shield"></span><div><strong>本地归组 · 独立确认</strong><small>没有提交、还原或 Shelf 写入</small></div></div>
     </aside>
     <section class="main-area">
       <div class="content-tabs"><button class="active" id="pending-tab"><span data-icon="layers"></span>待提交更改<span class="tab-count" id="tab-count">12</span></button><button id="history-tab"><span data-icon="history"></span>文件历史<span class="demo-indicator" id="history-indicator">示例</span></button><div class="tab-filler"></div><button class="icon-button" id="toggle-detail" aria-label="显示或隐藏详情" data-icon="panel-right"></button></div>
@@ -42,7 +42,7 @@
   <section class="activity-panel"><button class="activity-heading" id="toggle-log"><span data-icon="terminal"></span><strong>操作日志</strong><span class="log-counter" id="log-counter">2</span><span class="log-caption">独立于文件差异</span><span class="log-chevron" data-icon="chevron-down"></span></button><div class="activity-log" id="activity-log" role="log" aria-label="操作日志"></div></section>
   <footer class="statusbar"><span><span class="dot"></span><span id="status-text">演示数据，未连接仓库</span></span><span class="status-right"><span id="status-summary">12 项更改 · 1 个冲突</span><span class="separator">|</span><span id="read-time">就绪</span><span class="separator">|</span><span>Web UI 原型 0.1</span></span></footer>
 </div>
-<dialog id="modal"><div class="modal-header"><h2 id="modal-title"></h2><button class="icon-button" id="modal-close" aria-label="关闭对话框" data-icon="close"></button></div><div id="modal-content"></div><div class="modal-footer"><button id="modal-done" class="primary-button">关闭</button></div></dialog>
+<dialog id="modal"><div class="modal-header"><h2 id="modal-title"></h2><button class="icon-button" id="modal-close" aria-label="关闭对话框" data-icon="close"></button></div><div id="modal-content"></div><div class="modal-footer"><button id="changelist-confirm" class="primary-button hidden" disabled>确认修改本地标签</button><button id="modal-done" class="primary-button">关闭</button></div></dialog>
 <div id="toast" class="toast hidden" role="status"></div>
 <script type="module" src="./app.js"></script>
 </body></html>

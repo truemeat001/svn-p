@@ -1,6 +1,6 @@
 """CLI-bounded workspace catalog and local selection preferences.
 
-These endpoints never accept filesystem paths or execute SVN writes. Discovery
+Endpoints never accept filesystem paths; optional label mutations are separately gated. Discovery
 candidates are observations, not proof of repository identity. Persistence is
 explicitly opt-in and stores preferences outside the working copies.
 """
@@ -243,12 +243,14 @@ class WorkspaceCatalog:
                 'scope': '只扫描启动参数授权的父目录；候选尚未验证仓库身份。'}
 
     def config(self):
-        selected, _, generation = self._selection
+        selected, adapter, generation = self._selection
+        changelists = bool(adapter is not None and getattr(adapter, '_changelist_service', None) is not None)
         return {'mode': 'live' if selected else 'select',
                 'workspace': selected.path.name if selected else '尚未选择工作区',
                 'root': str(selected.path) if selected else '请从已授权候选中选择',
                 'workspaceId': selected.id if selected else None,
-                'selectionVersion': generation, 'writesEnabled': False,
+                'selectionVersion': generation, 'writesEnabled': changelists,
+                'changelistWritesEnabled': changelists,
                 'workspaceSelectionEnabled': True,
                 'persistenceEnabled': bool(self.settings_file) and not self.settings_warning}
 
@@ -282,6 +284,27 @@ class WorkspaceCatalog:
             self._check(candidate)
             payload = adapter.file_read(kind, data)
             self._check(candidate)
+            return {**payload, **self.config()}
+
+    def changelist_operation(self, kind, data):
+        from file_reads import StaleRead
+        from changelist_ops import MutationUncertain
+        with self.operation():
+            candidate, adapter, generation = self._selection
+            if (candidate is None or adapter is None or data['workspaceId'] != candidate.id
+                    or data['selectionVersion'] != generation):
+                raise StaleRead('Workspace selection changed.')
+            self._check(candidate)
+            payload = adapter.changelist_operation(kind, data)
+            try:
+                self._check(candidate)
+            except Exception as error:
+                adapter._read_snapshot = None
+                if getattr(adapter, '_changelist_service', None):
+                    adapter._changelist_service.invalidate()
+                if kind == 'apply':
+                    raise MutationUncertain('Workspace changed after label execution.') from error
+                raise
             return {**payload, **self.config()}
 
     def select(self, identifier):

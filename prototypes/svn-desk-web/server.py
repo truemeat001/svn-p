@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback-only, read-only SVN Desk prototype bridge. No write APIs."""
+"""Loopback SVN Desk bridge; optional confirmed local changelist labels only."""
 from __future__ import annotations
 import argparse
 from dataclasses import asdict
@@ -16,6 +16,9 @@ from workspace_bridge import WorkspaceCatalog, local_path, working_copy_identity
 from file_reads import (FileReadService, StaleRead, UnsupportedComparison,
                         comparison_revisions, history_module, revision)
 
+from changelist_ops import (ChangelistService, ChangelistUnavailable, MutationUncertain,
+                            validate_request, status_rows, visible_rows)
+
 ROOT = Path(__file__).resolve().parent
 ASSETS = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
           "/model.js": "model.js", "/demo-data.js": "demo-data.js", "/styles.css": "styles.css", "/favicon.svg": "favicon.svg"}
@@ -24,7 +27,7 @@ MAX_ROWS = 50000
 
 class ReadOnlyAdapter:
     """Imports trusted bounded services. Never exposes a generic SVN command."""
-    def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None):
+    def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None, *, enable_changelists=False):
         self.workspace = local_path(workspace)
         self._identity = working_copy_identity(self.workspace)
         backend, status_stream, _, _ = trusted_modules(backend_source)
@@ -34,6 +37,8 @@ class ReadOnlyAdapter:
         self.client = backend.SvnClient(self.workspace, executable=executable, timeout=25)
         history = history_module(backend_source)
         self._file_service = FileReadService(self.client, history) if history else None
+        self._changelist_service = (ChangelistService(self.client, self._file_service.manager, self._check_workspace)
+                                   if enable_changelists and self._file_service else None)
         self._read_snapshot = None
         self._check_workspace()
         self._busy = threading.Lock()
@@ -46,9 +51,16 @@ class ReadOnlyAdapter:
         if not self._busy.acquire(blocking=False):
             raise BlockingIOError("A status read is already running.")
         try:
-            self._read_snapshot = None  # Refresh invalidates old file capabilities even on failure.
+            self._read_snapshot = None  # Refresh invalidates old capabilities even on failure.
+            service = getattr(self, '_changelist_service', None)
+            if service:
+                service.invalidate()
             self._check_workspace()
             # No --show-updates, remote info/list/log, shell, diff or writes.
+            if service:
+                rows = visible_rows(status_rows(self.client))
+                self._check_workspace()
+                return self._publish_snapshot(rows)
             entries = self.client.status(verbose=False)
             self._check_workspace()
             if len(entries) > MAX_ROWS:
@@ -63,13 +75,45 @@ class ReadOnlyAdapter:
                 rows.append(row)
             if len({row['id'] for row in rows}) != len(rows):
                 raise ValueError("Duplicate status IDs are not safe read capabilities.")
-            token = secrets.token_urlsafe(24)
-            self._read_snapshot = (token, {row['id']: dict(row) for row in rows})
-            return {"mode": "live", "workspace": self.workspace.name,
-                    "root": str(self.workspace), "rows": rows,
-                    "snapshotToken": token, "fileReadsEnabled": getattr(self, '_file_service', None) is not None,
-                    "readAt": datetime.now(timezone.utc).isoformat(),
-                    "scope": "Local status only; repository connectivity not tested."}
+            return self._publish_snapshot(rows)
+        finally:
+            self._busy.release()
+
+    def _publish_snapshot(self, rows):
+        token = secrets.token_urlsafe(24)
+        self._read_snapshot = (token, {row['id']: dict(row) for row in rows})
+        return {"mode": "live", "workspace": self.workspace.name,
+                "root": str(self.workspace), "rows": rows,
+                "snapshotToken": token, "fileReadsEnabled": getattr(self, '_file_service', None) is not None,
+                "changelistWritesEnabled": getattr(self, '_changelist_service', None) is not None,
+                "readAt": datetime.now(timezone.utc).isoformat(),
+                "scope": "Local status only; repository connectivity not tested."}
+
+    def changelist_operation(self, kind, data):
+        if not self._busy.acquire(blocking=False):
+            raise BlockingIOError('A workspace operation is already running.')
+        try:
+            service = getattr(self, '_changelist_service', None)
+            if service is None:
+                raise ChangelistUnavailable('Local changelist writes are not enabled.')
+            self._check_workspace()
+            if kind == 'preflight':
+                payload = service.preflight(data, self._read_snapshot)
+                try:
+                    self._check_workspace()
+                except Exception:
+                    service.invalidate()
+                    raise
+                return payload
+            def invalidate():
+                self._read_snapshot = None
+            result, rows = service.apply(data, self._read_snapshot, invalidate)
+            try:
+                self._check_workspace()
+                return {**self._publish_snapshot(visible_rows(rows)), 'changelistResult': result}
+            except Exception as error:
+                self._read_snapshot = None
+                raise MutationUncertain('Post-write workspace validation failed.') from error
         finally:
             self._busy.release()
 
@@ -190,7 +234,8 @@ class Handler(BaseHTTPRequestHandler):
         if url is None:
             return
         file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history'}.get(url.path)
-        if (url.path != "/api/workspace-selection" and file_kind is None) or self.server.catalog is None:
+        changelist_kind = {'/api/changelist-preflight': 'preflight', '/api/changelist-apply': 'apply'}.get(url.path)
+        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None) or self.server.catalog is None:
             return self.respond(405, {"error": "SVN writes are not implemented."})
         if (self.headers.get_all("Content-Length") is None
                 or len(self.headers.get_all("Content-Length")) != 1
@@ -199,7 +244,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {"error": "A bounded JSON request is required."})
         try:
             size = int(self.headers['Content-Length'])
-            if not 1 <= size <= 4096:
+            if not 1 <= size <= (262144 if changelist_kind else 4096):
                 return self.respond(413, {"error": "Selection request is too large or empty."})
             self.connection.settimeout(5)
             body = self.rfile.read(size)
@@ -213,7 +258,9 @@ class Handler(BaseHTTPRequestHandler):
                     obj[key] = value
                 return obj
             data = json.loads(body, object_pairs_hook=strict_object)
-            if file_kind is None:
+            if changelist_kind:
+                validate_request(changelist_kind, data)
+            elif file_kind is None:
                 if (not isinstance(data, dict) or set(data) != {"id"}
                         or not isinstance(data['id'], str) or not 1 <= len(data['id']) <= 64):
                     raise ValueError('Invalid selection.')
@@ -237,6 +284,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {'error': '不支持 BASE → BASE 比较。查看本地修改请选 BASE → WORKING，或使用明确数字修订；未运行比较。'})
         except (ValueError, OSError, RecursionError):
             return self.respond(400, {"error": "只接受明确工作区、当前状态行与受限修订；不接受任意路径、命令或重复字段。"})
+        if changelist_kind:
+            try:
+                return self.respond(200, self.server.catalog.changelist_operation(changelist_kind, data))
+            except ChangelistUnavailable:
+                return self.respond(403, {'error': '本地归组未启用。须由本机启动参数明确启用；提交、还原与 Shelf 仍不可用。'})
+            except StaleRead:
+                return self.respond(409, {'error': '确认计划、文件或状态已过期；本次未执行归组。请刷新状态并重新预检确认。'})
+            except BlockingIOError:
+                return self.respond(409, {'error': '已有工作区操作正在运行；本次未执行归组。请完成后明确重试。'})
+            except Exception:
+                if changelist_kind == 'apply':
+                    return self.respond(503, {'error': '本地归组结果未能确认，部分标签可能已改变；没有自动重试或回滚。请明确刷新状态，再重新选择、预检和确认。'})
+                return self.respond(503, {'error': '本地归组预检未通过，未运行归组写操作。请检查文件范围、状态、严格配套后端与 SVN 安装后重新审查。'})
         if file_kind is not None:
             try:
                 return self.respond(200, self.server.catalog.file_read(file_kind, data))
@@ -268,12 +328,13 @@ def main():
     parser.add_argument("--scan-parent", type=Path, action="append", default=[], help="Authorize bounded metadata discovery below this directory; repeatable")
     parser.add_argument("--settings-file", type=Path, help="Opt in to selection preferences outside all scan/WC directories; parent must exist")
     parser.add_argument("--backend-source", type=Path)
+    parser.add_argument("--enable-changelists", action="store_true", help="Opt in to confirmed exact-file local SVN label assignment/removal; no commit/revert/Shelf")
     parser.add_argument("--svn", help="Trusted installed native SVN executable")
     args = parser.parse_args()
     authorized = bool(args.workspace or args.scan_parent)
     if authorized and not args.backend_source:
         parser.error("--workspace/--scan-parent requires --backend-source; demo is never used as a fallback.")
-    if (args.backend_source or args.svn or args.settings_file) and not authorized:
+    if (args.backend_source or args.svn or args.settings_file or args.enable_changelists) and not authorized:
         parser.error("Backend, SVN and preferences require --workspace or --scan-parent.")
     try:
         catalog = None
@@ -281,11 +342,11 @@ def main():
             _, _, discovery, settings = trusted_modules(args.backend_source)
             catalog = WorkspaceCatalog(roots=args.workspace, parents=args.scan_parent,
                 discovery=discovery, settings=settings, settings_file=args.settings_file,
-                adapter_factory=lambda path: ReadOnlyAdapter(path, args.backend_source, args.svn))
+                adapter_factory=lambda path: ReadOnlyAdapter(path, args.backend_source, args.svn, enable_changelists=args.enable_changelists))
         server = PrototypeServer(args.port, catalog=catalog)
     except (ValueError, OSError, RuntimeError, ImportError):
         parser.exit(1, "Startup failed. Verify authorized directories, preferences path and trusted backend.\n")
-    print(f"SVN Desk {'READ-ONLY WORKSPACES' if catalog else 'DEMO'}: {server.origin}", flush=True)
+    print(f"SVN Desk {('CONFIRMED LOCAL CHANGELISTS' if args.enable_changelists else 'READ-ONLY WORKSPACES') if catalog else 'DEMO'}: {server.origin}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

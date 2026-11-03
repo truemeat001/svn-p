@@ -28,3 +28,14 @@
 .read-network{margin:3px 0 5px;font-size:10px;line-height:1.5}.read-restrictions{font-family:inherit;font-size:10px;line-height:1.5;color:#91a8c7;margin:3px 0 6px}.read-restrictions summary{cursor:pointer}.read-restrictions p{margin:5px 0}.live-preview .revision-controls{margin:0 0 5px;gap:8px}.live-preview .live-read{padding:5px 14px}.live-preview .live-diff-text{margin:5px 0}.live-preview .read-notice{margin:4px 0}.preview-panel.live-preview{height:245px}
 @media(max-height:820px){.preview-panel.live-preview{height:235px}}
 .preview-panel.live-preview.collapsed{height:34px}
+
+.changelist-files { max-height: 280px; overflow: auto; padding: 0; list-style: none; border: 1px solid var(--border, #dce1e8); border-radius: 6px; }
+.changelist-files li { display: grid; gap: 5px; padding: 10px 12px; border-bottom: 1px solid var(--border, #dce1e8); }
+.changelist-path { overflow-wrap: anywhere; white-space: pre-wrap; font-family: Consolas, monospace; }
+.changelist-controls { display: grid; gap: 12px; }
+.changelist-controls label { display: grid; gap: 6px; }
+.changelist-controls input, .changelist-controls select { box-sizing: border-box; width: 100%; padding: 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text); }
+#changelist-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.changelist-files li > span + span { color: var(--muted, #9eacc0); font-size: 11px; overflow-wrap: anywhere; }
+@media(max-width:760px){ .toolbar { overflow-x: auto; } .toolbar .tool-section { flex-shrink: 0; } }

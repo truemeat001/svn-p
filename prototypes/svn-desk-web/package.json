@@ -9,7 +9,9 @@
     "test:ui": "node tests/browser.test.cjs",
     "tauri": "tauri",
     "test:workspaces:ui": "node tests/workspaces.browser.test.cjs",
-    "test:readonly:ui": "node tests/readonly.browser.test.cjs"
+    "test:readonly:ui": "node tests/readonly.browser.test.cjs",
+    "test:changelists:ui": "node tests/changelists.browser.test.cjs",
+    "test:changelists:integration:ui": "node tests/changelists.integration.browser.test.cjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

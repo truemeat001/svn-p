@@ -1,6 +1,6 @@
 // Optional reproducible browser smoke tests. Requires Playwright + a browser.
-// This script was NOT run in the current test environment; actual manual browser interaction
-// coverage is separately documented in docs/VALIDATION.md.
+// Current execution results and environment limitations are documented in
+// docs/VALIDATION.md and docs/LOCAL_CHANGELISTS.md.
 const {chromium}=require('playwright');
 const {spawn}=require('node:child_process');
 const assert=require('node:assert/strict');

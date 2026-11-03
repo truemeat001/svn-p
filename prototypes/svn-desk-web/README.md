@@ -13,16 +13,17 @@ python3 server.py
 # 然后打开 http://127.0.0.1:8765
 ```
 
-默认和离线包始终标明“演示数据”；启用工作区桥接后明确区分待选工作区、真实只读状态和失败状态。默认变更列表初始折叠，选中 `PlayerController.cs` 可以查看内置示例差异、历史。其他文件没有示例差异时会明确说明，不复用虚假内容。
+默认和离线包始终标明“演示数据”；离线归组仅模拟当前页面。启用工作区桥接后明确区分待选工作区、真实只读状态、本地归组已启用和失败状态。默认变更列表初始折叠，选中 `PlayerController.cs` 可以查看内置示例差异、历史。其他文件没有示例差异时会明确说明，不复用虚假内容。
 
 ## 已实现
 
 - 搜索文件/变更列表，状态与目录范围筛选；目录只筛选，不会扩大选区。
 - 本地 changelist 分组/折叠、文件多选、当前可见项选择、隐藏选中项计数、完整只读审查。
+- 可选本地 changelist 标签移动与移回默认组：启动时明确启用，完整选区预检，再单独确认；没有提交、还原或 Shelf API。
 - 选中行详情、diff / properties、分页文件历史和独立有界操作日志；离线模式仍明确使用示例数据。
 - F5 刷新、Ctrl/Cmd K 搜索、方向键浏览、空格切换选择、Esc 关闭弹窗。
 - 详情/差异/日志面板显示切换，窄桌面视口布局；**最低布局宽度 520px，非手机产品。**
-- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库；没有 SVN 写 API。
+- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库。默认没有 SVN 写能力；唯一可选写入口是经过预检和确认的本地 changelist 标签。
 
 ## 真实工作区流程
 
@@ -34,10 +35,25 @@ python3 server.py --workspace "/path/to/working-copy-root" \
 # 可选 --svn 指定可信、已经安装的 SVN 原生程序。
 ```
 
-工作副本必须是含 `.svn` 的已有根目录。`--backend-source` 指向可信原版源码根，复用其 `svn_client.backend.SvnClient.status` / `status_stream`。本轮为修复零退出码告警误判，更新了原后端的只读 status 完成检查；其他安全实现和 Shelf 未改。刷新只执行本地 `status(verbose=False)`，不加 `--show-updates`，不自动执行历史或远程查询。显式文件读取复用原版有界 `HistoryManager`；本地 `info` 验证身份后，按用户点击执行 `diff` 或 `log`。SVN 程序和目录授权范围在启动时固定，网页不能输入路径或任意命令。
+工作副本必须是含 `.svn` 的已有根目录。`--backend-source` 指向可信原版源码根，复用其 `svn_client.backend.SvnClient.status` / `status_stream`。本轮为修复零退出码告警误判，更新了原后端的只读 status 完成检查；其他安全实现和 Shelf 未改。默认刷新只执行本地 `status(verbose=False)`；启用本地归组后使用 `status(verbose=True)` 并仅显示变更项与有标签的干净成员，不加 `--show-updates`，不自动执行历史或远程查询。显式文件读取复用原版有界 `HistoryManager`；本地 `info` 验证身份后，按用户点击执行 `diff` 或 `log`。SVN 程序和目录授权范围在启动时固定，网页不能输入路径或任意命令。
 
 状态结果只包含元数据。当前状态行可以显式读取单文件的有界差异或分页历史；不是任意文件浏览器，不提供整文件内容、目录差异、仓库树或持续连接状态。失败返回错误，清空结果并标记状态未知，绝不回退为示例或“干净”。5 万行上限是返回给 UI 前的拒绝阈值，不是流式 UI 或内存上限。依赖原后端完成有界 XML/超时处理。挂载网络目录的本地文件读取仍可能访问该文件系统。
 
+
+### 本地 changelist 分组与移回
+
+```sh
+python3 server.py --workspace "/path/to/test-working-copy" \
+  --backend-source "/path/to/original-svn-desk" --enable-changelists
+```
+
+`--enable-changelists` 必须由本机启动时显式设置。网页不能开启它、改授权目录、提交或调用任意 SVN 命令；旧的默认启动方式仍是只读。配套严格 history 后端不可用时归组不可用。
+
+选择最多 100 个明确文件，点击「移动到变更列表」，输入已有或新名称，或选择「移除标签，回到默认变更列表」。对话框包含被筛选/折叠隐藏的选中路径和来源组。点击「预检明确选区」只读取本地状态和 info，成功后仍需单独「确认修改本地标签」。名称 1–128 字符，去除前后空白、拒绝控制字符；不持久化空组。
+
+确认绑定当前工作区、选择代际、状态快照、精确文件集合和目标，有效期 120 秒且只使用一次。刷新、编辑目标、改变选区或关闭对话框后需重新预检。执行后通过新的本地状态核对结果；失败/超时可能已改变部分标签，不自动重试或回滚。关闭正在执行的窗口不取消命令，界面先清空旧状态；结果未知时需要明确刷新重新审查。
+
+这只是当前工作副本的 SVN 原生标签，不是服务器编号 CL，不修改工作文件内容，也不触碰提交、还原或 Shelf。空命名组会自然消失。只允许已版本化单文件，拒绝目录、链接、hardlink、reparse point、跨设备、嵌套 WC、external、switched、冲突、缺失及锁定条目。安全边界与完整验证记录见 [本地归组工作流](docs/LOCAL_CHANGELISTS.md)。**当前未完成 Windows 真实 SVN 归组验收，请先在可丢弃测试副本验证。**
 
 ### 单文件差异与历史
 
@@ -70,7 +86,7 @@ python3 server.py --scan-parent "/path/to/projects" \
 ## 安全边界
 
 - 仅监听 `127.0.0.1`；精确 Host、Origin / Fetch Metadata、每次启动临时 session token、无 CORS、no-store、CSP、iframe 禁止。
-- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；执行只读查询并可选保存选择偏好，不执行 SVN 写入。无通用命令、任意文件读取、上传、提交、还原、Shelf 或归组入口。
+- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。无通用命令、任意文件读取、上传、提交、还原或 Shelf 入口。
 - 原始 SVN 错误输出不会返回网页或记录到日志；动态路径/标签按文本转义。
 - 这是本机应用桥接，不是对不可信本机进程的安全沙箱，不应暴露到局域网或互联网。
 - Python 标准库服务用于原型，不是生产 HTTP 部署方案。

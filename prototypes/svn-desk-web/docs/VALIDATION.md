@@ -1,3 +1,9 @@
+# Confirmed local changelist checkpoint · 2026-11-03
+
+Current opt-in local label workflow, safety boundaries and new verification are in [LOCAL_CHANGELISTS.md](LOCAL_CHANGELISTS.md). This supersedes the older "no SVN write endpoints" statements below only when `--enable-changelists` is explicitly enabled. Default startup remains read-only; no commit/revert/Shelf APIs exist. Earlier counts describe their historical checkpoints.
+
+---
+
 # Mixed diff encoding correction · 2026-11-03
 
 The latest source/API checks and outstanding Windows retest are in [DIFF_ENCODING_FIX.md](DIFF_ENCODING_FIX.md). Earlier counts below describe their own historical checkpoints.
