@@ -1,0 +1,40 @@
+// Real browser + HTTP assets, synthetic read responses only. Does not invoke SVN.
+const {chromium}=require('playwright');
+const {spawn}=require('node:child_process');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+const server=spawn(process.env.PYTHON||'python3',[path.resolve(__dirname,'../server.py'),'--port','0']);
+(async()=>{let browser;try{
+ const url=await new Promise((resolve,reject)=>{let output='';server.stdout.on('data',chunk=>{output+=chunk;const m=output.match(/http:\/\/127\.0\.0\.1:\d+/);if(m)resolve(m[0]);});server.on('error',reject);server.on('exit',code=>reject(Error('Server exit '+code)));setTimeout(()=>reject(Error('Server startup timeout')),8000).unref();});
+ browser=await chromium.launch({...(process.env.CHROMIUM_PATH?{executablePath:process.env.CHROMIUM_PATH}:{})});
+ const page=await browser.newPage({viewport:{width:1440,height:960}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ let snapshot={mode:'live',workspace:'SYNTHETIC A',root:'/synthetic/a',workspaceId:'a',selectionVersion:1,snapshotToken:'s1',fileReadsEnabled:true,rows:[{id:'same-id',path:'one.txt',item:'modified',props:'none',revision:8},{id:'two',path:'two.txt',item:'modified',props:'none',revision:8}]};
+ const json=(route,data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
+ await page.route('**/api/config',route=>json(route,snapshot));await page.route('**/api/status',route=>json(route,snapshot));
+ let diffCalls=0,historyCalls=0,diffGate=null,historyGate=null,badDiff=false,diffFail=false;
+ await page.route('**/api/file-diff',async route=>{diffCalls++;const b=route.request().postDataJSON(),path=snapshot.rows.find(r=>r.id===b.id).path;assert.deepEqual(Object.keys(b).sort(),['workspaceId','selectionVersion','snapshotToken','id','fromRevision','toRevision'].sort());const gate=diffGate;if(gate)await gate;const text='@@ synthetic @@\n+<script>not executable</script>\n';await json(route,diffFail?{error:'Synthetic read failed'}:{...b,mode:'live',path:badDiff?'wrong.txt':path,text,truncated:false,sourceUtf8Bytes:Buffer.byteLength(text),returnedUtf8Bytes:Buffer.byteLength(text),binaryPayloadsIncluded:false},diffFail?503:200);});
+ await page.route('**/api/file-history',async route=>{historyCalls++;const b=route.request().postDataJSON(),path=snapshot.rows.find(r=>r.id===b.id).path;assert.deepEqual(Object.keys(b).sort(),['workspaceId','selectionVersion','snapshotToken','id','startRevision'].sort());const gate=historyGate;if(gate)await gate;const revision=b.startRevision==='HEAD'?'8':'7';await json(route,{...b,mode:'live',path,entries:[{revision,author:'Synthetic',date:'2026-11-03',message:'<b>escaped message</b>',changedPaths:[{path:'/other.txt',action:'M',kind:'file',copyfrom_path:null,copyfrom_rev:null}]}],hasMore:revision==='8',nextStartRevision:revision==='8'?'7':null});});
+ await page.goto(url);await page.locator('#read-diff:not([disabled])').waitFor();assert.equal(diffCalls,0);assert.equal(historyCalls,0);
+ await page.locator('#read-diff').click();await page.locator('.live-diff-text').waitFor();assert.match(await page.locator('.live-diff-text').innerText(),/<script>/);assert.equal(await page.locator('.live-diff-text script').count(),0);
+ // Revision edits clear visible output immediately and preserve entered values across render.
+ await page.locator('#diff-from').fill('7');assert.equal(await page.locator('.live-diff-text').count(),0);assert.equal(await page.locator('#diff-from').inputValue(),'7');
+ await page.locator('#diff-to').fill('8');await page.locator('#read-diff').click();await page.locator('.live-diff-text').waitFor();assert.equal(await page.locator('#diff-from').inputValue(),'7');assert.equal(await page.locator('#diff-to').inputValue(),'8');
+ // Failed/mismatched response clears previous result.
+ badDiff=true;await page.locator('#read-diff').click();await page.locator('.read-error').waitFor();assert.equal(await page.locator('.live-diff-text').count(),0);badDiff=false;
+ diffFail=true;await page.locator('#read-diff').click();await page.locator('.read-error').filter({hasText:'Synthetic read failed'}).waitFor();assert.equal(await page.locator('.live-diff-text').count(),0);diffFail=false;
+ // Editing an in-flight request invalidates it without sending an automatic replacement.
+ let editRelease;diffGate=new Promise(resolve=>editRelease=resolve);await page.locator('#read-diff').click();const callsBeforeEdit=diffCalls;await page.locator('#diff-to').fill('HEAD');editRelease();await page.waitForTimeout(80);diffGate=null;assert.equal(await page.locator('.live-diff-text').count(),0);assert.equal(await page.locator('#diff-to').inputValue(),'HEAD');assert.equal(diffCalls,callsBeforeEdit);
+ // Delayed reads cannot overwrite another focused row, even repeated click.
+ let release;diffGate=new Promise(resolve=>release=resolve);const before=diffCalls;await page.locator('#read-diff').click();await page.evaluate(()=>document.getElementById('read-diff').click());assert.equal(diffCalls,before+1);
+ await page.locator('.file-row').nth(1).click();release();await page.waitForTimeout(80);diffGate=null;assert.equal(await page.locator('.live-diff-text').count(),0);assert.equal(await page.locator('#diff-filename').innerText(),'two.txt');
+ // History opens disclosure without network request; close never resurrects late response.
+ await page.locator('#history-tab').click();assert.equal(historyCalls,0);assert.match(await page.locator('#modal-content').innerText(),/访问当前文件/);
+ historyGate=new Promise(resolve=>release=resolve);await page.locator('#read-history').click();await page.locator('#modal-done').click();release();await page.waitForTimeout(80);historyGate=null;assert.equal(await page.locator('#modal').isVisible(),false);assert.equal(await page.locator('.history-select').count(),0);
+ // Pagination reloads a bounded current page; explicit compare remains exact current file.
+ await page.locator('#history-tab').click();await page.locator('#read-history').click();await page.locator('[data-revision="8"]').waitFor();await page.locator('#history-start').fill('7');assert.equal(await page.locator('.history-select').count(),0);assert.equal(await page.locator('#history-start').inputValue(),'7');await page.locator('#history-start').fill('HEAD');await page.locator('#read-history').click();await page.locator('[data-revision="8"]').waitFor();await page.locator('#history-older').click();await page.locator('[data-revision="7"]').waitFor();assert.equal(await page.locator('.history-select').count(),1);await page.locator('#history-newer').click();await page.locator('[data-revision="8"]').click();assert.match(await page.locator('.history-detail').innerText(),/other.txt/);await page.locator('#history-compare').click();await page.locator('#modal-content .live-diff-text').waitFor();await page.keyboard.press('Escape');assert.equal(await page.locator('.live-diff-text').count(),0);
+ // Refresh/workspace scope with same row ID invalidates a delayed result.
+ await page.locator('.file-row').first().click();diffGate=new Promise(resolve=>release=resolve);await page.locator('#read-diff').click();snapshot={...snapshot,workspace:'SYNTHETIC B',workspaceId:'b',selectionVersion:2,snapshotToken:'s2'};await page.locator('#refresh').click();await page.locator('#workspace-name').filter({hasText:'SYNTHETIC B'}).waitFor();release();await page.waitForTimeout(80);diffGate=null;assert.equal(await page.locator('.live-diff-text').count(),0);
+ // Preview navigation clears active requests and old results.
+ diffGate=new Promise(resolve=>release=resolve);await page.locator('#read-diff').click();await page.locator('[data-preview="properties"]').click();release();await page.waitForTimeout(80);assert.equal(await page.locator('.live-diff-text').count(),0);assert.equal(await page.locator('.properties-grid').count(),1);
+ assert.deepEqual(errors,[]);console.log('PASS synthetic read-only browser flows; no SVN/Windows claims.');
+ }finally{await browser?.close();server.kill();}})().catch(error=>{console.error(error);process.exitCode=1;});

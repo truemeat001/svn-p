@@ -270,6 +270,20 @@ class WorkspaceCatalog:
             self._selection = (self.selected, adapter, self.generation)
             return {**payload, **self.config()}
 
+    def file_read(self, kind, data):
+        # The catalog lock prevents a selection/refresh from racing a read in
+        # another browser window. Request identity is checked before any SVN.
+        from file_reads import StaleRead
+        with self.operation():
+            candidate, adapter, generation = self._selection
+            if (candidate is None or adapter is None or data['workspaceId'] != candidate.id
+                    or data['selectionVersion'] != generation):
+                raise StaleRead('Workspace selection changed.')
+            self._check(candidate)
+            payload = adapter.file_read(kind, data)
+            self._check(candidate)
+            return {**payload, **self.config()}
+
     def select(self, identifier):
         with self.operation():
             candidate = self.candidates.get(identifier)

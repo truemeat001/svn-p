@@ -23,3 +23,54 @@ test('older workspace catalogs cannot roll back a newer selected generation',()=
  assert.equal(isStaleWorkspaceCatalog({current:{selectionVersion:4}},3),false);
  assert.equal(isStaleWorkspaceCatalog({enabled:false},3),false);
 });
+
+import {parseRevision,canReadFile,sameReadScope,validateFileResponse} from '../web/model.js';
+test('revision grammar disallows ranges, arbitrary args, unsafe numbers and wrong endpoints',()=>{
+ assert.equal(parseRevision(' base '),'BASE');assert.equal(parseRevision('9223372036854775807'),'9223372036854775807');
+ assert.equal(parseRevision('WORKING',{working:true}),'WORKING');assert.equal(parseRevision('0',{history:true}),'0');
+ for(const value of ['WORKING','-1','1:2','01','--help','1.5','9223372036854775808','1e2',''])assert.throws(()=>parseRevision(value));
+ assert.throws(()=>parseRevision('BASE',{history:true}));assert.throws(()=>parseRevision(1));
+});
+const readScope={workspaceId:'a',selectionVersion:2,snapshotToken:'snapshot-a',id:'same-id',path:'a.txt'};
+const diffResponse={...readScope,mode:'live',fromRevision:'BASE',toRevision:'WORKING',text:'汉',truncated:false,sourceUtf8Bytes:3,returnedUtf8Bytes:3,binaryPayloadsIncluded:false};
+test('read scope binds identical native IDs to workspace, selection, snapshot and path',()=>{
+ assert.equal(sameReadScope(readScope,{...readScope}),true);
+ for(const field of ['workspaceId','selectionVersion','snapshotToken','id','path'])assert.equal(sameReadScope(readScope,{...readScope,[field]:'other'}),false);
+});
+test('diff validates identities, revisions and UTF-8 bounds before display',()=>{
+ const revisions={fromRevision:'BASE',toRevision:'WORKING'};
+ assert.equal(validateFileResponse(diffResponse,readScope,'diff',revisions),diffResponse);
+ for(const change of [{workspaceId:'b'},{snapshotToken:'older'},{path:'b.txt'},{fromRevision:'HEAD'},{returnedUtf8Bytes:1},{binaryPayloadsIncluded:true},{text:'a'.repeat(262145),returnedUtf8Bytes:262145,sourceUtf8Bytes:262145}])assert.throws(()=>validateFileResponse({...diffResponse,...change},readScope,'diff',revisions));
+});
+test('history validates pagination, ordered revisions and changed paths',()=>{
+ const entry={revision:'5',author:'A',date:'date',message:'message',changedPaths:[{path:'/a.txt',action:'M',kind:'file',copyfrom_path:null,copyfrom_rev:null}]};
+ const data={...readScope,mode:'live',startRevision:'HEAD',entries:[entry],hasMore:true,nextStartRevision:'4'};
+ assert.equal(validateFileResponse(data,readScope,'history',{startRevision:'HEAD'}),data);
+ for(const change of [{startRevision:'5'},{entries:[entry,entry]},{nextStartRevision:'5'},{entries:[]},{entries:[{...entry,revision:5}]}])assert.throws(()=>validateFileResponse({...data,...change},readScope,'history',{startRevision:'HEAD'}));
+ assert.doesNotThrow(()=>validateFileResponse({...data,entries:[],hasMore:false,nextStartRevision:null},readScope,'history',{startRevision:'HEAD'}));
+});
+test('unsupported file rows never enable read actions',()=>{
+ for(const row of [null,{item:'unversioned'},{item:'ignored'},{item:'external'},{item:'modified',switched:true},{item:'modified',file_external:true}])assert.equal(canReadFile(row),false);
+ assert.equal(canReadFile({item:'modified'}),true);
+});
+test('history rejects noncanonical, excessive, or skipped pagination revisions',()=>{
+ const entry={revision:'5',author:'A',date:'date',message:'message',changedPaths:[{path:'/a',action:'A',kind:'file',copyfrom_path:'/b',copyfrom_rev:'4'}]};
+ const data={...readScope,mode:'live',startRevision:'HEAD',entries:[entry],hasMore:true,nextStartRevision:'4'};
+ const check=value=>validateFileResponse(value,readScope,'history',{startRevision:'HEAD'});
+ for(const value of ['05','-1','9223372036854775808','1.0','HEAD']){
+  assert.throws(()=>check({...data,entries:[{...entry,revision:value}]}));
+  assert.throws(()=>check({...data,nextStartRevision:value}));
+  assert.throws(()=>check({...data,entries:[{...entry,changedPaths:[{...entry.changedPaths[0],copyfrom_rev:value}]}]}));
+ }
+ assert.throws(()=>check({...data,nextStartRevision:'3'}));
+ assert.doesNotThrow(()=>check({...data,entries:[{...entry,revision:'9223372036854775807'}],nextStartRevision:'9223372036854775806'}));
+});
+test('diff truncation flag matches source and returned byte counts',()=>{
+ const check=data=>validateFileResponse(data,readScope,'diff',{fromRevision:'BASE',toRevision:'WORKING'});
+ assert.throws(()=>check({...diffResponse,truncated:true}));
+ assert.throws(()=>check({...diffResponse,sourceUtf8Bytes:4}));
+ assert.doesNotThrow(()=>check({...diffResponse,sourceUtf8Bytes:4,truncated:true}));
+});
+test('obstructed and incomplete entries disable file reads',()=>{
+ assert.equal(canReadFile({item:'obstructed'}),false);assert.equal(canReadFile({item:'incomplete'}),false);
+});

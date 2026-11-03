@@ -19,14 +19,14 @@ python3 server.py
 
 - 搜索文件/变更列表，状态与目录范围筛选；目录只筛选，不会扩大选区。
 - 本地 changelist 分组/折叠、文件多选、当前可见项选择、隐藏选中项计数、完整只读审查。
-- 选中行详情、示例 diff / properties、示例历史弹窗、独立有界操作日志。
+- 选中行详情、diff / properties、分页文件历史和独立有界操作日志；离线模式仍明确使用示例数据。
 - F5 刷新、Ctrl/Cmd K 搜索、方向键浏览、空格切换选择、Esc 关闭弹窗。
 - 详情/差异/日志面板显示切换，窄桌面视口布局；**最低布局宽度 520px，非手机产品。**
-- 可选本地只读 status 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。没有远程仓库调用或 SVN 写 API。
+- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库；没有 SVN 写 API。
 
-## 真实工作区流程（等待修正后的 Windows 重测）
+## 真实工作区流程
 
-Windows 验收发现旧版会把 W155007 + 零退出码误当空状态，现已修正并要求配套严格后端。请先阅读 [修正与重测说明](docs/STATUS_DIAGNOSTICS_FIX.md)，更新后重启服务。此环境尚无 SVN，不能把本地合成回归当作 Windows 修复已实测。
+Windows 验收发现旧版会把 W155007 + 零退出码误当空状态，配套严格后端已修正，集成提交 `5dbaff4` 的 status 修复已通过后续 Windows 真实 SVN 重测。新接入的 diff/history **尚未在真实 SVN 或 Windows 验收**。请先阅读 [status 修正说明](docs/STATUS_DIAGNOSTICS_FIX.md) 与 [只读文件工作流说明](docs/READONLY_FILE_WORKFLOWS.md)，更新完整配套源码并重启服务。
 
 ```sh
 python3 server.py --workspace "/path/to/working-copy-root" \
@@ -34,10 +34,20 @@ python3 server.py --workspace "/path/to/working-copy-root" \
 # 可选 --svn 指定可信、已经安装的 SVN 原生程序。
 ```
 
-工作副本必须是含 `.svn` 的已有根目录。`--backend-source` 指向可信原版源码根，复用其 `svn_client.backend.SvnClient.status` / `status_stream`。本轮为修复零退出码告警误判，更新了原后端的只读 status 完成检查；其他安全实现和 Shelf 未改。此原型只执行本地 `status(verbose=False)`，既不运行远程 info/log/list，也不加 `--show-updates`。SVN 程序和目录授权范围在启动时固定，网页不能输入路径或任意命令。
+工作副本必须是含 `.svn` 的已有根目录。`--backend-source` 指向可信原版源码根，复用其 `svn_client.backend.SvnClient.status` / `status_stream`。本轮为修复零退出码告警误判，更新了原后端的只读 status 完成检查；其他安全实现和 Shelf 未改。刷新只执行本地 `status(verbose=False)`，不加 `--show-updates`，不自动执行历史或远程查询。显式文件读取复用原版有界 `HistoryManager`；本地 `info` 验证身份后，按用户点击执行 `diff` 或 `log`。SVN 程序和目录授权范围在启动时固定，网页不能输入路径或任意命令。
 
-结果只包含状态元数据；真实差异、文件内容、历史、仓库树、修订身份和连接状态没有接入。失败返回错误，清空结果并标记状态未知，绝不回退为示例或“干净”。5 万行上限是返回给 UI 前的拒绝阈值，不是流式 UI 或内存上限。依赖原后端完成有界 XML/超时处理。挂载网络目录的本地文件读取仍可能访问该文件系统。
+状态结果只包含元数据。当前状态行可以显式读取单文件的有界差异或分页历史；不是任意文件浏览器，不提供整文件内容、目录差异、仓库树或持续连接状态。失败返回错误，清空结果并标记状态未知，绝不回退为示例或“干净”。5 万行上限是返回给 UI 前的拒绝阈值，不是流式 UI 或内存上限。依赖原后端完成有界 XML/超时处理。挂载网络目录的本地文件读取仍可能访问该文件系统。
 
+
+### 单文件差异与历史
+
+点击「查看差异」后明确选择修订并「读取差异」。BASE→WORKING 只读本地副本；其他比较和历史会访问当前文件仓库，并使用既有 SVN 配置与凭据，页面提前说明。每页历史最多 50 条，支持前后分页、提交详情和当前文件的 r(N−1)→rN 比较；详情的变更路径属于整次提交，可能超出当前文件范围，但不可点选扩大读取范围。
+
+请求绑定当前工作区 ID、选择代际、成功状态快照令牌和原始状态行 ID。切换、刷新失败、改修订、改焦点、关闭窗口或切换预览会清空旧结果并使旧请求失效。关闭不取消已经启动的 SVN 子进程，服务端仍按有界超时完成；不会自动重试。
+
+只接受明确版本化文件。目录、链接、hardlink、reparse point、跨设备、嵌套 WC、external、switched、管理目录与非法路径被拒绝；缺失/已删文件仍须由 SVN 元数据确认是当前工作区文件。Web diff 固定 `--depth empty`，从不递归展开。预览最多 256 KiB，截断会显示；差异硬捕获上限 8 MiB，历史 4 MiB，历史显示页 512 KiB，超限不返回部分结果。
+
+配套 `history.py` 使用 `HISTORY_DIAGNOSTICS_POLICY=1`：零退出码但有任何 stderr（包括本地化提示、工具 banner 或空白）也拒绝结果。可能拒绝无害提示，这是明确的 fail-closed 兼容策略；不按语言或告警编号猜测成功。旧 history 模块不会禁用可用 status，但文件读取按钮不可用。详见 [范围与验证](docs/READONLY_FILE_WORKFLOWS.md)。
 
 ### 扫描、选择和保存
 
@@ -58,7 +68,7 @@ python3 server.py --scan-parent "/path/to/projects" \
 ## 安全边界
 
 - 仅监听 `127.0.0.1`；精确 Host、Origin / Fetch Metadata、每次启动临时 session token、无 CORS、no-store、CSP、iframe 禁止。
-- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection` POST。POST 只接受服务器发出的候选 ID，执行本地 status 并可选保存偏好，不执行 SVN 写入。无通用命令、任意文件读取、上传、提交、还原、Shelf 或归组入口。
+- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；执行只读查询并可选保存选择偏好，不执行 SVN 写入。无通用命令、任意文件读取、上传、提交、还原、Shelf 或归组入口。
 - 原始 SVN 错误输出不会返回网页或记录到日志；动态路径/标签按文本转义。
 - 这是本机应用桥接，不是对不可信本机进程的安全沙箱，不应暴露到局域网或互联网。
 - Python 标准库服务用于原型，不是生产 HTTP 部署方案。

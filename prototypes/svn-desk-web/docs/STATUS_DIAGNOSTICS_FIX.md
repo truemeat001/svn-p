@@ -29,4 +29,8 @@ The three symlink tests now skip only when fixture creation raises `WinError 131
 - The Web regression passes through real HTTP, catalog, adapter and native status transport, substituting a Python process that emits W155007 plus exit 0. It verifies prior root, generation and preference bytes are unchanged after HTTP 503, and that refreshing the prior valid synthetic workspace succeeds.
 - A new real-SVN invalid-marker test runs whenever installed SVN and the matching backend are available. It creates only a temporary directory and `.svn` marker, then invokes read-only status. No checkout/update/commit is needed.
 
-This checkpoint still requires a fresh Windows real-SVN retest. Synthetic tests are not evidence that the Windows failure has been resolved in the installed environment.
+## Subsequent Windows acceptance of integrated `5dbaff4`
+
+The parent task subsequently reported real Windows/SVN acceptance: both Python versions passed 27/27 supplementary workflow checks; Web Python had 51 passed and 3 skipped; the backend had 932 passed and 24 skipped. An empty `.svn` marker returned HTTP 503 without changing selection/preferences, while a valid clean working copy succeeded. This result applies to the integrated status-warning correction, not the later diff/history additions.
+
+The new diff/history checkpoint has its own [validation boundary](READONLY_FILE_WORKFLOWS.md). Synthetic tests are never represented as Windows or real-SVN evidence.

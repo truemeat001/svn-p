@@ -39,3 +39,31 @@ export function parentPath(path) { return path.split('/').slice(0,-1).join('/') 
 export function isStaleWorkspaceCatalog(catalog,currentVersion){
  return Number.isSafeInteger(catalog?.current?.selectionVersion)&&catalog.current.selectionVersion<currentVersion;
 }
+
+function numericRevision(value){return typeof value==='string'&&/^(0|[1-9][0-9]{0,18})$/.test(value)&&BigInt(value)<=9223372036854775807n;}
+// Revision tokens never become arbitrary command arguments. Keep integers as strings.
+export function parseRevision(value,{working=false,history=false}={}){
+ if(typeof value!=='string')throw Error('修订必须是文本。');
+ const token=value.trim().toUpperCase();
+ if(numericRevision(token))return token;
+ if(token==='HEAD'||(!history&&token==='BASE')||(!history&&working&&token==='WORKING'))return token;
+ throw Error(history?'请输入 HEAD 或非负整数修订。':'请输入 BASE、HEAD 或非负整数修订；WORKING 仅用于右侧。');
+}
+export function canReadFile(row){return !!row&&!['unversioned','ignored','external','obstructed','incomplete'].includes(row.item)&&!row.switched&&!row.file_external;}
+export function sameReadScope(a,b){return !!a&&!!b&&['workspaceId','selectionVersion','snapshotToken','id','path'].every(key=>a[key]===b[key]);}
+export function validateFileResponse(data,scope,kind,revision){
+ if(data?.mode!=='live'||!sameReadScope(data,scope))throw Error('文件结果已过期或身份不匹配，请刷新状态。');
+ if(kind==='diff'){
+  if(!(['BASE','HEAD'].includes(data.fromRevision)||numericRevision(data.fromRevision))||!(['BASE','HEAD','WORKING'].includes(data.toRevision)||numericRevision(data.toRevision))||data.fromRevision!==revision.fromRevision||data.toRevision!==revision.toRevision||typeof data.text!=='string'||typeof data.truncated!=='boolean'||data.binaryPayloadsIncluded!==false||!Number.isSafeInteger(data.sourceUtf8Bytes)||!Number.isSafeInteger(data.returnedUtf8Bytes)||data.returnedUtf8Bytes<0||data.sourceUtf8Bytes<data.returnedUtf8Bytes||data.truncated!==(data.sourceUtf8Bytes>data.returnedUtf8Bytes)||data.returnedUtf8Bytes>262144||new TextEncoder().encode(data.text).length!==data.returnedUtf8Bytes)throw Error('差异响应无效。');
+ }else{
+  if(!(data.startRevision==='HEAD'||numericRevision(data.startRevision))||data.startRevision!==revision.startRevision||!Array.isArray(data.entries)||data.entries.length>50||typeof data.hasMore!=='boolean'||(data.hasMore?!numericRevision(data.nextStartRevision):data.nextStartRevision!==null))throw Error('历史响应无效。');
+  let previous=null;
+  for(const entry of data.entries){
+   if(!numericRevision(entry.revision)||!['author','date','message'].every(key=>typeof entry[key]==='string')||!Array.isArray(entry.changedPaths)||entry.changedPaths.some(p=>!p||!['path','action','kind'].every(key=>typeof p[key]==='string')||!(p.copyfrom_path===null||typeof p.copyfrom_path==='string')||!(p.copyfrom_rev===null||numericRevision(p.copyfrom_rev))))throw Error('历史条目无效。');
+   const n=BigInt(entry.revision);if(previous!==null&&n>=previous||revision.startRevision!=='HEAD'&&n>BigInt(revision.startRevision))throw Error('历史顺序无效。');previous=n;
+  }
+  if(data.hasMore&&(previous===null||BigInt(data.nextStartRevision)!==previous-1n))throw Error('历史分页无效。');
+  if(new TextEncoder().encode(JSON.stringify(data)).length>524288)throw Error('历史响应超出上限。');
+ }
+ return data;
+}

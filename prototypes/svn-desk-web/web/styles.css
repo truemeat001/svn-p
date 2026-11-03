@@ -22,3 +22,9 @@
 .workspace-candidate button{flex-shrink:0}
 .workspace-warning,#workspace-result{color:#a76718;overflow-wrap:anywhere}
 @media(max-width:700px){.workspace-candidate{align-items:flex-start;flex-direction:column}}
+
+.live-read{padding:8px 18px}.revision-controls,.history-pagination{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:6px 0 12px}.revision-controls label{display:flex;align-items:center;gap:7px}.revision-controls input{width:100px;background:#111925;color:#c2d4ef;border:1px solid #455c7e;border-radius:4px;padding:5px}.read-notice{font-size:11px;line-height:1.7;color:#a6b7d0;white-space:normal}.read-error{color:#efb7b7;overflow-wrap:anywhere}.live-diff-text{font:11px/1.7 Consolas,monospace;white-space:pre;overflow:auto;max-height:45vh;margin:10px 0;color:#c2d4ef}.history-select{display:block;width:100%;text-align:left;overflow-wrap:anywhere}.history-select.active{background:#263b58}.history-select p,.commit-message{white-space:pre-wrap}.history-detail{border:1px solid #455c7e;border-radius:6px;padding:12px;margin-top:16px;overflow-wrap:anywhere}.history-detail li{font:11px/1.7 Consolas,monospace}.history-pagination{font-size:11px}button:disabled{cursor:not-allowed;opacity:.5}
+/* Live reads need room for disclosure and actual output, without resizing the demo. */
+.read-network{margin:3px 0 5px;font-size:10px;line-height:1.5}.read-restrictions{font-family:inherit;font-size:10px;line-height:1.5;color:#91a8c7;margin:3px 0 6px}.read-restrictions summary{cursor:pointer}.read-restrictions p{margin:5px 0}.live-preview .revision-controls{margin:0 0 5px;gap:8px}.live-preview .live-read{padding:5px 14px}.live-preview .live-diff-text{margin:5px 0}.live-preview .read-notice{margin:4px 0}.preview-panel.live-preview{height:245px}
+@media(max-height:820px){.preview-panel.live-preview{height:235px}}
+.preview-panel.live-preview.collapsed{height:34px}

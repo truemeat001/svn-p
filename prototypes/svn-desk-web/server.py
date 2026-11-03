@@ -13,6 +13,7 @@ import sys
 import threading
 from urllib.parse import urlsplit
 from workspace_bridge import WorkspaceCatalog, local_path, working_copy_identity, trusted_modules
+from file_reads import FileReadService, StaleRead, history_module, revision
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
@@ -21,7 +22,7 @@ MIMES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
 MAX_ROWS = 50000
 
 class ReadOnlyAdapter:
-    """Imports the strict trusted backend, exposing only local status()."""
+    """Imports trusted bounded services. Never exposes a generic SVN command."""
     def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None):
         self.workspace = local_path(workspace)
         self._identity = working_copy_identity(self.workspace)
@@ -30,6 +31,9 @@ class ReadOnlyAdapter:
                 or getattr(status_stream, 'STATUS_DIAGNOSTICS_POLICY', None) != 1):
             raise ValueError("Update the trusted backend: strict status diagnostics policy is required.")
         self.client = backend.SvnClient(self.workspace, executable=executable, timeout=25)
+        history = history_module(backend_source)
+        self._file_service = FileReadService(self.client, history) if history else None
+        self._read_snapshot = None
         self._check_workspace()
         self._busy = threading.Lock()
 
@@ -41,6 +45,7 @@ class ReadOnlyAdapter:
         if not self._busy.acquire(blocking=False):
             raise BlockingIOError("A status read is already running.")
         try:
+            self._read_snapshot = None  # Refresh invalidates old file capabilities even on failure.
             self._check_workspace()
             # No --show-updates, remote info/list/log, shell, diff or writes.
             entries = self.client.status(verbose=False)
@@ -55,10 +60,34 @@ class ReadOnlyAdapter:
                 row["path"] = row["path"].replace(os.sep, "/")  # UI display only; preserve native ID.
                 row["kind"] = "unknown"  # status XML does not reliably identify node kinds.
                 rows.append(row)
+            if len({row['id'] for row in rows}) != len(rows):
+                raise ValueError("Duplicate status IDs are not safe read capabilities.")
+            token = secrets.token_urlsafe(24)
+            self._read_snapshot = (token, {row['id']: dict(row) for row in rows})
             return {"mode": "live", "workspace": self.workspace.name,
                     "root": str(self.workspace), "rows": rows,
+                    "snapshotToken": token, "fileReadsEnabled": getattr(self, '_file_service', None) is not None,
                     "readAt": datetime.now(timezone.utc).isoformat(),
                     "scope": "Local status only; repository connectivity not tested."}
+        finally:
+            self._busy.release()
+
+    def file_read(self, kind, data):
+        if not self._busy.acquire(blocking=False):
+            raise BlockingIOError('A read is already running.')
+        try:
+            self._check_workspace()
+            snapshot = self._read_snapshot
+            if snapshot is None or data['snapshotToken'] != snapshot[0]:
+                raise StaleRead('Status capability expired.')
+            row = snapshot[1].get(data['id'])
+            if row is None:
+                raise StaleRead('Row is not in the current status snapshot.')
+            if self._file_service is None:
+                raise ValueError('A strict bounded history backend is required.')
+            result = self._file_service.read(kind, row, data)
+            self._check_workspace()
+            return {**result, 'id': data['id'], 'snapshotToken': snapshot[0]}
         finally:
             self._busy.release()
 
@@ -159,7 +188,8 @@ class Handler(BaseHTTPRequestHandler):
         url = self.validated_url()
         if url is None:
             return
-        if url.path != "/api/workspace-selection" or self.server.catalog is None:
+        file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history'}.get(url.path)
+        if (url.path != "/api/workspace-selection" and file_kind is None) or self.server.catalog is None:
             return self.respond(405, {"error": "SVN writes are not implemented."})
         if (self.headers.get_all("Content-Length") is None
                 or len(self.headers.get_all("Content-Length")) != 1
@@ -182,11 +212,37 @@ class Handler(BaseHTTPRequestHandler):
                     obj[key] = value
                 return obj
             data = json.loads(body, object_pairs_hook=strict_object)
-            if (not isinstance(data, dict) or set(data) != {"id"}
-                    or not isinstance(data['id'], str) or not 1 <= len(data['id']) <= 64):
-                raise ValueError('Invalid selection.')
+            if file_kind is None:
+                if (not isinstance(data, dict) or set(data) != {"id"}
+                        or not isinstance(data['id'], str) or not 1 <= len(data['id']) <= 64):
+                    raise ValueError('Invalid selection.')
+            else:
+                expected = {'workspaceId', 'selectionVersion', 'snapshotToken', 'id'}
+                expected |= {'fromRevision', 'toRevision'} if file_kind == 'diff' else {'startRevision'}
+                if (not isinstance(data, dict) or set(data) != expected
+                        or not isinstance(data['selectionVersion'], int)
+                        or isinstance(data['selectionVersion'], bool)
+                        or not 1 <= data['selectionVersion'] <= 2**53 - 1):
+                    raise ValueError('Invalid read identity.')
+                for field, maximum in [('workspaceId', 64), ('snapshotToken', 64), ('id', 2048)]:
+                    if (not isinstance(data[field], str) or not 1 <= len(data[field]) <= maximum
+                            or any(ord(c) < 32 or ord(c) == 127 for c in data[field])):
+                        raise ValueError('Invalid read field.')
+                if file_kind == 'diff':
+                    revision(data['fromRevision']); revision(data['toRevision'], working=True)
+                else:
+                    revision(data['startRevision'])
         except (ValueError, OSError, RecursionError):
-            return self.respond(400, {"error": "Select one catalog ID; paths and commands are not accepted."})
+            return self.respond(400, {"error": "只接受明确工作区、当前状态行与受限修订；不接受任意路径、命令或重复字段。"})
+        if file_kind is not None:
+            try:
+                return self.respond(200, self.server.catalog.file_read(file_kind, data))
+            except StaleRead:
+                return self.respond(409, {'error': '工作区或状态已改变，请刷新状态后重新选择文件。'})
+            except BlockingIOError:
+                return self.respond(409, {'error': '已有工作区读取正在运行，请完成后明确重试。'})
+            except Exception:
+                return self.respond(503, {'error': '文件只读查询失败；未返回部分结果，失败不代表无差异或无历史。请检查文件范围、配套严格后端、修订、仓库访问或输出上限。'})
         try:
             return self.respond(200, self.server.catalog.select(data['id']))
         except KeyError:

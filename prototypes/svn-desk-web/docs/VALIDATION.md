@@ -1,3 +1,9 @@
+# Read-only file workflow checkpoint · 2026-11-03
+
+Current diff/history implementation and verification are documented in [READONLY_FILE_WORKFLOWS.md](READONLY_FILE_WORKFLOWS.md). The sections below retain historical checkpoints. Subsequent separately reported Windows real-SVN acceptance of `5dbaff4` supersedes the status-only pending-retest statements below; it does not validate the newer file workflows.
+
+---
+
 # Status-warning correction · 2026-11-03
 
 The Windows real-SVN check of `94d85a2` exposed a fail-open empty-working-copy result. That checkpoint is superseded for real workspace use by the strict stderr completion check described in [STATUS_DIAGNOSTICS_FIX.md](STATUS_DIAGNOSTICS_FIX.md). Matching backend modules and a service restart are required. Windows retesting is pending; no pass is claimed from synthetic tests.

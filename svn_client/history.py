@@ -21,6 +21,9 @@ import xml.etree.ElementTree as ET
 from .backend import LogEntry, SvnClient, SvnError, redact_credentials
 
 
+# Web consumers require fail-closed completion of all read-only transports.
+HISTORY_DIAGNOSTICS_POLICY = 1
+
 MAX_HISTORY_ENTRIES = 1000
 MAX_HISTORY_BYTES = 4 * 1024 * 1024
 MAX_DIFF_BYTES = 8 * 1024 * 1024
@@ -151,6 +154,12 @@ def _bounded_process(argv: Sequence[str], *, cwd: Path, timeout: float,
         codes = sorted(set(re.findall(rb"\b[EW][0-9]{6}\b", bytes(buffers[1]))))[:8]
         suffix = ", " + ", ".join(item.decode("ascii") for item in codes) if codes else ""
         raise HistoryError(f"SVN read failed (exit {code}{suffix}). Check the path, revisions, repository access, and authentication with a trusted SVN client.")
+    if buffers[1]:
+        # A zero exit code can still accompany W155007 or another incomplete
+        # read. We cannot reliably classify localized/custom diagnostics as
+        # harmless. Even whitespace is rejected; no partial/empty success or
+        # raw stderr is exposed. Configure a quiet trusted SVN client instead.
+        raise HistoryError("SVN emitted diagnostics despite exit code zero. No history or comparison result was accepted; verify the target with a trusted SVN client.")
     return bytes(buffers[0])
 
 

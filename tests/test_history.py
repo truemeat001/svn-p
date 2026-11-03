@@ -262,8 +262,11 @@ class BoundedReadTests(unittest.TestCase):
         with self.assertRaisesRegex(HistoryError, "capture limit"):
             self.run_script("import sys; sys.stderr.buffer.write(b'x' * 1000000); sys.stdout.write('ok')")
 
-    def test_both_streams_drained(self):
-        self.assertEqual(self.run_script("import sys; sys.stderr.buffer.write(b'e' * 60000); sys.stdout.buffer.write(b'o' * 1000)"), b"o" * 1000)
+    def test_both_streams_drained_then_diagnostics_reject_success(self):
+        # Both pipes still drain without deadlock, but zero-exit diagnostics
+        # are now fail-closed instead of presenting stdout as a complete read.
+        with self.assertRaisesRegex(HistoryError, "diagnostics despite exit code zero"):
+            self.run_script("import sys; sys.stderr.buffer.write(b'e' * 60000); sys.stdout.buffer.write(b'o' * 1000)")
 
     def test_timeout_reports_read_only_and_no_retry(self):
         with self.assertRaisesRegex(HistoryError, "No write was requested"):
