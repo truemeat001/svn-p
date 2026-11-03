@@ -90,10 +90,25 @@ _BLOCKED_OPTIONS = {
 }
 _BLOCKED_COMMANDS = {"propedit", "pedit", "pe"}
 _DIRECT_TARGET_LIMIT = 24_000  # Leave headroom below Windows' 32,767 UTF-16 units.
+_CREDENTIAL_AUTHORITY_RE = re.compile(r"(://[^/\s:?#]*:)[^/\s?#]*@")
 
 
-def _redact_credentials(text: str) -> str:
-    return re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:)[^/\s@]*@", r"\1***@", text)
+def redact_credentials(text: str) -> str:
+    """Redact URL authority passwords without quadratic scanning of prose.
+
+    Start with the fixed literal '://' rather than a variable-length scheme.
+    Each candidate's authority stops before '/' (also query, fragment, or
+    whitespace), so it cannot scan past another '://' marker. Username parsing
+    stops at the first colon; a greedy password span ends at the last '@', as
+    URL userinfo parsing does. Empty usernames and unescaped email usernames
+    are treated conservatively, even for a malformed or unknown URL scheme.
+    """
+    return _CREDENTIAL_AUTHORITY_RE.sub(r"\1***@", text)
+
+
+# Keep the existing internal name for error/command formatting and callers that
+# imported it before the public machine-interface helper was introduced.
+_redact_credentials = redact_credentials
 
 
 def _int(value: str | None) -> int | None:
@@ -430,8 +445,13 @@ class SvnClient:
         for entry in self.status(verbose=True):
             if entry.changelist and not entry.file_external and entry.item != "external":
                 # Never turn an unexpected absolute/outside status entry into a
-                # target for a later changelist commit.
-                self._local_targets([entry.path])
+                # target for a later changelist commit. Listing only reads SVN
+                # metadata, so do not follow an unrelated symlink here; every
+                # mutating operation separately validates the chosen targets.
+                try:
+                    Path(os.path.abspath(self.working_copy / entry.path)).relative_to(self.working_copy)
+                except ValueError as error:
+                    raise SvnError("SVN returned a changelist path outside the selected working copy.") from error
                 result.setdefault(entry.changelist, []).append(entry)
         for entries in result.values():
             entries.sort(key=lambda entry: entry.path)
@@ -470,12 +490,12 @@ class SvnClient:
             file_root = str(info.get("wc_root") or "")
             if not file_root or Path(file_root).resolve() != expected_root:
                 raise ValueError("Files in externals or nested working copies cannot join this changelist.")
-        selected = set(targets)
+        selected = {os.path.normcase(os.path.abspath(self.working_copy / os.fspath(path))) for path in paths}
         # Status does not support --targets on all supported SVN versions. Scan
         # the selected WC once instead of producing a huge status argument list.
         for entry in self.status(verbose=True):
             if entry.file_external or entry.item == "external":
-                if self._local_targets([entry.path])[0] in selected:
+                if os.path.normcase(os.path.abspath(self.working_copy / entry.path)) in selected:
                     raise ValueError("External files cannot join a changelist in this working copy.")
         return list(dict.fromkeys(targets))
 

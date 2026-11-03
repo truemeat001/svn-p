@@ -1,0 +1,548 @@
+"""JSON protocol/safety tests; fake backends never touch a user repository."""
+from __future__ import annotations
+
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from svn_client.backend import CommandResult, LogEntry, StatusEntry, SvnError
+from svn_client.cli import DEFAULT_TEXT_BYTES, EXIT_CODES, MAX_INPUT_BYTES, main
+from svn_client.shelves import ShelfConflict, ShelfError
+
+
+class NoRead(io.StringIO):
+    def read(self, *args, **kwargs):
+        raise AssertionError("Unexpected stdin read")
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.workspace = Path(self.directory.name)
+        self.client = Mock()
+        self.client.working_copy = self.workspace
+        self.result = CommandResult(("svn", "--message=PRIVATE"), 0, "done\n", "")
+        self.member = StatusEntry("中文 @ file.txt", "modified", revision=3, changelist="fix")
+        self.clean = StatusEntry("clean.txt", "normal", revision=3, changelist="fix")
+        self.client.status.return_value = [self.member]
+        self.client.info.return_value = {"revision": 3, "url": "https://example.test/repo"}
+        self.client.log.return_value = [LogEntry(3, "author", message="hi")]
+        self.client.diff.return_value = "--- 中文\n+new\n"
+        self.client.changelists.return_value = {"fix": [self.member, self.clean]}
+        self.client.validate_changelist_paths.side_effect = lambda values: list(values)
+        self.client.preflight_changelist_commit.return_value = [self.member, self.clean]
+        for name in ("assign_changelist", "remove_changelist", "commit_changelist"):
+            getattr(self.client, name).return_value = self.result
+        self.shelves = Mock()
+        self.shelf_id = "a" * 32
+        self.shelf = {"id": self.shelf_id, "name": "backup", "entries": [], "paths": ["a.txt"]}
+        self.shelves.list.return_value = [self.shelf]
+        self.shelves.details.return_value = self.shelf
+        self.shelves.preflight_create.return_value = {"can_create": True, "paths": ["a.txt"]}
+        self.shelves.preflight_restore.return_value = {"can_restore": True, "paths": ["a.txt"]}
+        self.shelves.create.return_value = self.shelf
+        self.shelves.restore.return_value = {"shelf_retained": True, "restored_paths": ["a.txt"]}
+        self.client_patch = patch("svn_client.cli.SvnClient", return_value=self.client)
+        self.shelf_patch = patch("svn_client.cli.ShelfManager", return_value=self.shelves)
+        self.client_factory = self.client_patch.start()
+        self.shelf_factory = self.shelf_patch.start()
+        self.addCleanup(self.client_patch.stop)
+        self.addCleanup(self.shelf_patch.stop)
+
+    def invoke(self, args, *, stdin=None, globals_=(), workspace=True):
+        output = io.StringIO()
+        prefix = ["--workspace", str(self.workspace)] if workspace else []
+        code = main([*prefix, *globals_, *args], stdout=output,
+                    stdin=NoRead() if stdin is None else stdin)
+        raw = output.getvalue()
+        self.assertEqual(raw.count("\n"), 1)
+        self.assertTrue(raw.isascii())
+        payload = json.loads(raw)
+        self.assertEqual(set(payload), {"schema_version", "ok", "command", "workspace",
+                                      "dry_run", "outcome", "data", "error", "warnings"})
+        self.assertEqual(payload["schema_version"], 1)
+        return code, payload
+
+    def assert_error(self, args, expected, **kwargs):
+        code, payload = self.invoke(args, **kwargs)
+        self.assertEqual(code, EXIT_CODES[expected], payload)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], expected)
+        self.assertIsInstance(payload["error"]["message"], str)
+        return payload
+
+    def test_help_is_json_without_workspace_or_dependency(self):
+        code, payload = self.invoke(["--help"], workspace=False)
+        self.assertEqual(code, 0)
+        self.assertIn("exit_codes", payload["data"])
+        self.client_factory.assert_not_called()
+
+    def test_leaf_help_is_json(self):
+        code, payload = self.invoke(["changelist", "commit", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--expect-members-sha256", payload["data"]["help"])
+
+    def test_missing_workspace_is_json_error(self):
+        self.assert_error(["status"], "usage_error", workspace=False)
+
+    def test_unknown_and_credential_flags_are_rejected(self):
+        for args in (["status", "--password", "secret"], ["execute", "commit"],
+                     ["status", "--yes"], ["status", "--dry-run"]):
+            with self.subTest(args=args):
+                self.assert_error(args, "usage_error")
+        self.client_factory.assert_not_called()
+
+    def test_unknown_options_do_not_echo_accidental_credentials(self):
+        payload = self.assert_error(["status", "--password", "TOP-SECRET"], "usage_error")
+        self.assertNotIn("TOP-SECRET", json.dumps(payload))
+
+    def test_global_abbreviations_rejected(self):
+        self.assert_error(["status"], "usage_error", globals_=["--time", "2"])
+
+    def test_nonexistent_workspace(self):
+        self.assert_error(["--workspace", str(self.workspace / "missing"), "status"],
+                          "validation_failed", workspace=False)
+
+    def test_invalid_timeout_is_json_error(self):
+        for value in ("0", "-1", "nan", "inf", "text"):
+            with self.subTest(value=value):
+                self.assert_error(["status"], "usage_error", globals_=["--timeout", value])
+
+    def test_valid_timeout_forwarded(self):
+        self.invoke(["status"], globals_=["--timeout", "2.5"])
+        self.client_factory.assert_called_once_with(self.workspace, timeout=2.5)
+
+    def test_status_defaults_to_workspace_read_only(self):
+        code, payload = self.invoke(["status"])
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["command"], "status")
+        self.assertEqual(payload["outcome"], "read")
+        self.assertEqual(payload["workspace"], str(self.workspace))
+        self.assertEqual(payload["data"]["entries"][0]["path"], self.member.path)
+        self.client.status.assert_called_once_with(None, verbose=False)
+
+    def test_status_all_and_literal_paths(self):
+        paths = ["-option", "中文 @.txt", "a;$(echo bad).txt"]
+        self.invoke(["status", "--all", *(arg for path in paths for arg in ["--path=" + path])])
+        self.client.status.assert_called_once_with(paths, verbose=True)
+
+    def test_absolute_path_deduplicated_and_normalized(self):
+        self.invoke(["status", "--path", str(self.workspace / "a.txt"), "--path", "./a.txt"])
+        self.client.status.assert_called_once_with(["a.txt"], verbose=False)
+
+    def test_paths_outside_or_url_rejected_before_client(self):
+        for path in ("../out.txt", "https://host/repo", "file:///tmp/foo", "file:other", ""):
+            with self.subTest(path=path):
+                self.assert_error(["status", "--path", path], "validation_failed")
+        self.client_factory.assert_not_called()
+
+    def test_symlink_escape_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            link = self.workspace / "escape"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("Creating symlinks is unavailable")
+            self.assert_error(["status", "--path", "escape/f.txt"], "validation_failed")
+
+    def test_explicit_json_stdin_preserves_unusual_names(self):
+        paths = ["中文 file", "line\nfeed", "-option", "ending@"]
+        self.invoke(["status", "--paths-json", "-"], stdin=io.StringIO(json.dumps(paths)))
+        self.client.status.assert_called_once_with(paths, verbose=False)
+
+    def test_json_file_input(self):
+        source = self.workspace / "paths.json"
+        source.write_text('["中文.txt"]', encoding="utf-8")
+        self.invoke(["diff", "--paths-json", str(source)])
+        self.client.diff.assert_called_once_with(["中文.txt"], revision=None)
+
+    def test_invalid_json_selection(self):
+        for data in ("[", "{}", "[]", '["valid",3]', '["../bad"]', '["a\\u0000b"]'):
+            with self.subTest(data=data):
+                self.assert_error(["status", "--paths-json", "-"], "validation_failed", stdin=io.StringIO(data))
+        self.client_factory.assert_not_called()
+
+    def test_paths_json_and_paths_are_exclusive(self):
+        self.assert_error(["status", "--path", "a", "--paths-json", "-"], "usage_error")
+
+    def test_stdin_input_size_bounded(self):
+        self.assert_error(["status", "--paths-json", "-"], "validation_failed",
+                          stdin=io.StringIO(" " * (MAX_INPUT_BYTES + 1)))
+
+    def test_invalid_utf8_input_rejected(self):
+        source = self.workspace / "paths.json"
+        source.write_bytes(b'\xff')
+        self.assert_error(["status", "--paths-json", str(source)], "validation_failed")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable")
+    def test_fifo_input_refused_without_blocking(self):
+        source = self.workspace / "pipe"
+        os.mkfifo(source)
+        self.assert_error(["status", "--paths-json", str(source)], "validation_failed")
+
+    def test_input_file_changed_to_nonregular_refused(self):
+        source = self.workspace / "paths.json"
+        source.write_text("[]", encoding="utf-8")
+        with patch("svn_client.cli.os.fstat", return_value=Mock(st_mode=0)):
+            self.assert_error(["status", "--paths-json", str(source)], "validation_failed")
+
+    def test_input_io_failure_structured(self):
+        self.assert_error(["status", "--paths-json", str(self.workspace / "absent")], "io_error")
+
+    def test_info_and_log_local_paths(self):
+        self.invoke(["info", "--path", "sub/a"])
+        self.client.info.assert_called_once_with("sub/a")
+        code, payload = self.invoke(["log", "--path", "a", "--limit", "2", "--revision", "HEAD:1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["entries"][0]["revision"], 3)
+        self.client.log.assert_called_once_with(2, "a", revision="HEAD:1")
+
+    def test_invalid_revision_and_limit(self):
+        self.assert_error(["diff", "--revision", "--config-option=x"], "usage_error")
+        self.assert_error(["diff", "--revision", "HEAD garbage"], "validation_failed")
+        self.assert_error(["log", "--limit", "10001"], "validation_failed")
+
+    def test_diff_binary_boundary_and_utf8_truncation(self):
+        self.client.diff.return_value = "中文é"
+        code, payload = self.invoke(["diff"], globals_=["--max-text-bytes", "4"])
+        self.assertEqual(code, 0)
+        field = payload["data"]["diff"]
+        self.assertEqual(field, {"text": "中", "truncated": True,
+                                 "source_utf8_bytes": 8, "returned_utf8_bytes": 3})
+        self.assertFalse(payload["data"]["binary_payloads_included"])
+        self.assertTrue(payload["warnings"])
+
+    def test_json_escapes_control_bytes(self):
+        self.client.diff.return_value = "\x1b[31m\x00\n"
+        code, payload = self.invoke(["diff"])
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["diff"]["text"], self.client.diff.return_value)
+
+    def test_mutations_require_yes_without_backend_calls(self):
+        commands = [
+            ["changelist", "assign", "--name", "fix", "--path", "a"],
+            ["changelist", "remove", "--path", "a"],
+            ["changelist", "commit", "--name", "fix", "--message", "hi"],
+            ["shelf", "create", "--name", "backup", "--path", "a"],
+            ["shelf", "restore", self.shelf_id], ["shelf", "delete", self.shelf_id],
+        ]
+        for args in commands:
+            with self.subTest(args=args):
+                self.assert_error(args, "confirmation_required")
+        self.client_factory.assert_not_called()
+        self.shelf_factory.assert_not_called()
+
+    def test_empty_mutation_selection_never_means_all(self):
+        self.assert_error(["changelist", "assign", "--name", "fix", "--yes"], "usage_error")
+        self.assert_error(["shelf", "create", "--name", "backup", "--yes"], "usage_error")
+        self.assert_error(["shelf", "create", "--name", "backup", "--paths-json", "-", "--yes"],
+                          "validation_failed", stdin=io.StringIO("[]"))
+
+    def test_yes_and_dry_run_mutually_exclusive(self):
+        self.assert_error(["shelf", "delete", self.shelf_id, "--yes", "--dry-run"], "usage_error")
+
+    def test_changelist_list_preserves_clean_members(self):
+        code, payload = self.invoke(["changelist", "list"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(payload["data"]["changelists"]["fix"]), 2)
+        code, payload = self.invoke(["changelist", "list", "--name", "missing"])
+        self.assertEqual(payload["data"], {"changelists": {}})
+
+    def test_assign_dry_run_validates_without_mutation(self):
+        code, payload = self.invoke(["changelist", "assign", "--name", "fix", "--path", "a", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["outcome"], "planned")
+        self.client.validate_changelist_paths.assert_called_once_with(["a"])
+        self.client.assign_changelist.assert_not_called()
+        self.assertEqual(payload["data"]["preflight"]["paths"], ["a"])
+
+    def test_invalid_name_rejected_before_validation(self):
+        for name in (" ", "bad\nname", "https://u:password@host"):
+            with self.subTest(name=name):
+                self.assert_error(["changelist", "assign", "--name", name, "--path", "a", "--dry-run"], "validation_failed")
+        self.client.validate_changelist_paths.assert_not_called()
+
+    def test_assign_remove_execute_validated_paths(self):
+        self.client.validate_changelist_paths.side_effect = lambda values: ["normalized"]
+        code, payload = self.invoke(["changelist", "assign", "--name", "fix", "--path", "a", "--yes"])
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["outcome"], "completed")
+        self.client.assign_changelist.assert_called_once_with("fix", ["normalized"])
+        self.assertNotIn("PRIVATE", json.dumps(payload))
+        self.invoke(["changelist", "remove", "--path", "a", "--yes"])
+        self.client.remove_changelist.assert_called_once_with(["normalized"])
+
+    def test_changelist_path_validation_failures_do_not_mutate(self):
+        self.client.validate_changelist_paths.side_effect = ValueError("not a versioned file")
+        self.assert_error(["changelist", "assign", "--name", "fix", "--path", ".", "--yes"], "validation_failed")
+        self.client.assign_changelist.assert_not_called()
+
+    def commit_args(self, *extra):
+        return ["changelist", "commit", "--name", "fix", "--message", "private message", *extra]
+
+    def test_commit_dry_run_uses_public_preflight_and_review_hash(self):
+        code, payload = self.invoke(self.commit_args("--dry-run"))
+        self.assertEqual(code, 0)
+        self.client.preflight_changelist_commit.assert_called_once_with("fix")
+        self.client.commit_changelist.assert_not_called()
+        plan = payload["data"]["preflight"]
+        self.assertEqual(plan["paths"], [self.member.path, self.clean.path])
+        self.assertEqual(len(plan["members_sha256"]), 64)
+        self.assertFalse(plan["server_checked"])
+        self.assertNotIn("private message", json.dumps(payload))
+
+    def test_commit_uses_exact_full_members_and_optional_hash(self):
+        _, preview = self.invoke(self.commit_args("--dry-run"))
+        digest = preview["data"]["preflight"]["members_sha256"]
+        code, _ = self.invoke(self.commit_args("--yes", "--keep-changelist", "--expect-members-sha256", digest))
+        self.assertEqual(code, 0)
+        self.client.commit_changelist.assert_called_once_with("fix", "private message", keep_changelist=True,
+                                                             expected_paths=[self.member.path, self.clean.path])
+
+    def test_commit_hash_changed_or_malformed_refuses_without_write(self):
+        for digest in ("0" * 64, "bad"):
+            with self.subTest(digest=digest):
+                self.assert_error(self.commit_args("--yes", "--expect-members-sha256", digest), "validation_failed")
+        self.client.commit_changelist.assert_not_called()
+
+    def test_commit_preflight_rejection_is_known_no_write(self):
+        self.client.preflight_changelist_commit.side_effect = ValueError("added parent directory")
+        payload = self.assert_error(self.commit_args("--yes"), "validation_failed")
+        self.assertEqual(payload["outcome"], "refused")
+        self.client.commit_changelist.assert_not_called()
+
+    def test_commit_stdin_message_explicit_only(self):
+        args = ["changelist", "commit", "--name", "fix", "--message-file", "-", "--yes"]
+        self.invoke(args, stdin=io.StringIO("中文\nsecond"))
+        self.assertEqual(self.client.commit_changelist.call_args.args[1], "中文\nsecond")
+
+    def test_commit_message_restrictions(self):
+        for message in (" ", "bad\0input", "x" * 65537):
+            with self.subTest(size=len(message)):
+                self.assert_error(["changelist", "commit", "--name", "fix", "--message", message, "--yes"], "validation_failed")
+        self.client.commit_changelist.assert_not_called()
+
+    def test_commit_failure_uncertain_never_retried(self):
+        self.client.commit_changelist.side_effect = SvnError("timed out")
+        payload = self.assert_error(self.commit_args("--yes"), "operation_uncertain")
+        self.assertEqual(payload["outcome"], "uncertain")
+        self.assertFalse(payload["error"]["details"]["automatic_retry_safe"])
+        self.client.commit_changelist.assert_called_once()
+
+    def test_interrupted_mutation_uncertain(self):
+        self.client.commit_changelist.side_effect = KeyboardInterrupt()
+        self.assert_error(self.commit_args("--yes"), "operation_uncertain")
+
+    def test_interrupted_read_not_uncertain(self):
+        self.client.status.side_effect = KeyboardInterrupt()
+        self.assert_error(["status"], "interrupted")
+
+    def test_shelf_reads_do_not_require_svn(self):
+        for args in (["shelf", "list"], ["shelf", "inspect", self.shelf_id],
+                     ["shelf", "delete", self.shelf_id, "--dry-run"]):
+            with self.subTest(args=args):
+                code, _ = self.invoke(args)
+                self.assertEqual(code, 0)
+        self.client_factory.assert_not_called()
+        self.shelves.delete.assert_not_called()
+
+    def test_shelf_inspect_reports_eligibility_not_checked(self):
+        _, payload = self.invoke(["shelf", "inspect", self.shelf_id])
+        self.assertTrue(payload["data"]["blob_integrity_verified"])
+        self.assertFalse(payload["data"]["restore_eligibility_checked"])
+
+    def test_shelf_store_forwarded(self):
+        store = str(self.workspace.parent / "custom-shelves")
+        self.invoke(["shelf", "list"], globals_=["--shelf-store", store])
+        self.shelf_factory.assert_called_once_with(self.workspace, storage_dir=store)
+
+    def test_shelf_create_dry_run_calls_readonly_preflight(self):
+        code, payload = self.invoke(["shelf", "create", "--name", "backup", "--path", "a.txt", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.shelves.preflight_create.assert_called_once_with(["a.txt"])
+        self.shelves.create.assert_not_called()
+        self.assertTrue(payload["data"]["working_copy_unchanged"])
+
+    def test_shelf_create_validates_name_length_in_preflight(self):
+        self.assert_error(["shelf", "create", "--name", "a" * 201, "--path", "a", "--dry-run"], "validation_failed")
+        self.shelves.preflight_create.assert_not_called()
+
+    def test_shelf_create_executes_only_after_preflight(self):
+        self.invoke(["shelf", "create", "--name", "backup", "--path", "a.txt", "--yes"])
+        self.shelves.preflight_create.assert_called_once_with(["a.txt"])
+        self.shelves.create.assert_called_once_with("backup", ["a.txt"])
+
+    def test_shelf_restore_dry_run_and_actual(self):
+        self.invoke(["shelf", "restore", self.shelf_id, "--dry-run"])
+        self.shelves.preflight_restore.assert_called_once_with(self.shelf_id)
+        self.shelves.restore.assert_not_called()
+        code, payload = self.invoke(["shelf", "restore", self.shelf_id, "--yes"])
+        self.assertEqual(code, 0)
+        self.shelves.restore.assert_called_once_with(self.shelf_id)
+        self.assertTrue(payload["data"]["restore"]["shelf_retained"])
+
+    def test_restore_conflict_prevents_write(self):
+        self.shelves.preflight_restore.side_effect = ShelfConflict("dirty target")
+        self.assert_error(["shelf", "restore", self.shelf_id, "--yes"], "validation_failed")
+        self.shelves.restore.assert_not_called()
+
+    def test_restore_partial_failure_uncertain(self):
+        self.shelves.restore.side_effect = ShelfError("partial restore")
+        self.assert_error(["shelf", "restore", self.shelf_id, "--yes"], "operation_uncertain")
+        self.shelves.restore.assert_called_once()
+
+    def test_shelf_delete_verifies_first(self):
+        self.invoke(["shelf", "delete", self.shelf_id, "--yes"])
+        self.shelves.details.assert_called_once_with(self.shelf_id)
+        self.shelves.delete.assert_called_once_with(self.shelf_id)
+        self.client_factory.assert_not_called()
+
+    def test_corrupt_shelf_delete_refused(self):
+        self.shelves.details.side_effect = ShelfError("damaged")
+        self.assert_error(["shelf", "delete", self.shelf_id, "--yes"], "shelf_failed")
+        self.shelves.delete.assert_not_called()
+
+    def test_no_svn_dependency_structured(self):
+        self.client_factory.side_effect = SvnError("SVN executable was not found")
+        self.assert_error(["status"], "dependency_missing")
+
+    def test_svn_read_failure_structured(self):
+        self.client.status.side_effect = SvnError("SVN read failed")
+        self.assert_error(["status"], "svn_failed")
+
+    def test_url_passwords_redacted_in_diagnostics_and_data(self):
+        self.client.info.return_value = {"url": "https://name:secret@example.test/repo"}
+        _, payload = self.invoke(["info"])
+        self.assertNotIn("secret", json.dumps(payload))
+        self.client.status.side_effect = SvnError("https://name:secret@example.test/repo")
+        payload = self.assert_error(["status"], "svn_failed")
+        self.assertNotIn("secret", json.dumps(payload))
+
+    def test_metadata_credential_keys_refused_without_silent_scope_changes(self):
+        self.client.changelists.return_value = {"https://name:secret@example.test": [self.member]}
+        payload = self.assert_error(["changelist", "list"], "validation_failed")
+        self.assertNotIn("secret", json.dumps(payload))
+
+    def test_url_password_with_empty_username_redacted(self):
+        self.client.info.return_value = {"url": "https://:secret@example.test/repo"}
+        _, payload = self.invoke(["info"])
+        self.assertNotIn("secret", json.dumps(payload))
+
+    def test_internal_failure_does_not_leak_exception_contents(self):
+        self.client.status.side_effect = RuntimeError("secret private implementation detail")
+        payload = self.assert_error(["status"], "internal_error")
+        self.assertNotIn("secret", json.dumps(payload))
+
+    def test_oversized_result_never_silent_partial_success(self):
+        self.client.status.return_value = [StatusEntry("x" * 10000, "modified")]
+        payload = self.assert_error(["status"], "output_limit", globals_=["--max-output-bytes", "2048"])
+        self.assertIsNone(payload["data"])
+        self.assertEqual(payload["error"]["details"]["original_outcome"], "read")
+
+    def test_output_limit_after_mutation_preserves_completed_outcome(self):
+        self.client.preflight_changelist_commit.return_value = [StatusEntry("x" * 5000, "modified", changelist="fix")]
+        payload = self.assert_error(self.commit_args("--yes"), "output_limit", globals_=["--max-output-bytes", "2048"])
+        self.assertEqual(payload["outcome"], "completed")
+        self.assertTrue(payload["error"]["details"]["mutation_attempted"])
+        self.client.commit_changelist.assert_called_once()
+
+    def test_output_limit_fallback_stays_bounded_with_unicode_workspace(self):
+        # Multiple short path components avoid filesystem component-byte limits.
+        deep = self.workspace / ("😀" * 50) / ("😀" * 50) / ("😀" * 50)
+        deep.mkdir(parents=True)
+        self.client.status.return_value = [StatusEntry("x" * 10000, "modified")]
+        output = io.StringIO()
+        code = main(["--workspace", str(deep), "--max-output-bytes", "2048", "status"],
+                    stdout=output, stdin=NoRead())
+        self.assertEqual(code, EXIT_CODES["output_limit"])
+        self.assertLessEqual(len(output.getvalue().encode("ascii")), 2048)
+        self.assertIsNone(json.loads(output.getvalue())["workspace"])
+
+    def test_output_limit_parameters_validated(self):
+        for value in ("0", "1024", "999999999"):
+            with self.subTest(value=value):
+                self.assert_error(["status"], "usage_error", globals_=["--max-output-bytes", value])
+
+    def test_broken_pipe_never_retries_work(self):
+        output = Mock()
+        output.write.side_effect = BrokenPipeError()
+        code = main(["--workspace", str(self.workspace), "status"], stdout=output, stdin=NoRead())
+        self.assertEqual(code, EXIT_CODES["io_error"])
+        self.client.status.assert_called_once()
+
+
+class CliProcessTests(unittest.TestCase):
+    def test_module_help_stdout_contains_one_json_stderr_empty(self):
+        result = subprocess.run([sys.executable, "-m", "svn_client.cli", "--help"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=15, check=False)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(json.loads(result.stdout)["schema_version"], 1)
+
+    def test_large_plain_lines_and_late_urls_do_not_stall_redaction(self):
+        # A process timeout bounds the regression itself. The old unanchored
+        # scheme regex took quadratic time even for text containing no URL.
+        script = (
+            "from svn_client.cli import _redact; "
+            "prefix = 'a' * 1048576; "
+            "assert _redact(prefix) == prefix; "
+            "assert _redact(prefix + ' https://u:secret@host') == "
+            "prefix + ' https://u:***@host'; print('ok')"
+        )
+        result = subprocess.run([sys.executable, "-c", script], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), b"ok")
+
+    def test_invalid_command_stays_in_json_without_traceback(self):
+        result = subprocess.run([sys.executable, "-m", "svn_client.cli", "not-a-command"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=15, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(json.loads(result.stdout)["error"]["code"], "usage_error")
+
+
+@unittest.skipUnless(shutil.which("svn") and shutil.which("svnadmin"), "svn and svnadmin are unavailable")
+class CliSvnIntegrationTests(unittest.TestCase):
+    """Only disposable local repositories are used, never a user's checkout."""
+    def test_local_changelist_commit_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, workspace = root / "repo", root / "wc"
+            def svn(*args):
+                subprocess.run([shutil.which("svn"), "--non-interactive", *map(str, args)],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               check=True, timeout=30)
+            subprocess.run([shutil.which("svnadmin"), "create", str(repository)], check=True, timeout=30)
+            svn("checkout", repository.as_uri(), workspace)
+            filename = workspace / "中文 @ file.txt"
+            filename.write_text("initial\n", encoding="utf-8")
+            svn("add", str(filename) + "@")
+            svn("commit", "--message", "seed", workspace)
+            filename.write_text("changed\n", encoding="utf-8")
+            def call(*args):
+                output = io.StringIO()
+                code = main(["--workspace", str(workspace), *args], stdout=output, stdin=NoRead())
+                payload = json.loads(output.getvalue())
+                self.assertEqual(code, 0, payload)
+                return payload
+            call("changelist", "assign", "--name", "fix", "--path", filename.name, "--yes")
+            plan = call("changelist", "commit", "--name", "fix", "--message", "test", "--dry-run")["data"]["preflight"]
+            call("changelist", "commit", "--name", "fix", "--message", "test", "--expect-members-sha256", plan["members_sha256"], "--yes")
+            self.assertEqual(call("status")["data"]["entries"], [])
+            self.assertEqual(call("log", "--limit", "1")["data"]["entries"][0]["message"], "test")
+
+
+if __name__ == "__main__":
+    unittest.main()

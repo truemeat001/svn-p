@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from svn_client.backend import CommandResult, SvnClient, SvnError, _validate_executable, discover_svn
+from svn_client.backend import CommandResult, SvnClient, SvnError, _validate_executable, discover_svn, redact_credentials
 
 
 STATUS_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -223,6 +223,47 @@ class DiscoveryTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(SvnError):
                     _validate_executable(path)
             self.assertEqual(_validate_executable("svn.EXE"), "svn.EXE")
+
+
+class CredentialRedactionTests(unittest.TestCase):
+    def test_basic_unicode_empty_username_and_last_at(self):
+        cases = {
+            "https://user:secret@example.test/path": "https://user:***@example.test/path",
+            "https://:secret@example.test": "https://:***@example.test",
+            "https://用户:密码@example.test": "https://用户:***@example.test",
+            "https://user:secret@more@example.test": "https://user:***@example.test",
+            "https://user@example.org:secret@host.test": "https://user@example.org:***@host.test",
+            "https://user:@example.test": "https://user:***@example.test",
+            "unknown+scheme://u:pass@host": "unknown+scheme://u:***@host",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(redact_credentials(source), expected)
+
+    def test_query_path_and_nonpassword_authorities_preserved(self):
+        for source in ("https://example.test:443/path", "https://user@example.test/path", "https://[::1]:443/path",
+                       "https://example.test/path:a@b", "https://example.test?email=a:b@c",
+                       "https://example.test#email=a:b@c"):
+            with self.subTest(source=source):
+                self.assertEqual(redact_credentials(source), source)
+
+    def test_adjacent_urls_are_both_redacted(self):
+        source = "https://u:first@onehttps://v:second@two"
+        self.assertEqual(redact_credentials(source), "https://u:***@onehttps://v:***@two")
+
+    def test_megabyte_without_url_and_with_late_url(self):
+        # Large enough to expose the old quadratic scheme regex without a
+        # fragile wall-clock assertion that depends on CI machine load.
+        prefix = "a" * 1_000_000
+        self.assertEqual(redact_credentials(prefix), prefix)
+        self.assertEqual(redact_credentials(prefix + " https://user:secret@host/path"),
+                         prefix + " https://user:***@host/path")
+
+    def test_long_malformed_authority_and_many_markers(self):
+        value = "https://user:" + ":" * 250_000
+        self.assertEqual(redact_credentials(value), value)
+        value = "https://host-without-password/" * 10_000 + "https://user:secret@host"
+        self.assertEqual(redact_credentials(value), value[:-len("https://user:secret@host")] + "https://user:***@host")
 
 
 @unittest.skipUnless(shutil.which("svn") and shutil.which("svnadmin"), "svn and svnadmin required for integration")

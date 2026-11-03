@@ -35,3 +35,7 @@
 在项目目录执行 `python -m unittest discover -s tests -v`。部分集成测试需要 `svn` 与 `svnadmin`。本次开发环境中二者不可用，真实仓库测试跳过；原生 Windows、GUI 展示、认证及安装流程也没有验证。启动前请使用测试仓库，独立备份重要工作副本；不要在恢复期间同时修改工作副本。
 
 命令超时不意味着服务器事务被撤销，提交等操作中断后应先核查仓库状态，勿盲目重试。
+
+## 面向 AI 的 CLI
+
+使用 `python -m svn_client.cli --workspace 工作副本路径 status` 获取 JSON；详见 docs/CLI.md。涉及修改的命令需明确确认或 dry-run。

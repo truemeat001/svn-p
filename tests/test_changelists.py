@@ -244,6 +244,25 @@ class ChangelistUnitTests(unittest.TestCase):
             ):
                 self.assertEqual(self.client.preflight_changelist_commit("fix"), members)
 
+    def test_listing_metadata_does_not_follow_unrelated_named_symlink(self):
+        with tempfile.TemporaryDirectory() as outside:
+            try:
+                (self.root / "linked").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Creating symlinks is not supported")
+            entries = [StatusEntry("linked", "normal", changelist="other"), StatusEntry("f", "modified", changelist="fix")]
+            with patch.object(self.client, "status", return_value=entries):
+                self.assertEqual(set(self.client.changelists()), {"other", "fix"})
+
+    def test_validation_ignores_unrelated_external_link(self):
+        with tempfile.TemporaryDirectory() as outside:
+            try:
+                (self.root / "linked").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Creating symlinks is not supported")
+            with patch.object(self.client, "status", return_value=[StatusEntry("linked", "external", file_external=True)]):
+                self.assertEqual(self.client.validate_changelist_paths(["f"]), ["f"])
+
 
 @unittest.skipUnless(shutil.which("svn") and shutil.which("svnadmin"), "svn and svnadmin required for integration")
 class ChangelistIntegrationTests(unittest.TestCase):
