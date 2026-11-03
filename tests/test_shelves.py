@@ -1,0 +1,469 @@
+"""Shelf safety tests; real SVN round trips run when svn/svnadmin are installed."""
+from __future__ import annotations
+
+import base64
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from svn_client.shelves import ShelfConflict, ShelfError, ShelfManager, _safe_relative
+
+
+def enc(data):
+    return base64.b64encode(data).decode("ascii")
+
+
+class FakeManager(ShelfManager):
+    def __init__(self, wc, store):
+        super().__init__(wc, store)
+        self.states = {".": {"item": "normal", "kind": "dir"}}
+        self.base_data = {}
+        self.base_props = {}
+        self.current_props = {}
+        self.revision = "1"
+        self.repo_url = "file:///test/repo/trunk"
+        self.commands = []
+
+    def node(self, rel, item, kind="file", content=b"base", base=b"base", props=None, base_props=None, **flags):
+        self.states[rel] = {"item": item, "kind": kind, **flags}
+        path = self.working_copy / rel
+        if item != "deleted":
+            if kind == "dir":
+                path.mkdir(parents=True, exist_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+        self.base_data[rel] = base
+        self.base_props[rel] = base_props or {}
+        self.current_props[rel] = props or {}
+
+    def _info(self, path="."):
+        node = self.states.get(path, {"kind": "file", "item": "normal"})
+        return {"kind": node["kind"], "revision": self.revision,
+                "url": self.repo_url if path == "." else self.repo_url + "/" + path,
+                "uuid": "test-uuid", "schedule": "normal", "depth": "infinity"}
+
+    def _properties(self, path, base=False):
+        return copy.deepcopy((self.base_props if base else self.current_props).get(path, {}))
+
+    def _status(self, paths=None):
+        result = []
+        for path, node in sorted(self.states.items()):
+            if paths and not any(p == "." or path == p or path.startswith(p + "/") for p in paths):
+                continue
+            props = "modified" if self.current_props.get(path, {}) != self.base_props.get(path, {}) else "none"
+            result.append({"path": path, "item": node["item"], "props": props,
+                           **{k: v for k, v in node.items() if k not in ("item", "kind")}})
+        return result
+
+    def _base(self, path, info=None):
+        info = info or self._info(path)
+        result = {k: info[k] for k in ("kind", "revision", "url", "uuid")}
+        result["properties"] = self._properties(path, base=True)
+        if info["kind"] == "file":
+            result["sha256"] = hashlib.sha256(self.base_data[path]).hexdigest()
+            result["working_sha256"] = result["sha256"]
+        return result
+
+    def _svn(self, *args):
+        self.commands.append(args)
+        command = args[0]
+        if command == "delete":
+            rel = args[-1][:-1]
+            (self.working_copy / rel).unlink()
+            self.states[rel]["item"] = "deleted"
+        elif command == "add":
+            rel = args[-1][:-1]
+            self.states[rel] = {"item": "added", "kind": "dir" if (self.working_copy / rel).is_dir() else "file"}
+        elif command == "propdel":
+            self.current_props.setdefault(args[-1][:-1], {}).pop(args[2], None)
+        elif command == "propset":
+            self.current_props.setdefault(args[-1][:-1], {})[args[4]] = enc(Path(args[2]).read_bytes())
+        else:
+            raise AssertionError(f"Unexpected command: {args}")
+        return b""
+
+    def clean(self):
+        for rel, node in list(self.states.items()):
+            if node["item"] in ("added", "unversioned"):
+                path = self.working_copy / rel
+                if path.is_dir():
+                    shutil.rmtree(path)
+                elif path.exists():
+                    path.unlink()
+                del self.states[rel]
+                self.current_props.pop(rel, None)
+            else:
+                if node["kind"] == "file":
+                    (self.working_copy / rel).write_bytes(self.base_data[rel])
+                self.states[rel]["item"] = "normal"
+                self.current_props[rel] = copy.deepcopy(self.base_props.get(rel, {}))
+
+
+class ShelvesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.wc = self.root / "wc"
+        self.wc.mkdir()
+        self.store = self.root / "shelves"
+        self.manager = FakeManager(self.wc, self.store)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def simple(self):
+        self.manager.node("file.bin", "modified", content=b"changed\x00\xff\r\n")
+        return self.manager.create("Test backup")
+
+    def manifest_path(self, shelf):
+        return self.store / shelf["id"] / "manifest.json"
+
+    def mutate_manifest(self, shelf, fn):
+        path = self.manifest_path(shelf)
+        data = json.loads(path.read_text())
+        fn(data)
+        path.write_text(json.dumps(data))
+
+    def test_lossless_roundtrip_and_backup_never_reverts(self):
+        m = self.manager
+        m.node("binary.bin", "modified", content=b"\x00\xff\xfe\r\n", props={"custom:binary": enc(b"\x00\xff\r\n")})
+        m.node("removed.txt", "deleted", base=b"old deleted content")
+        m.node("new", "added", kind="dir", props={"custom:dir": enc(b"value")})
+        m.node("new/added.txt", "added", content=b"new text")
+        m.node("unversioned", "unversioned", kind="dir")
+        (self.wc / "unversioned/empty").mkdir()
+        (self.wc / "unversioned/raw.bin").write_bytes(b"\x00raw\xff")
+        m.node("propertydir", "normal", kind="dir", props={"custom:prop": enc(b"props only")})
+        before = m._status()
+        shelf = m.create("Complete backup")
+        self.assertEqual(before, m._status())
+        self.assertEqual((self.wc / "binary.bin").read_bytes(), b"\x00\xff\xfe\r\n")
+        self.assertFalse((self.wc / "removed.txt").exists())
+        self.assertEqual(shelf["entry_count"], 8)
+        m.clean()
+        result = m.restore(shelf["id"])
+        self.assertTrue(result["shelf_retained"])
+        self.assertEqual((self.wc / "binary.bin").read_bytes(), b"\x00\xff\xfe\r\n")
+        self.assertFalse((self.wc / "removed.txt").exists())
+        self.assertEqual((self.wc / "new/added.txt").read_bytes(), b"new text")
+        self.assertTrue((self.wc / "unversioned/empty").is_dir())
+        self.assertEqual((self.wc / "unversioned/raw.bin").read_bytes(), b"\x00raw\xff")
+        self.assertEqual(m.current_props["binary.bin"]["custom:binary"], enc(b"\x00\xff\r\n"))
+        self.assertEqual(m.current_props["propertydir"]["custom:prop"], enc(b"props only"))
+        self.assertEqual(m.list()[0]["id"], shelf["id"])
+        self.assertEqual(len(m.details(shelf["id"])["entries"]), 8)
+
+    def test_root_directory_properties_and_property_removal(self):
+        self.manager.current_props["."] = {"custom:root": enc(b"root setting")}
+        self.manager.node("props.txt", "normal", props={}, base_props={"custom:removed": enc(b"old")})
+        shelf = self.manager.create("props")
+        self.manager.clean()
+        self.manager.restore(shelf["id"])
+        self.assertEqual(self.manager.current_props["."]["custom:root"], enc(b"root setting"))
+        self.assertEqual(self.manager.current_props["props.txt"], {})
+
+    def test_restore_replaces_hardlink_without_modifying_other_link(self):
+        shelf = self.simple()
+        self.manager.clean()
+        other_link = self.root / "other-link"
+        os.link(self.wc / "file.bin", other_link)
+        self.manager.restore(shelf["id"])
+        self.assertEqual(other_link.read_bytes(), b"base")
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"changed\x00\xff\r\n")
+
+    def test_base_export_uses_pristine_local_revision_and_unique_destination(self):
+        manager = ShelfManager(self.wc, self.store)
+        manager._ensure_storage()
+        calls = []
+        def fake_svn(*args):
+            calls.append(args)
+            Path(args[-1]).write_bytes(b"translated\r\n$Id: test $")
+            return b""
+        with patch.object(manager, "_svn", side_effect=fake_svn):
+            checksum = manager._exported_base_hash("a@b.txt")
+        self.assertEqual(checksum, hashlib.sha256(b"translated\r\n$Id: test $").hexdigest())
+        self.assertEqual(calls[0][:-1], ("export", "--quiet", "--ignore-externals", "-r", "BASE", "--", "a@b.txt@"))
+        self.assertFalse(Path(calls[0][-1]).exists())
+
+    def test_all_paths_preflight_before_any_write(self):
+        self.manager.node("a.txt", "modified", content=b"A")
+        self.manager.node("z.txt", "modified", content=b"Z")
+        shelf = self.manager.create("two files")
+        self.manager.clean()
+        self.manager.states["z.txt"]["item"] = "modified"
+        (self.wc / "z.txt").write_bytes(b"other work")
+        with self.assertRaises(ShelfConflict):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "a.txt").read_bytes(), b"base")
+        self.assertEqual((self.wc / "z.txt").read_bytes(), b"other work")
+        self.assertEqual(self.manager.commands, [])
+
+    def test_unversioned_collision_even_identical_is_rejected(self):
+        self.manager.node("new.txt", "unversioned", content=b"new")
+        shelf = self.manager.create("unversioned")
+        with self.assertRaises(ShelfConflict):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "new.txt").read_bytes(), b"new")
+
+    def test_changed_base_revision_rejected(self):
+        shelf = self.simple()
+        self.manager.clean()
+        self.manager.revision = "2"
+        with self.assertRaisesRegex(ShelfConflict, "BASE"):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"base")
+
+    def test_dirty_bytes_hidden_by_clean_status_are_rejected(self):
+        shelf = self.simple()
+        self.manager.clean()
+        (self.wc / "file.bin").write_bytes(b"same-size-hidden-edit")
+        # Fake SVN still reports normal, as a size/mtime heuristic can do.
+        with self.assertRaisesRegex(ShelfConflict, "differ from translated BASE"):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"same-size-hidden-edit")
+
+    def test_selected_added_child_requires_parent(self):
+        self.manager.node("new", "added", kind="dir")
+        self.manager.node("new/child", "added", content=b"child")
+        with self.assertRaisesRegex(ShelfError, "parent directory"):
+            self.manager.create("incomplete", ["new/child"])
+        self.assertEqual(self.manager.list(), [])
+
+    def test_wrong_repository_rejected(self):
+        shelf = self.simple()
+        self.manager.clean()
+        self.manager.repo_url += "/other-branch"
+        with self.assertRaisesRegex(ShelfConflict, "different repository"):
+            self.manager.restore(shelf["id"])
+
+    def test_blob_corruption_rejected_before_writing(self):
+        shelf = self.simple()
+        self.manager.clean()
+        blob = next((self.store / shelf["id"] / "blobs").iterdir())
+        blob.write_bytes(b"corrupt")
+        with self.assertRaisesRegex(ShelfError, "damaged"):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"base")
+
+    def test_traversal_and_windows_unsafe_paths(self):
+        for path in ("../outside", "/etc/passwd", "C:/file", "C:\\file", "\\\\server\\share", "a/../b", "a//b", "./a", "a/.svn/file", "NUL.txt", "a:stream", "LPT¹", "CONIN$", "trailing.", "trailing "):
+            with self.subTest(path=path), self.assertRaises(ShelfError):
+                _safe_relative(path)
+        shelf = self.simple()
+        self.manager.clean()
+        self.mutate_manifest(shelf, lambda data: data["entries"][0].update(path="../escape"))
+        with self.assertRaises(ShelfError):
+            self.manager.restore(shelf["id"])
+        self.assertFalse((self.root / "escape").exists())
+
+    def test_case_collision_rejected_before_writing(self):
+        shelf = self.simple()
+        self.manager.clean()
+        def duplicate(data):
+            extra = copy.deepcopy(data["entries"][0])
+            extra["path"] = "FILE.BIN"
+            data["entries"].append(extra)
+        self.mutate_manifest(shelf, duplicate)
+        with self.assertRaisesRegex(ShelfError, "case-colliding"):
+            self.manager.restore(shelf["id"])
+
+    def test_unsupported_states_leave_no_shelf(self):
+        for flag in ({"item": "replaced"}, {"item": "conflicted"}, {"item": "missing"}, {"copied": "true"}, {"switched": "true"}, {"tree-conflicted": "true"}, {"file-external": "true"}, {"wc-locked": "true"}, {"moved-from": "other.txt"}):
+            with self.subTest(flag=flag):
+                self.manager.node("file.txt", "modified", content=b"new")
+                self.manager.states["file.txt"].update(flag)
+                with self.assertRaises(ShelfError):
+                    self.manager.create("unsupported")
+                self.assertEqual(self.manager.list(), [])
+                self.assertEqual((self.wc / "file.txt").read_bytes(), b"new")
+
+    def test_deleted_directory_rejected(self):
+        self.manager.node("deleted", "deleted", kind="dir")
+        with self.assertRaisesRegex(ShelfError, "Deleted directories"):
+            self.manager.create("unsupported")
+
+    def test_deleted_keep_local_content_rejected(self):
+        self.manager.node("kept.txt", "deleted")
+        (self.wc / "kept.txt").write_bytes(b"do not lose this")
+        with self.assertRaisesRegex(ShelfError, "still contains local data"):
+            self.manager.create("unsupported")
+        self.assertEqual((self.wc / "kept.txt").read_bytes(), b"do not lose this")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_symlink_target_and_ancestor_rejected(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "file").write_bytes(b"private")
+        (self.wc / "link").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ShelfError, "Symlink"):
+            self.manager._path("link/file")
+        self.manager.states["link"] = {"item": "unversioned", "kind": "dir"}
+        with self.assertRaisesRegex(ShelfError, "Symlink"):
+            self.manager.create("unsafe")
+
+    def test_nested_working_copy_ancestor_rejected(self):
+        nested = self.wc / "nested"
+        (nested / ".svn").mkdir(parents=True)
+        (nested / "file").write_bytes(b"data")
+        with self.assertRaisesRegex(ShelfError, "Nested"):
+            self.manager._path("nested/file")
+
+    def test_source_change_during_backup_aborts(self):
+        self.manager.node("file.txt", "modified", content=b"original edit")
+        original = self.manager._status
+        calls = 0
+        def status(paths=None):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (self.wc / "file.txt").write_bytes(b"newer edit")
+            return original(paths)
+        self.manager._status = status
+        with self.assertRaisesRegex(ShelfError, "File changed"):
+            self.manager.create("unstable")
+        self.assertEqual(self.manager.list(), [])
+        self.assertEqual((self.wc / "file.txt").read_bytes(), b"newer edit")
+
+    def test_partial_failure_retains_shelf_and_reports_paths(self):
+        shelf = self.simple()
+        self.manager.clean()
+        with patch.object(self.manager, "_set_properties", side_effect=ShelfError("disk failure")):
+            with self.assertRaisesRegex(ShelfError, "after changing or attempting file.bin.*Shelf retained"):
+                self.manager.restore(shelf["id"])
+        self.assertTrue(self.manifest_path(shelf).is_file())
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"changed\x00\xff\r\n")
+
+    def test_restore_observation_detects_concurrent_edit(self):
+        shelf = self.simple()
+        self.manager.clean()
+        original = self.manager._preflight
+        def preflight(manifest):
+            result = original(manifest)
+            (self.wc / "file.bin").write_bytes(b"concurrent edit")
+            return result
+        self.manager._preflight = preflight
+        with self.assertRaisesRegex(ShelfConflict, "during restore"):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"concurrent edit")
+
+    def test_delete_only_removes_backup(self):
+        shelf = self.simple()
+        self.manager.delete(shelf["id"])
+        self.assertEqual(self.manager.list(), [])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"changed\x00\xff\r\n")
+        with self.assertRaises(ShelfError):
+            self.manager.delete("../wc")
+
+    def test_store_inside_working_copy_rejected(self):
+        with self.assertRaisesRegex(ShelfError, "outside"):
+            ShelfManager(self.wc, self.wc / "backups")
+
+    def test_binary_xml_property_values(self):
+        manager = ShelfManager(self.wc, self.store)
+        xml = b'<properties><target path="f"><property name="binary" encoding="base64">AP8NCg==</property><property name="text">a&#13;\nb</property></target></properties>'
+        with patch.object(manager, "_svn", return_value=xml):
+            props = manager._properties("f")
+        self.assertEqual(base64.b64decode(props["binary"]), b"\x00\xff\r\n")
+        self.assertEqual(base64.b64decode(props["text"]), b"a\r\nb")
+
+    def test_status_detects_file_external_and_lock(self):
+        manager = ShelfManager(self.wc, self.store)
+        xml = b'<status><target path="."><entry path="f"><wc-status item="modified" props="none" file-external="true" wc-locked="true" /></entry></target></status>'
+        with patch.object(manager, "_svn", return_value=xml):
+            status = manager._status()
+        with self.assertRaises(ShelfError):
+            manager._check_status(status[0])
+
+    def test_raw_runner_is_noninteractive_and_does_not_shell_parse(self):
+        manager = ShelfManager(self.wc, self.store)
+        with patch("svn_client.backend.discover_svn", return_value="svn"), patch("svn_client.shelves.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"\x00\xff", b"")) as run:
+            self.assertEqual(manager._svn("cat", "--", manager._target("a@b")), b"\x00\xff")
+        command = run.call_args.args[0]
+        self.assertEqual(command, ["svn", "--non-interactive", "--no-auth-cache", "cat", "--", "a@b@"])
+        self.assertNotEqual(run.call_args.kwargs.get("shell"), True)
+        self.assertIn("timeout", run.call_args.kwargs)
+
+
+@unittest.skipUnless(shutil.which("svn") and shutil.which("svnadmin"), "svn and svnadmin are not installed")
+class RealSvnShelfTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repo, self.wc = self.root / "repo", self.root / "wc"
+        subprocess.run(["svnadmin", "create", str(self.repo)], check=True, capture_output=True)
+        subprocess.run(["svn", "checkout", self.repo.as_uri(), str(self.wc)], check=True, capture_output=True)
+        self.svn("mkdir", "dir")
+        (self.wc / "file.bin").write_bytes(b"base\x00\xff")
+        (self.wc / "delete.txt").write_bytes(b"delete later")
+        self.svn("add", "file.bin", "delete.txt")
+        self.svn("commit", "-m", "initial")
+        self.svn("update")
+        self.manager = ShelfManager(self.wc, self.root / "shelves")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def svn(self, *args):
+        return subprocess.run(["svn", "--non-interactive", *args], cwd=self.wc, check=True, capture_output=True).stdout
+
+    def test_real_binary_properties_add_delete_and_unversioned_roundtrip(self):
+        (self.wc / "file.bin").write_bytes(b"edit\x00\xfe\r\n")
+        prop = self.root / "prop.bin"
+        prop.write_bytes(b"\x00\xff\r\n")
+        self.svn("propset", "custom:binary", "--file", str(prop), "file.bin")
+        self.svn("propset", "custom:dir", "value", "dir")
+        self.svn("delete", "delete.txt")
+        self.svn("mkdir", "added")
+        (self.wc / "added/new.txt").write_bytes(b"new")
+        self.svn("add", "added/new.txt")
+        (self.wc / "loose/empty").mkdir(parents=True)
+        (self.wc / "loose/data.bin").write_bytes(b"loose\x00\xff")
+        shelf = self.manager.create("real integration")
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"edit\x00\xfe\r\n")
+        self.svn("revert", "-R", ".")
+        shutil.rmtree(self.wc / "added")
+        shutil.rmtree(self.wc / "loose")
+        self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"edit\x00\xfe\r\n")
+        self.assertEqual(self.svn("propget", "--strict", "custom:binary", "file.bin"), b"\x00\xff\r\n")
+        self.assertEqual(self.svn("propget", "--strict", "custom:dir", "dir"), b"value")
+        self.assertFalse((self.wc / "delete.txt").exists())
+        self.assertEqual((self.wc / "added/new.txt").read_bytes(), b"new")
+        self.assertTrue((self.wc / "loose/empty").is_dir())
+        self.assertEqual((self.wc / "loose/data.bin").read_bytes(), b"loose\x00\xff")
+        self.assertTrue(self.manager.list())
+
+    def test_real_crlf_and_keyword_translation_roundtrip(self):
+        path = self.wc / "translated.txt"
+        path.write_bytes(b"$Id$\r\nline one\r\n")
+        self.svn("add", "translated.txt")
+        self.svn("propset", "svn:eol-style", "CRLF", "translated.txt")
+        self.svn("propset", "svn:keywords", "Id", "translated.txt")
+        self.svn("commit", "-m", "translated file")
+        self.svn("update")
+        path.write_bytes(path.read_bytes().replace(b"line one", b"line two"))
+        expected = path.read_bytes()
+        shelf = self.manager.create("translated")
+        self.svn("revert", "translated.txt")
+        self.manager.restore(shelf["id"])
+        self.assertEqual(path.read_bytes(), expected)
+
+    def test_real_local_conflict_refuses_entire_restore(self):
+        (self.wc / "file.bin").write_bytes(b"edit")
+        shelf = self.manager.create("conflict")
+        (self.wc / "file.bin").write_bytes(b"other edit")
+        with self.assertRaises(ShelfConflict):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"other edit")
+
+
+if __name__ == "__main__":
+    unittest.main()
