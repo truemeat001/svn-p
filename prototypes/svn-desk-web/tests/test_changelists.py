@@ -3,10 +3,12 @@
 No production workspace, real SVN executable, repository or Shelf is touched.
 """
 from dataclasses import replace
+import hashlib
 import http.client
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 import sys
 import tempfile
 import threading
@@ -17,20 +19,48 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from changelist_ops import (ChangelistService, ChangelistUnavailable, MutationUncertain,
-                           PLAN_SECONDS, status_rows, validate_request, visible_rows)
-from file_reads import StaleRead
+                           PLAN_SECONDS, status_rows, validate_request, visible_rows,
+                           FingerprintBudget, content_fingerprint)
+from file_reads import StaleRead, file_identity
 from server import PrototypeServer, ReadOnlyAdapter
 from workspace_bridge import WorkspaceCatalog, trusted_modules
 
 BACKEND = Path(os.environ.get('SVN_DESK_BACKEND_SOURCE', Path(__file__).resolve().parents[2] / 'svn-release-review-9bbc406'))
 
 
+def native(value):
+    """Synthetic status/argv identities must match the host SVN separator."""
+    return str(Path(value))
+
+
 def request(**changes):
     return dict(workspaceId='w', selectionVersion=1, snapshotToken='s',
-                ids=['src/a.txt'], action='assign', name='Feature', **changes)
+                ids=[native('src/a.txt')], action='assign', name='Feature', **changes)
+
+
+def make_file_symlink(case, link, target):
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        if getattr(error, 'winerror', None) == 1314:
+            case.skipTest('Windows symlink fixture privilege unavailable (WinError 1314).')
+        raise
 
 
 class RequestTests(unittest.TestCase):
+    def test_native_fixture_ids_use_windows_separators(self):
+        with patch(__name__ + '.Path', PureWindowsPath):
+            self.assertEqual(native('src/a.txt'), r'src\a.txt')
+            self.assertEqual(native('src/b @.txt') + '@', 'src\\b @.txt@')
+
+    def test_symlink_fixture_skips_only_windows_privilege_error(self):
+        link = Mock(); denied = OSError('privilege'); denied.winerror = 1314
+        link.symlink_to.side_effect = denied
+        with self.assertRaises(unittest.SkipTest): make_file_symlink(self, link, Path('target'))
+        for error in [PermissionError('denied'), OSError('I/O error')]:
+            link.symlink_to.side_effect = error
+            with self.assertRaises(OSError): make_file_symlink(self, link, Path('target'))
+
     def test_accepts_only_two_bounded_exact_operations(self):
         data = request(); validate_request('preflight', data)
         validate_request('preflight', {**data, 'action': 'remove', 'name': None})
@@ -60,20 +90,92 @@ class RequestTests(unittest.TestCase):
             with self.assertRaises(ValueError): validate_request('apply', {**data, field: 'anything'})
 
 
+class FingerprintTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name); self.path = self.root / 'selected.txt'
+        self.payload = b'bounded original contents'; self.path.write_bytes(self.payload)
+
+    def fingerprint(self, budget=None):
+        return content_fingerprint(self.root, Path('selected.txt'), budget or FingerprintBudget())
+
+    def node(self, **changes):
+        info = self.path.stat()
+        fields = {key: getattr(info, key) for key in
+                  ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_nlink','st_mode')}
+        return SimpleNamespace(**{**fields, **changes})
+
+    def test_hash_is_chunked_and_content_never_returned(self):
+        read = os.read
+        with patch('changelist_ops.HASH_CHUNK_BYTES', 3), patch('changelist_ops.os.read', wraps=read) as reads:
+            identity, digest = self.fingerprint()
+        self.assertEqual(identity, file_identity(self.root, Path('selected.txt')))
+        self.assertEqual(digest, hashlib.sha256(self.payload).hexdigest())
+        self.assertTrue(all(call.args[1] <= 3 for call in reads.call_args_list))
+
+    def test_wrong_descriptor_is_rejected_before_read(self):
+        for change in [{'st_ino':self.path.stat().st_ino+1}, {'st_nlink':2}, {'st_file_attributes':0x400}]:
+            with self.subTest(change=change), patch('changelist_ops.os.fstat', return_value=self.node(**change)), patch('changelist_ops.os.read') as reads:
+                with self.assertRaises(StaleRead): self.fingerprint()
+                reads.assert_not_called()
+
+    def test_windows_path_and_handle_ctime_may_differ(self):
+        node = self.node(st_ctime_ns=self.path.stat().st_ctime_ns+12345)
+        with patch('changelist_ops.os.fstat', return_value=node):
+            self.assertEqual(self.fingerprint()[1], hashlib.sha256(self.payload).hexdigest())
+
+    def test_handle_ctime_change_during_read_is_rejected(self):
+        before = self.node(); after = self.node(st_ctime_ns=before.st_ctime_ns+1)
+        with patch('changelist_ops.os.fstat', side_effect=[before, after]), self.assertRaises(StaleRead):
+            self.fingerprint()
+
+    def test_replaced_file_during_open_is_rejected_before_read(self):
+        original = os.open
+        def replace_then_open(path, flags):
+            self.path.rename(self.root/'old.txt'); self.path.write_bytes(self.payload)
+            return original(path, flags)
+        with patch('changelist_ops.os.open', side_effect=replace_then_open), patch('changelist_ops.os.read') as reads:
+            with self.assertRaises(StaleRead): self.fingerprint()
+            reads.assert_not_called()
+
+    def test_short_read_and_growth_fail_closed(self):
+        for blocks in [[b''], [self.payload, b'x']]:
+            with self.subTest(blocks=blocks), patch('changelist_ops.os.read', side_effect=blocks), self.assertRaises(StaleRead):
+                self.fingerprint()
+
+    def test_file_aggregate_and_elapsed_limits_fail_closed(self):
+        with patch('changelist_ops.MAX_FILE_BYTES', 1), patch('changelist_ops.os.open') as opened:
+            with self.assertRaises(ValueError): self.fingerprint()
+            opened.assert_not_called()
+        budget = FingerprintBudget(); budget.remaining = len(self.payload)-1
+        with patch('changelist_ops.os.open') as opened:
+            with self.assertRaises(ValueError): self.fingerprint(budget)
+            opened.assert_not_called()
+        with patch('changelist_ops.time.monotonic', side_effect=[0.0, 11.0, 11.0]), self.assertRaises(ValueError):
+            self.fingerprint()
+
+    def test_absent_is_distinct_from_empty_and_rechecked(self):
+        self.path.write_bytes(b''); self.assertEqual(self.fingerprint()[1], hashlib.sha256(b'').hexdigest())
+        self.path.unlink(); absent = self.fingerprint(); self.assertIsNone(absent[1])
+        self.path.write_bytes(b''); present = file_identity(self.root, Path('selected.txt'))
+        with patch('changelist_ops.file_identity', side_effect=[absent[0], present]), self.assertRaises(StaleRead):
+            self.fingerprint()
+
+
 @unittest.skipUnless((BACKEND / 'svn_client/history.py').is_file(), 'Trusted paired backend required.')
 class ChangelistTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'SYNTHETIC-changelists'; (self.root / '.svn').mkdir(parents=True)
         (self.root / 'src').mkdir()
-        for name in ['src/a.txt', 'src/b @.txt', 'unrelated.txt']:
+        for name in [native('src/a.txt'), native('src/b @.txt'), 'unrelated.txt']:
             (self.root / name).write_text('unchanged file contents\n')
         self.backend, _, discovery, settings = trusted_modules(BACKEND)
         with patch.object(self.backend, 'discover_svn', return_value='/trusted/svn'):
             self.adapter = ReadOnlyAdapter(self.root, BACKEND, enable_changelists=True)
         self.client = self.adapter.client
-        self.entries = [self.backend.StatusEntry('src/a.txt', 'modified'),
-                        self.backend.StatusEntry('src/b @.txt', 'normal', changelist='Old'),
+        self.entries = [self.backend.StatusEntry(native('src/a.txt'), 'modified'),
+                        self.backend.StatusEntry(native('src/b @.txt'), 'normal', changelist='Old'),
                         self.backend.StatusEntry('unrelated.txt', 'normal')]
         self.client.status = Mock(side_effect=lambda **kw: list(self.entries))
         self.client.info = Mock(side_effect=self.info_dict)
@@ -85,7 +187,7 @@ class ChangelistTests(unittest.TestCase):
                                         adapter_factory=lambda path: self.adapter)
         self.snapshot = self.catalog.snapshot()
         self.data = {key: self.snapshot[key] for key in ('workspaceId', 'selectionVersion', 'snapshotToken')}
-        self.data.update(ids=['src/a.txt'], action='assign', name='Feature')
+        self.data.update(ids=[native('src/a.txt')], action='assign', name='Feature')
         self.command_error = None; self.stderr = ''; self.mutate = True
 
     def info_dict(self, target=None):
@@ -94,7 +196,7 @@ class ChangelistTests(unittest.TestCase):
     def info_xml(self, target):
         raw = target[:-1] if '@' in target else target
         tree = ET.Element('info'); entry = ET.SubElement(tree, 'entry', kind='dir' if target == '.' else 'file')
-        ET.SubElement(entry, 'url').text = 'https://example.test/repo' + ('' if target == '.' else '/' + quote(Path(raw).as_posix()))
+        ET.SubElement(entry, 'url').text = 'https://example.test/repo' + ('' if target == '.' else '/' + quote(raw.replace('\\', '/')))
         repo = ET.SubElement(entry, 'repository'); ET.SubElement(repo, 'uuid').text = 'fixture'
         wc = ET.SubElement(entry, 'wc-info'); ET.SubElement(wc, 'wcroot-abspath').text = str(self.root)
         return ET.tostring(tree)
@@ -105,7 +207,7 @@ class ChangelistTests(unittest.TestCase):
         tail = args[args.index('--') + 1:]
         removing = '--remove' in args[:args.index('--')]  # Never interpret literal label as an option.
         name, targets = (None, tail) if removing else (tail[0], tail[1:])
-        ids = [x[:-1] if '@' in x else x for x in targets]
+        ids = [native((x[:-1] if '@' in x else x).replace('\\', '/')) for x in targets]
         if self.mutate:
             self.entries = [replace(e, changelist=name) if e.path in ids else e for e in self.entries]
         if self.command_error: raise self.command_error
@@ -130,7 +232,7 @@ class ChangelistTests(unittest.TestCase):
 
     def test_enabled_snapshot_keeps_clean_named_members_not_unrelated_clean_rows(self):
         self.assertTrue(self.snapshot['changelistWritesEnabled'])
-        self.assertEqual([r['id'] for r in self.snapshot['rows']], ['src/a.txt', 'src/b @.txt'])
+        self.assertEqual([r['id'] for r in self.snapshot['rows']], [native('src/a.txt'), native('src/b @.txt')])
         self.assertTrue(all(c.kwargs == {'verbose': True} for c in self.client.status.call_args_list))
 
     def test_old_history_backend_cannot_enable_local_writes(self):
@@ -142,37 +244,37 @@ class ChangelistTests(unittest.TestCase):
     def test_option_like_label_is_a_literal_and_old_read_capability_expires(self):
         plan = self.preflight(name='--remove')
         self.apply(plan)
-        self.assertEqual(self.client.command.call_args.args[0], ['changelist','--depth','empty','--','--remove','src/a.txt'])
-        with self.assertRaises(StaleRead): self.adapter.file_read('diff', {**self.data, 'id':'src/a.txt'})
+        self.assertEqual(self.client.command.call_args.args[0], ['changelist','--depth','empty','--','--remove',native('src/a.txt')])
+        with self.assertRaises(StaleRead): self.adapter.file_read('diff', {**self.data, 'id':native('src/a.txt')})
 
     def test_scheduled_deleted_file_is_metadata_verified_without_parent_expansion(self):
-        (self.root/'src/a.txt').unlink()
+        (self.root/native('src/a.txt')).unlink()
         self.entries[0] = replace(self.entries[0], item='deleted')
         self.data['snapshotToken'] = self.catalog.snapshot()['snapshotToken']
         result = self.apply(self.preflight())
         self.assertEqual(result['changelistResult']['count'], 1)
-        self.assertFalse((self.root/'src/a.txt').exists())
-        self.assertEqual(self.client.command.call_args.args[0][-1], 'src/a.txt')
+        self.assertFalse((self.root/native('src/a.txt')).exists())
+        self.assertEqual(self.client.command.call_args.args[0][-1], native('src/a.txt'))
 
     def test_preflight_is_read_only_and_binds_full_exact_review(self):
-        plan = self.preflight(ids=['src/b @.txt', 'src/a.txt'])
-        self.assertEqual(plan['files'], [{'id': 'src/b @.txt', 'path': 'src/b @.txt', 'fromChangelist': 'Old'},
-                                        {'id': 'src/a.txt', 'path': 'src/a.txt', 'fromChangelist': None}])
+        plan = self.preflight(ids=[native('src/b @.txt'), native('src/a.txt')])
+        self.assertEqual(plan['files'], [{'id': native('src/b @.txt'), 'path': 'src/b @.txt', 'fromChangelist': 'Old'},
+                                        {'id': native('src/a.txt'), 'path': 'src/a.txt', 'fromChangelist': None}])
         self.assertEqual(plan['expiresIn'], PLAN_SECONDS); self.assertTrue(plan['localOnly'])
         self.client.command.assert_not_called()
         self.assertTrue(all(c.args[0][0] == 'info' for c in self.run.call_args_list))
 
     def test_assign_then_move_back_keeps_contents_and_never_expands_selection(self):
-        before = {p: (self.root/p).read_bytes() for p in ['src/a.txt', 'src/b @.txt', 'unrelated.txt']}
-        result = self.apply(self.preflight(ids=['src/a.txt', 'src/b @.txt']))
+        before = {p: (self.root/p).read_bytes() for p in [native('src/a.txt'), native('src/b @.txt'), 'unrelated.txt']}
+        result = self.apply(self.preflight(ids=[native('src/a.txt'), native('src/b @.txt')]))
         self.assertEqual(result['changelistResult'], {'action': 'assign', 'name': 'Feature', 'count': 2})
         self.assertNotEqual(result['snapshotToken'], self.data['snapshotToken'])
-        self.assertEqual(self.client.command.call_args.args[0], ['changelist', '--depth', 'empty', '--', 'Feature', 'src/a.txt', 'src/b @.txt@'])
-        self.data.update(snapshotToken=result['snapshotToken'], ids=['src/b @.txt'], action='remove', name=None)
+        self.assertEqual(self.client.command.call_args.args[0], ['changelist', '--depth', 'empty', '--', 'Feature', native('src/a.txt'), native('src/b @.txt') + '@'])
+        self.data.update(snapshotToken=result['snapshotToken'], ids=[native('src/b @.txt')], action='remove', name=None)
         result = self.apply(self.preflight())
-        self.assertEqual([r['id'] for r in result['rows']], ['src/a.txt'])  # Clean default disappears.
-        self.assertEqual(next(e for e in self.entries if e.path=='src/a.txt').changelist, 'Feature')
-        self.assertEqual(self.client.command.call_args.args[0], ['changelist', '--remove', '--depth', 'empty', '--', 'src/b @.txt@'])
+        self.assertEqual([r['id'] for r in result['rows']], [native('src/a.txt')])  # Clean default disappears.
+        self.assertEqual(next(e for e in self.entries if e.path==native('src/a.txt')).changelist, 'Feature')
+        self.assertEqual(self.client.command.call_args.args[0], ['changelist', '--remove', '--depth', 'empty', '--', native('src/b @.txt') + '@'])
         self.assertEqual(before, {p: (self.root/p).read_bytes() for p in before})
 
     def test_plan_one_use_refresh_expiry_replacement_and_wrong_scope(self):
@@ -201,30 +303,77 @@ class ChangelistTests(unittest.TestCase):
         self.client.command.assert_not_called()
 
     def test_changed_content_or_status_after_review_consumes_plan_without_write(self):
-        plan = self.preflight(); (self.root/'src/a.txt').write_text('new content')
+        plan = self.preflight(); (self.root/native('src/a.txt')).write_text('new content')
         with self.assertRaises(StaleRead): self.apply(plan)
         self.assertIsNone(self.service.plan); self.client.command.assert_not_called()
         plan = self.preflight(); self.entries[0] = replace(self.entries[0], props='modified')
         with self.assertRaises(StaleRead): self.apply(plan)
         self.client.command.assert_not_called()
 
+    def test_same_length_edit_with_restored_mtime_and_unchanged_path_identity_is_refused(self):
+        path = self.root/native('src/a.txt'); before = path.stat()
+        identity = file_identity(self.root, Path(native('src/a.txt')))
+        with patch('changelist_ops.file_identity', return_value=identity):
+            plan = self.preflight()
+            path.write_bytes(b'x'*before.st_size); os.utime(path, ns=(before.st_atime_ns,before.st_mtime_ns))
+            with self.assertRaises(StaleRead): self.apply(plan)
+        self.assertIsNone(self.service.plan); self.client.command.assert_not_called()
+
+    def test_same_length_edit_during_backend_validation_is_refused(self):
+        path = self.root/native('src/a.txt'); before = path.stat()
+        identity = file_identity(self.root, Path(native('src/a.txt'))); original = self.client.validate_changelist_paths
+        def changed(paths):
+            result = original(paths); path.write_bytes(b'x'*before.st_size)
+            os.utime(path, ns=(before.st_atime_ns,before.st_mtime_ns)); return result
+        with patch('changelist_ops.file_identity', return_value=identity):
+            plan = self.preflight()
+            with patch.object(self.client, 'validate_changelist_paths', side_effect=changed), self.assertRaises(StaleRead):
+                self.apply(plan)
+        self.client.command.assert_not_called()
+
+    def test_same_length_edit_during_native_operation_is_uncertain(self):
+        path = self.root/native('src/a.txt'); before = path.stat()
+        identity = file_identity(self.root, Path(native('src/a.txt'))); original = self.command
+        def changed(args, **kwargs):
+            result = original(args, **kwargs); path.write_bytes(b'x'*before.st_size)
+            os.utime(path, ns=(before.st_atime_ns,before.st_mtime_ns)); return result
+        with patch('changelist_ops.file_identity', return_value=identity):
+            plan = self.preflight(); self.client.command.side_effect = changed
+            with self.assertRaises(MutationUncertain): self.apply(plan)
+        self.assertIsNone(self.adapter._read_snapshot); self.assertEqual(self.client.command.call_count,1)
+
+    def test_fingerprint_byte_limits_cannot_issue_native_write(self):
+        plan = self.preflight()
+        with patch('changelist_ops.MAX_FILE_BYTES',1), self.assertRaises(ValueError): self.apply(plan)
+        self.client.command.assert_not_called(); self.assertIsNone(self.service.plan)
+
+    def test_fixture_repository_urls_and_native_targets_use_forward_slashes(self):
+        entry = ET.fromstring(self.info_xml(r'src\b @.txt@'))
+        self.assertEqual(entry.findtext('entry/url'), 'https://example.test/repo/src/b%20%40.txt')
+        self.command(['changelist','--depth','empty','--','Fixture',r'src\a.txt'])
+        self.assertEqual(self.entries[0].changelist, 'Fixture')
+
     def test_unsafe_status_rows_rejected_and_no_partial_selection(self):
         for changes in [{'item':x} for x in ['unversioned','ignored','external','obstructed','incomplete','missing','conflicted']] + [
                 {'props':'conflicted'}, {'switched':True}, {'file_external':True}, {'tree_conflicted':True}, {'wc_locked':True}]:
-            self.entries[0] = replace(self.backend.StatusEntry('src/a.txt', 'modified'), **changes)
+            self.entries[0] = replace(self.backend.StatusEntry(native('src/a.txt'), 'modified'), **changes)
             self.snapshot = self.catalog.snapshot(); self.data['snapshotToken'] = self.snapshot['snapshotToken']
-            with self.subTest(changes=changes), self.assertRaises(ValueError): self.preflight(ids=['src/b @.txt','src/a.txt'])
+            with self.subTest(changes=changes), self.assertRaises(ValueError): self.preflight(ids=[native('src/b @.txt'),native('src/a.txt')])
         self.client.command.assert_not_called()
 
-    def test_directory_hardlink_symlink_nested_wc_are_rejected(self):
+    def test_directory_hardlink_nested_wc_are_rejected(self):
         self.entries.append(self.backend.StatusEntry('src', 'modified'))
         self.snapshot = self.catalog.snapshot(); self.data['snapshotToken'] = self.snapshot['snapshotToken']
         with self.assertRaises(ValueError): self.preflight(ids=['src'])
-        file = self.root/'src/a.txt'; file.unlink(); os.link(self.root/'unrelated.txt', file)
-        with self.assertRaises(ValueError): self.preflight()
-        file.unlink(); file.symlink_to(self.root/'unrelated.txt')
+        file = self.root/native('src/a.txt'); file.unlink(); os.link(self.root/'unrelated.txt', file)
         with self.assertRaises(ValueError): self.preflight()
         file.unlink(); file.write_text('new'); (self.root/'src/.svn').mkdir()
+        with self.assertRaises(ValueError): self.preflight()
+        self.client.command.assert_not_called()
+
+    def test_symlink_is_rejected(self):
+        file = self.root/native('src/a.txt'); file.unlink()
+        make_file_symlink(self, file, self.root/'unrelated.txt')
         with self.assertRaises(ValueError): self.preflight()
         self.client.command.assert_not_called()
 
@@ -320,7 +469,7 @@ class ChangelistTests(unittest.TestCase):
         self.assertEqual(post('/api/changelist-preflight',json.dumps(self.data)[:-1]+',"name":"duplicate"}')[0],400)
         self.assertEqual(post('/api/changelist-preflight',{**self.data,'command':'commit'})[0],400)
         self.assertEqual(post('/api/changelist-preflight',' ' * 262145)[0],413)
-        self.assertEqual(post('/api/changelist-preflight',{**self.data,'ids':['src/a.txt']*101})[0],400)
+        self.assertEqual(post('/api/changelist-preflight',{**self.data,'ids':[native('src/a.txt')]*101})[0],400)
         status, plan=post('/api/changelist-preflight',self.data); self.assertEqual(status,200)
         self.assertEqual(post('/api/changelist-apply',{**self.apply_data(plan),'confirmed':1})[0],400)
         self.client.command.assert_not_called()

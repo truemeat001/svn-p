@@ -6,8 +6,10 @@ A failed command may have changed some labels; callers must invalidate status.
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
 import os
 import secrets
+import stat
 import time
 
 from file_reads import StaleRead, file_identity, strict_relative_path
@@ -15,6 +17,88 @@ from file_reads import StaleRead, file_identity, strict_relative_path
 MAX_SELECTION = 100
 MAX_ROWS = 50000
 PLAN_SECONDS = 120
+MAX_FILE_BYTES = 32 * 1024 * 1024
+MAX_FINGERPRINT_BYTES = 64 * 1024 * 1024
+HASH_CHUNK_BYTES = 64 * 1024
+HASH_SECONDS = 10.0
+
+
+class FingerprintBudget:
+    """Per selection pass; elapsed checks cannot interrupt blocked filesystem I/O."""
+    def __init__(self):
+        self.remaining = MAX_FINGERPRINT_BYTES
+        self.seconds = HASH_SECONDS
+
+
+def _descriptor_fields(node):
+    # Do not compare path ctime to fstat ctime: Windows Python releases differ
+    # on creation-time versus change-time semantics. Raw fstat ctime is checked
+    # against itself before/after the read instead.
+    return node.st_dev, node.st_ino, node.st_size, node.st_mtime_ns, node.st_nlink
+
+
+def content_fingerprint(workspace, relative, budget):
+    """Hash only the already-validated exact regular file, through one handle.
+
+    Path checks reject links/reparse points/hardlinks/nested WCs as before. The
+    opened descriptor must match that checked leaf before any bytes are read.
+    Content stays local: only its SHA-256 is retained in the short-lived plan.
+    This detects observed races, not atomicity against a hostile local writer.
+    """
+    started = time.monotonic()
+    def check_time():
+        if time.monotonic() - started >= budget.seconds:
+            raise ValueError('Selected file fingerprint time limit exceeded.')
+    try:
+        check_time()
+        before = file_identity(workspace, relative)
+        leaf = before[1][-1]
+        if leaf[0] == 'absent':
+            if file_identity(workspace, relative) != before:
+                raise StaleRead('Deleted target changed while checking identity.')
+            check_time()
+            return before, None
+        size = leaf[2]
+        if size > MAX_FILE_BYTES or size > budget.remaining:
+            raise ValueError('Selected file fingerprint byte limit exceeded.')
+        flags = (os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                 | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        fd = os.open(workspace / relative, flags)
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or getattr(opened, 'st_file_attributes', 0) & 0x400
+                    or _descriptor_fields(opened) != (*leaf[:4], leaf[5])
+                    or file_identity(workspace, relative) != before):
+                raise StaleRead('Selected file was replaced before fingerprinting.')
+            digest = hashlib.sha256()
+            remaining = size
+            while remaining:
+                check_time()
+                block = os.read(fd, min(HASH_CHUNK_BYTES, remaining))
+                check_time()
+                if not block:
+                    raise StaleRead('Selected file shrank during fingerprinting.')
+                remaining -= len(block)
+                budget.remaining -= len(block)
+                digest.update(block)
+            check_time()
+            if os.read(fd, 1):
+                raise StaleRead('Selected file grew during fingerprinting.')
+            check_time()
+            after = os.fstat(fd)
+            if (not stat.S_ISREG(after.st_mode)
+                    or _descriptor_fields(after) != _descriptor_fields(opened)
+                    or after.st_ctime_ns != opened.st_ctime_ns
+                    or getattr(after, 'st_file_attributes', 0) & 0x400
+                    or file_identity(workspace, relative) != before):
+                raise StaleRead('Selected file changed during fingerprinting.')
+            check_time()
+            return before, digest.hexdigest()
+        finally:
+            os.close(fd)
+    finally:
+        budget.seconds -= max(0, time.monotonic() - started)
 
 
 class ChangelistUnavailable(ValueError):
@@ -111,13 +195,14 @@ class ChangelistService:
             if current.get(identifier) != row:
                 raise StaleRead('Selected file status or label changed; review again.')
         identities = {}
+        budget = FingerprintBudget()
         for identifier, row in expected.items():
             if (row.get('item') not in {'normal', 'none', 'modified', 'added', 'deleted', 'replaced'}
                     or row.get('props') == 'conflicted'
                     or any(row.get(key) for key in ('switched', 'file_external', 'tree_conflicted', 'wc_locked'))):
                 raise ValueError('Only safe versioned files may change labels.')
             relative = strict_relative_path(identifier)
-            before = file_identity(self.client.working_copy, relative)
+            before = content_fingerprint(self.client.working_copy, relative, budget)
             if fingerprints is not None and before != fingerprints[identifier]:
                 raise StaleRead('Selected file changed after review.')
             # Reuse strict bounded local info; no repository calls or URLs from
@@ -130,7 +215,7 @@ class ChangelistService:
             if (info.get('kind') != 'file' or not actual
                     or os.path.normcase(os.path.abspath(actual)) != expected_root):
                 raise ValueError('Target must belong to this exact working-copy root.')
-            if file_identity(self.client.working_copy, relative) != before:
+            if file_identity(self.client.working_copy, relative) != before[0]:
                 raise StaleRead('Selected file changed during validation.')
             identities[identifier] = before
         validated = self.client.validate_changelist_paths(list(expected))
@@ -143,9 +228,11 @@ class ChangelistService:
         if any(current.get(identifier) != row for identifier, row in expected.items()):
             raise StaleRead('Selected status changed during validation.')
         self.check_workspace()
-        # Recheck physical identities last, including absent/deleted targets.
+        # Rehash after potentially lengthy SVN validation, so a same-length edit
+        # with restored mtime cannot use the earlier content observation.
+        budget = FingerprintBudget()
         for identifier, before in identities.items():
-            if file_identity(self.client.working_copy, strict_relative_path(identifier)) != before:
+            if content_fingerprint(self.client.working_copy, strict_relative_path(identifier), budget) != before:
                 raise StaleRead('Selected file changed during backend validation.')
         return identities
 
@@ -192,11 +279,12 @@ class ChangelistService:
                 if result.returncode != 0 or result.stderr:
                     raise MutationUncertain('Mutation returned diagnostics.')
                 current = status_rows(self.client)
+                budget = FingerprintBudget()
                 for identifier, original in plan['expected'].items():
                     expected = {**original, 'changelist': plan['name']}
                     if current.get(identifier) != expected:
                         raise MutationUncertain('Post-write membership or status did not match.')
-                    if file_identity(self.client.working_copy, strict_relative_path(identifier)) != plan['identities'][identifier]:
+                    if content_fingerprint(self.client.working_copy, strict_relative_path(identifier), budget) != plan['identities'][identifier]:
                         raise MutationUncertain('File changed during label operation.')
                 return {'action': plan['action'], 'name': plan['name'], 'count': len(paths)}, current
             except Exception as error:
