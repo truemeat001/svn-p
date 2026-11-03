@@ -68,7 +68,7 @@ python3 server.py --workspace "/path/to/disposable-test-wc" \
 
 复用经校验的原版 Shelf 核心，新建 format 2，兼容上限以内的 format 1/2，不迁移或改写旧备份。此 Web 切片不支持目录、超过 32 MiB 的单文件或超过 64 MiB 的总内容；没有服务器 Shelf 或删除入口。默认使用原版按工作区区分的本地存储，也可显式设置 `--shelf-storage`，位置必须在所有工作副本与授权扫描范围之外。状态、内容、目标或 Shelf 改变需重新预检；确认只用一次，有效期 120 秒。
 
-**本轮尚未经过 Windows 真实 SVN 或浏览器执行验收**，请先用可丢弃副本验证。详细边界、限额及失败语义见 [本地 Shelf 工作流](docs/LOCAL_SHELVES.md)。
+**ad382ca 的 Windows 真实 SVN 验证已通过 Shelf 核心流程，但发现延迟请求体的 HTTP 拒绝缺陷及测试夹具问题；本轮修复仍待 Windows 复测，浏览器验收尚未完成**。请先用可丢弃副本验证。参见 [HTTP 与 Windows 夹具修复](docs/HTTP_REJECTION_FIX.md)。详细边界、限额及失败语义见 [本地 Shelf 工作流](docs/LOCAL_SHELVES.md)。
 
 ### 单文件差异与历史
 

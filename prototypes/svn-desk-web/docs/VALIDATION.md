@@ -131,3 +131,28 @@ The new browser test source is present but browser execution was blocked by the
 installed Chromium sandbox socket restriction. No new browser screenshot or
 native Windows/SVN acceptance is claimed. See
 [SHELF_CHECKPOINT.md](SHELF_CHECKPOINT.md) and [LOCAL_SHELVES.md](LOCAL_SHELVES.md).
+
+## HTTP rejection / Windows fixture follow-up · 2026-11-03
+
+Base `ad382ca9bab4a098a5c09b9e48507f6e0278ccb4`: the subsequent Windows report
+passed the Shelf core workflow, but found delayed-body HTTP rejection and test
+portability defects. This repair is not accepted on Windows until retested.
+
+Final Linux repair checks:
+
+- 31 JavaScript model tests passed.
+- 175 Python tests ran: 173 passed and 2 explicit real-SVN tests skipped.
+- 13 focused HTTP tests passed: actual loopback TCP delayed/coalesced/fragmented
+  bodies, authentication/Origin/Host/content-type rejection, unsupported methods,
+  malformed/oversized/truncated input and body timeout; deterministic clock/read1
+  coverage additionally verifies the absolute deadline without TCP-close races.
+- Shelf fixtures: 35 passed. File-read fixtures: 33 passed.
+- Forced synthetic WinError 1314 over those 68 fixture tests: exactly 2
+  symlink-specific skips, all other tests passed. No general error or hardlink,
+  nested-WC, inode assertion was skipped by a symlink privilege failure.
+- Independent review passed, including rerunning the final full suite and
+  replacing the timing-racy trickle test. Original Shelf core and safety checks
+  were unchanged; no browser or real project was touched.
+
+Details and limits: [HTTP_REJECTION_FIX.md](HTTP_REJECTION_FIX.md). New Windows
+real-SVN/HTTP rerun remains required; the Linux results are not that acceptance.

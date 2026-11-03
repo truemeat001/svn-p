@@ -190,16 +190,22 @@ class FileReadTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.diff()
         self.run.assert_not_called()
 
-    def test_symlink_and_hardlink_are_refused(self):
+    def test_symlink_is_refused_and_outside_file_unchanged(self):
         target = self.root / 'src/a.txt'; target.unlink(); outside = self.home / 'secret'; outside.write_text('secret')
         try: target.symlink_to(outside)
         except OSError as error:
             if getattr(error, 'winerror', None) == 1314: self.skipTest('Symlink fixture privilege unavailable.')
             raise
         with self.assertRaises(ValueError): self.diff()
-        target.unlink(); os.link(outside, target)
+        self.run.assert_not_called()
+        self.assertEqual(outside.read_text(), 'secret')
+
+    def test_hardlink_is_refused_and_outside_file_unchanged(self):
+        target = self.root / 'src/a.txt'; target.unlink(); outside = self.home / 'secret'; outside.write_text('secret')
+        os.link(outside, target)
         with self.assertRaises(ValueError): self.diff()
         self.run.assert_not_called()
+        self.assertEqual(outside.read_text(), 'secret')
 
     def test_switched_target_and_other_wc_metadata_are_refused(self):
         self.run.side_effect = lambda args, limit: self.info(args[-1], switched=args[-1] != '.')

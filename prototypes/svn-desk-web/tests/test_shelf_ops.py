@@ -6,7 +6,7 @@ import copy
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import sys
 import tempfile
 import threading
@@ -43,7 +43,7 @@ class ShelfRequestTests(unittest.TestCase):
         for key, values in {
             'workspaceId': ['', None, 'a'*65], 'snapshotToken': ['', 3],
             'selectionVersion': [True, 0, -1, '1', 2**53],
-            'ids': [[], ['a']*2, ['a']*101, ['.'], ['../x'], ['/etc/passwd'], ['.svn/wc.db'], ['C:x'], ['dir/../a'], ['x\\a']],
+            'ids': [[], ['a']*2, ['a']*101, ['.'], ['../x'], ['/etc/passwd'], ['.svn/wc.db'], ['C:x'], ['dir/../a']],
             'name': ['', ' ', ' x', 'x ', 'x\n', 'x'*129, '\ud800'],
             'operation': ['revert', 'delete', 'commit', None],
         }.items():
@@ -52,6 +52,21 @@ class ShelfRequestTests(unittest.TestCase):
                     ops.validate_request('preflight', {**data, key: value})
         for extra in [{'path':'a'}, {'recursive':True}, {'url':'https://example.com'}]:
             with self.assertRaises(ValueError): ops.validate_request('preflight', {**data, **extra})
+
+    def test_path_separator_contract_on_both_platforms(self):
+        for platform, path_type in [('nt', PureWindowsPath), ('posix', PurePosixPath)]:
+            with self.subTest(platform=platform), patch('file_reads.os', SimpleNamespace(name=platform)), patch('file_reads.Path', path_type):
+                data = scope(operation='create', ids=['x/a'], name='Backup')
+                ops.validate_request('preflight', data)
+                data['ids'] = [r'x\a']
+                if platform == 'nt':
+                    ops.validate_request('preflight', data)
+                    self.assertEqual(ops.strict_relative_path(r'x\a').parts, ('x', 'a'))
+                else:
+                    with self.assertRaises(ValueError): ops.validate_request('preflight', data)
+                for identifier in [r'x\..\a', r'.svn\wc.db', r'\server\share\a', r'C:\a']:
+                    with self.subTest(identifier=identifier), self.assertRaises(ValueError):
+                        ops.validate_request('preflight', {**data, 'ids': [identifier]})
 
     def test_confirmation_is_literal_and_cannot_edit_plan(self):
         data = scope(planToken='p', confirmed=True)
@@ -208,7 +223,7 @@ class ShelfGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.preview(operation='create', ids=['dir'], name='No')
         with self.assertRaises(StaleRead): self.preview(operation='create', ids=['absent'], name='No')
 
-    def test_symlink_hardlink_nested_wc_and_fifo_rejected(self):
+    def test_symlink_rejected_and_outside_file_unchanged(self):
         path = self.wc/'a.bin'; path.unlink()
         outside = self.root/'outside'; outside.write_bytes(b'outside')
         try: path.symlink_to(outside)
@@ -216,16 +231,29 @@ class ShelfGuardTests(unittest.TestCase):
             if getattr(exc, 'winerror', None) == 1314: self.skipTest('Windows symlink privilege unavailable')
             raise
         with self.assertRaises(ValueError): self.preview()
-        path.unlink(); os.link(outside, path)
+        self.assertFalse(self.calls)
+        self.assertEqual(outside.read_bytes(), b'outside')
+
+    def test_hardlink_rejected_and_outside_file_unchanged(self):
+        path = self.wc/'a.bin'; path.unlink()
+        outside = self.root/'outside'; outside.write_bytes(b'outside')
+        os.link(outside, path)
         with self.assertRaises(ValueError): self.preview()
-        path.unlink(); path.write_bytes(self.payload)
+        self.assertFalse(self.calls)
+        self.assertEqual(outside.read_bytes(), b'outside')
+
+    def test_nested_working_copy_rejected(self):
         (self.wc/'sub').mkdir(); (self.wc/'sub'/'.svn').mkdir(); self.fake.node('sub/f','modified')
         self.snapshot = ('s', self.rows())
         with self.assertRaises(ValueError): self.preview(operation='create', ids=['sub/f'], name='No')
-        if hasattr(os, 'mkfifo'):
-            path.unlink(); os.mkfifo(path)
-            with self.assertRaises(ValueError): self.preview()
-        self.assertEqual(outside.read_bytes(), b'outside')
+        self.assertFalse(self.calls)
+        self.assertEqual((self.wc/'sub/f').read_bytes(), b'base')
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO fixture requires os.mkfifo')
+    def test_fifo_rejected(self):
+        path = self.wc/'a.bin'; path.unlink(); os.mkfifo(path)
+        with self.assertRaises(ValueError): self.preview()
+        self.assertFalse(self.calls)
 
     def test_size_entry_count_and_case_collision_limits(self):
         with patch('changelist_ops.MAX_FILE_BYTES', 2), self.assertRaises(ValueError): self.preview()
@@ -280,17 +308,28 @@ class ShelfGuardTests(unittest.TestCase):
         self.assertEqual(self.invalidated, 1); self.assertIsNone(self.service.plan)
         with self.assertRaises(StaleRead): self.apply(plan)
 
-    def test_restore_target_mode_and_inode_change_invalidates_plan(self):
+    @unittest.skipIf(os.name == 'nt', 'POSIX executable mode bits are not supported by Windows chmod')
+    def test_restore_target_mode_change_invalidates_plan(self):
         shelf = self.create(); self.fake.clean()
         path = self.wc/'a.bin'
-        for change in ['mode', 'inode']:
-            with self.subTest(change=change):
-                plan = self.preview(operation='restore', shelfId=shelf['shelfId'])
-                if change == 'mode': path.chmod(path.stat().st_mode ^ 0o100)
-                else:
-                    alternate = self.wc/'replacement'; alternate.write_bytes(path.read_bytes()); os.replace(alternate, path)
-                with self.assertRaises((ValueError, original.ShelfError)): self.apply(plan)
-                self.assertEqual(path.read_bytes(), b'base')
+        plan = self.preview(operation='restore', shelfId=shelf['shelfId'])
+        mode = path.stat().st_mode
+        path.chmod(mode ^ 0o100)
+        self.assertNotEqual(path.stat().st_mode, mode)
+        with self.assertRaises((ValueError, original.ShelfError)): self.apply(plan)
+        self.assertEqual(path.read_bytes(), b'base')
+        self.assertIsNone(self.service.plan)
+
+    def test_restore_target_inode_change_invalidates_plan(self):
+        shelf = self.create(); self.fake.clean()
+        path = self.wc/'a.bin'
+        plan = self.preview(operation='restore', shelfId=shelf['shelfId'])
+        inode = path.stat().st_ino
+        alternate = self.wc/'replacement'; alternate.write_bytes(path.read_bytes()); os.replace(alternate, path)
+        self.assertNotEqual(path.stat().st_ino, inode)
+        with self.assertRaises((ValueError, original.ShelfError)): self.apply(plan)
+        self.assertEqual(path.read_bytes(), b'base')
+        self.assertIsNone(self.service.plan)
 
     def test_cross_device_leaf_rejected_before_transport(self):
         real = os.lstat

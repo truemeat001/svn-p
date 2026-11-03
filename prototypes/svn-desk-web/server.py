@@ -6,11 +6,13 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import secrets
 import sys
 import threading
+import time
 from urllib.parse import urlsplit
 from workspace_bridge import WorkspaceCatalog, local_path, working_copy_identity, trusted_modules
 from file_reads import (FileReadService, StaleRead, UnsupportedComparison,
@@ -27,6 +29,9 @@ ASSETS = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
           "/model.js": "model.js", "/demo-data.js": "demo-data.js", "/styles.css": "styles.css", "/favicon.svg": "favicon.svg"}
 MIMES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
 MAX_ROWS = 50000
+MAX_REQUEST_BODY_BYTES = 262144
+REQUEST_BODY_SECONDS = 5.0
+REQUEST_BODY_CHUNK = 64 * 1024
 
 class ReadOnlyAdapter:
     """Imports trusted bounded services. Never exposes a generic SVN command."""
@@ -194,15 +199,74 @@ class PrototypeServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     server: PrototypeServer
+    timeout = 5.0  # Also bound idle request-line/header reads; body has a total deadline.
+
+    def _request_body_size(self, *, optional=False):
+        lengths = self.headers.get_all('Content-Length')
+        if self.headers.get('Transfer-Encoding') is not None:
+            raise ValueError('Transfer encoding is not supported.')
+        if lengths is None and optional:
+            return 0
+        if lengths is None or len(lengths) != 1:
+            raise ValueError('One Content-Length is required.')
+        value = lengths[0]
+        if not re.fullmatch(r'0|[1-9][0-9]{0,19}', value):
+            raise ValueError('Content-Length must be one canonical decimal integer.')
+        return int(value)
+
+    def _read_request_body(self, limit, *, discard=False, optional=False):
+        # Mark before inspecting framing: an invalid/partial body must never be
+        # retried by respond(), or parsed later as another HTTP request.
+        self._body_attempted = True
+        size = self._request_body_size(optional=optional)
+        if size > limit:
+            raise ValueError('Request body exceeds the bounded read limit.')
+        deadline = time.monotonic() + REQUEST_BODY_SECONDS
+        remaining, chunks = size, []
+        while remaining:
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise TimeoutError('Request body deadline exceeded.')
+            self.connection.settimeout(seconds)
+            # read1 performs at most one underlying buffered read. Unlike
+            # read(size), slow trickles cannot restart the timeout indefinitely.
+            chunk = self.rfile.read1(min(remaining, REQUEST_BODY_CHUNK))
+            if not chunk:
+                raise ValueError('Truncated request body.')
+            remaining -= len(chunk)
+            if not discard:
+                chunks.append(chunk)
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Request body deadline exceeded.')
+        return b''.join(chunks)
+
+    def _finish_rejected_body(self):
+        if getattr(self, '_body_attempted', False):
+            return
+        # A well-framed bounded request may send headers before its body. Drain
+        # it before the final rejection so Windows does not lose the response
+        # when TCP closes with unread payload. Never drain ambiguous framing,
+        # oversized content or beyond the absolute deadline. Those connections
+        # close fail-closed; reliable delivery to a misbehaving sender is not
+        # guaranteed and no backend operation is dispatched.
+        try:
+            self._read_request_body(MAX_REQUEST_BODY_BYTES, discard=True, optional=True)
+        except (ValueError, OSError):
+            pass
+
     def log_message(self, *_args):
         pass  # Never log tokens, working-copy paths or raw SVN diagnostics.
 
     def respond(self, status, body, content_type="application/json; charset=utf-8"):
+        self._finish_rejected_body()
+        self.close_connection = True
+        self.connection.settimeout(self.timeout)
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -291,13 +355,12 @@ class Handler(BaseHTTPRequestHandler):
                 or self.headers.get("Content-Type", "").lower() != "application/json"):
             return self.respond(400, {"error": "A bounded JSON request is required."})
         try:
-            size = int(self.headers['Content-Length'])
-            if not 1 <= size <= (262144 if changelist_kind or shelf_kind else 4096):
+            size = self._request_body_size()
+            limit = MAX_REQUEST_BODY_BYTES if changelist_kind or shelf_kind else 4096
+            if not 1 <= size <= limit:
+                self._body_attempted = True  # Oversized/empty input is not drained.
                 return self.respond(413, {"error": "Selection request is too large or empty."})
-            self.connection.settimeout(5)
-            body = self.rfile.read(size)
-            if len(body) != size:
-                raise ValueError('Truncated request.')
+            body = self._read_request_body(limit)
             def strict_object(pairs):
                 obj = {}
                 for key, value in pairs:
@@ -330,6 +393,8 @@ class Handler(BaseHTTPRequestHandler):
                     comparison_revisions(data)
                 else:
                     revision(data['startRevision'])
+        except TimeoutError:
+            return self.respond(408, {'error': '请求体未在有界时限内完整到达；未执行操作。'})
         except UnsupportedComparison:
             return self.respond(400, {'error': '不支持 BASE → BASE 比较。查看本地修改请选 BASE → WORKING，或使用明确数字修订；未运行比较。'})
         except (ValueError, OSError, RecursionError):
