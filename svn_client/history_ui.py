@@ -29,10 +29,15 @@ def comparison_preview(result, limit):
     text, clipped, actual_bytes, shown_bytes = bounded_text(result.diff.text, limit)
     truncated = bool(result.diff.truncated or clipped)
     source_bytes = max(int(result.diff.source_utf8_bytes), actual_bytes)
+    warning = (f"编码警告：{result.diff.undecodable_bytes:,} 个不可按 UTF-8 解码的字节、"
+               f"{result.diff.escaped_controls:,} 个控制字符已显示为转义。"
+               "未猜测本地编码；此显示不能作为精确补丁。\n"
+               if result.diff.undecodable_bytes or result.diff.escaped_controls else "")
     heading = (f"范围：{json.dumps(result.path, ensure_ascii=False)}\n"
                f"方向：{result.from_revision} → {result.to_revision}\n"
                f"显示：{shown_bytes:,} / {source_bytes:,} UTF-8 字节（解码、遮蔽后）\n"
                + ("已截断：仅为预览，不能作为完整补丁。\n" if truncated else "本次返回的文本已完整显示。\n")
+               + warning
                + "仅文本 / 属性差异，不包含二进制载荷；不是可编辑合并视图。\n\n")
     return heading + (text or "SVN 对这个确切范围和版本组合没有返回文本差异。不能据此断言二进制内容相同。")
 

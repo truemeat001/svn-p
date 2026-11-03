@@ -26,7 +26,7 @@ python3 server.py
 
 ## 真实工作区流程
 
-Windows 验收发现旧版会把 W155007 + 零退出码误当空状态，配套严格后端已修正，集成提交 `5dbaff4` 的 status 修复已通过后续 Windows 真实 SVN 重测。新接入的 diff/history **尚未在真实 SVN 或 Windows 验收**。请先阅读 [status 修正说明](docs/STATUS_DIAGNOSTICS_FIX.md) 与 [只读文件工作流说明](docs/READONLY_FILE_WORKFLOWS.md)，更新完整配套源码并重启服务。
+Windows 验收发现旧版会把 W155007 + 零退出码误当空状态，配套严格后端已修正，集成提交 `5dbaff4` 的 status 修复已通过后续 Windows 真实 SVN 重测。提交 `9864460` 的 Windows 真实 SVN 验证已确认历史分页等流程，同时发现混合编码差异和 BASE→BASE 兼容问题。本轮修正已完成本地回归，**仍待新的 Windows 真实 SVN 复测**。请先阅读 [status 修正说明](docs/STATUS_DIAGNOSTICS_FIX.md) 、[只读文件工作流说明](docs/READONLY_FILE_WORKFLOWS.md) 与 [混合编码修正说明](docs/DIFF_ENCODING_FIX.md)，更新完整配套源码并重启服务。
 
 ```sh
 python3 server.py --workspace "/path/to/working-copy-root" \
@@ -41,13 +41,15 @@ python3 server.py --workspace "/path/to/working-copy-root" \
 
 ### 单文件差异与历史
 
-点击「查看差异」后明确选择修订并「读取差异」。BASE→WORKING 只读本地副本；其他比较和历史会访问当前文件仓库，并使用既有 SVN 配置与凭据，页面提前说明。每页历史最多 50 条，支持前后分页、提交详情和当前文件的 r(N−1)→rN 比较；详情的变更路径属于整次提交，可能超出当前文件范围，但不可点选扩大读取范围。
+点击「查看差异」后明确选择修订并「读取差异」。BASE→BASE 在调用 SVN 之前明确拒绝，不伪造为空差异；本地修改请选择 BASE→WORKING，历史比较使用明确数字修订。BASE→WORKING 只读本地副本；其他比较和历史会访问当前文件仓库，并使用既有 SVN 配置与凭据，页面提前说明。每页历史最多 50 条，支持前后分页、提交详情和当前文件的 r(N−1)→rN 比较；详情的变更路径属于整次提交，可能超出当前文件范围，但不可点选扩大读取范围。
 
 请求绑定当前工作区 ID、选择代际、成功状态快照令牌和原始状态行 ID。切换、刷新失败、改修订、改焦点、关闭窗口或切换预览会清空旧结果并使旧请求失效。关闭不取消已经启动的 SVN 子进程，服务端仍按有界超时完成；不会自动重试。
 
 只接受明确版本化文件。目录、链接、hardlink、reparse point、跨设备、嵌套 WC、external、switched、管理目录与非法路径被拒绝；缺失/已删文件仍须由 SVN 元数据确认是当前工作区文件。Web diff 固定 `--depth empty`，从不递归展开。预览最多 256 KiB，截断会显示；差异硬捕获上限 8 MiB，历史 4 MiB，历史显示页 512 KiB，超限不返回部分结果。
 
-配套 `history.py` 使用 `HISTORY_DIAGNOSTICS_POLICY=1`：零退出码但有任何 stderr（包括本地化提示、工具 banner 或空白）也拒绝结果。可能拒绝无害提示，这是明确的 fail-closed 兼容策略；不按语言或告警编号猜测成功。旧 history 模块不会禁用可用 status，但文件读取按钮不可用。详见 [范围与验证](docs/READONLY_FILE_WORKFLOWS.md)。
+差异按 UTF-8 解释有效片段，不再对整份混合输出回退到系统代码页。不可按 UTF-8 解码的字节逐个显示为 `\xNN`，控制字符按可见形式转义，并始终提示计数及“不可作为精确补丁”。这不是原始编码检测，也不猜测恢复旧编码文件内容；NUL 或 UTF-16 BOM 会安全拒绝整份结果。详情见 [编码策略与复测范围](docs/DIFF_ENCODING_FIX.md)。
+
+配套 `history.py` 必须同时声明 `DIFF_TEXT_POLICY=1` 与 `HISTORY_DIAGNOSTICS_POLICY=1`：零退出码但有任何 stderr（包括本地化提示、工具 banner 或空白）也拒绝结果。可能拒绝无害提示，这是明确的 fail-closed 兼容策略；不按语言或告警编号猜测成功。旧 history 模块不会禁用可用 status，但文件读取按钮不可用。详见 [范围与验证](docs/READONLY_FILE_WORKFLOWS.md)。
 
 ### 扫描、选择和保存
 

@@ -13,7 +13,8 @@ import sys
 import threading
 from urllib.parse import urlsplit
 from workspace_bridge import WorkspaceCatalog, local_path, working_copy_identity, trusted_modules
-from file_reads import FileReadService, StaleRead, history_module, revision
+from file_reads import (FileReadService, StaleRead, UnsupportedComparison,
+                        comparison_revisions, history_module, revision)
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
@@ -229,9 +230,11 @@ class Handler(BaseHTTPRequestHandler):
                             or any(ord(c) < 32 or ord(c) == 127 for c in data[field])):
                         raise ValueError('Invalid read field.')
                 if file_kind == 'diff':
-                    revision(data['fromRevision']); revision(data['toRevision'], working=True)
+                    comparison_revisions(data)
                 else:
                     revision(data['startRevision'])
+        except UnsupportedComparison:
+            return self.respond(400, {'error': '不支持 BASE → BASE 比较。查看本地修改请选 BASE → WORKING，或使用明确数字修订；未运行比较。'})
         except (ValueError, OSError, RecursionError):
             return self.respond(400, {"error": "只接受明确工作区、当前状态行与受限修订；不接受任意路径、命令或重复字段。"})
         if file_kind is not None:

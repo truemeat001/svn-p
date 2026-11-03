@@ -2,7 +2,7 @@
 import http.client
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import sys
 import tempfile
 import threading
@@ -62,7 +62,7 @@ class FileReadTests(unittest.TestCase):
         relative = target[:-1] if '@' in target else target
         tree = ET.Element('info')
         entry = ET.SubElement(tree, 'entry', kind=kind or ('dir' if target == '.' else 'file'))
-        ET.SubElement(entry, 'url').text = 'https://example.test/repo' + ('/wrong' if switched else '' if target == '.' else '/' + quote(relative))
+        ET.SubElement(entry, 'url').text = 'https://example.test/repo' + ('/wrong' if switched else '' if target == '.' else '/' + quote(Path(relative).as_posix()))
         repo = ET.SubElement(entry, 'repository'); ET.SubElement(repo, 'uuid').text = 'fixture'
         wc = ET.SubElement(entry, 'wc-info'); ET.SubElement(wc, 'wcroot-abspath').text = str(root or self.root)
         return ET.tostring(tree)
@@ -85,7 +85,7 @@ class FileReadTests(unittest.TestCase):
         self.assertEqual(result['text'], '--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n')
         self.assertFalse(result['truncated']); self.assertFalse(result['binaryPayloadsIncluded'])
         call = next(call for call in self.run.call_args_list if call.args[0][0] == 'diff')
-        self.assertEqual(call.args[0], ['diff', '--old=src/a.txt@', '--new=src/a.txt@', '--revision', 'BASE'])
+        self.assertEqual(call.args[0], ['diff', '--old=' + str(Path('src/a.txt')) + '@', '--new=' + str(Path('src/a.txt')) + '@', '--revision', 'BASE'])
         self.assertEqual(call.args[1], 8 * 1024 * 1024)
         self.assertTrue(all(call.args[0][0] in {'info', 'diff'} for call in self.run.call_args_list))
 
@@ -110,8 +110,50 @@ class FileReadTests(unittest.TestCase):
         self.assertEqual(result['entries'][0]['author'], '<script>')  # UI escapes, server JSON is text.
         self.assertFalse(result['hasMore']); self.assertIsNone(result['nextStartRevision'])
         command = next(c for c in self.run.call_args_list if c.args[0][0] == 'log')
-        self.assertEqual(command.args[0], ['log', '--xml', '--verbose', '--limit', '51', '--revision', 'HEAD:0', '--', 'src/a.txt'])
+        self.assertEqual(command.args[0], ['log', '--xml', '--verbose', '--limit', '51', '--revision', 'HEAD:0', '--', str(Path('src/a.txt'))])
         self.assertEqual(command.args[1], 4 * 1024 * 1024)
+
+    def test_fixture_urls_use_repository_separators_on_windows(self):
+        with patch(__name__ + '.Path', PureWindowsPath):
+            info = ET.fromstring(self.info(r'src\a.txt'))
+        self.assertEqual(info.findtext('entry/url'), 'https://example.test/repo/src/a.txt')
+        self.assertNotIn('%5C', info.findtext('entry/url'))
+
+    def test_encoded_backslash_repository_url_still_fails_closed(self):
+        original = self.response
+        def wrong_separator(args, limit):
+            data = original(args, limit)
+            if args[0] == 'info' and args[-1] != '.':
+                info = ET.fromstring(data)
+                info.find('entry/url').text = 'https://example.test/repo/src%5Ca.txt'
+                return ET.tostring(info)
+            return data
+        self.run.side_effect = wrong_separator
+        with self.assertRaises(ValueError): self.diff()
+        self.assertFalse(any(c.args[0][0] == 'diff' for c in self.run.call_args_list))
+
+    def test_old_diff_text_policy_disables_reads(self):
+        with patch.object(self.history, 'DIFF_TEXT_POLICY', 0):
+            self.assertIsNone(history_module(BACKEND))
+
+    def test_mixed_encoding_warning_is_kept_through_bridge(self):
+        original = self.response
+        self.run.side_effect = lambda args, limit: ('Index: 中文.txt\n'.encode('cp936') + '+新正文\n'.encode()) if args[0] == 'diff' else original(args, limit)
+        result = self.diff()
+        self.assertIn('+新正文', result['text'])
+        self.assertEqual(result['textEncoding'], 'utf-8-visible-escapes')
+        self.assertEqual(result['undecodableBytes'], 4)
+        self.assertEqual(result['escapedControls'], 0)
+        self.assertEqual(result['returnedUtf8Bytes'], len(result['text'].encode()))
+
+    def test_base_to_base_rejected_before_any_info(self):
+        with self.assertRaises(ValueError): self.diff(toRevision='BASE')
+        self.run.assert_not_called()
+
+    def test_nul_payload_is_never_shown_as_text(self):
+        original = self.response
+        self.run.side_effect = lambda args, limit: b'private prefix\x00binary' if args[0] == 'diff' else original(args, limit)
+        with self.assertRaises(RuntimeError): self.diff()
 
     def test_51st_entry_is_only_pagination_sentinel(self):
         original = self.response
@@ -276,6 +318,13 @@ class FileReadHttpTests(unittest.TestCase):
         self.assertEqual(self.request(raw=json.dumps(self.data)[:-1] + ',"id":"other"}')[0], 400)
         self.assertEqual(self.request(raw='[' * 1500 + ']' * 1500)[0], 400)
         self.assertEqual(self.request(raw='x' * 4097)[0], 413)
+        self.catalog.file_read.assert_not_called()
+
+    def test_base_to_base_has_clear_400_without_backend_call(self):
+        status, raw = self.request({**self.data, 'toRevision': 'BASE'})
+        self.assertEqual(status, 400)
+        self.assertIn('BASE → BASE', json.loads(raw)['error'])
+        self.assertIn('BASE → WORKING', json.loads(raw)['error'])
         self.catalog.file_read.assert_not_called()
 
     def test_host_origin_fetch_metadata_and_session_required(self):

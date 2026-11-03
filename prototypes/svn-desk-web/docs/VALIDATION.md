@@ -1,3 +1,9 @@
+# Mixed diff encoding correction · 2026-11-03
+
+The latest source/API checks and outstanding Windows retest are in [DIFF_ENCODING_FIX.md](DIFF_ENCODING_FIX.md). Earlier counts below describe their own historical checkpoints.
+
+---
+
 # Read-only file workflow checkpoint · 2026-11-03
 
 Current diff/history implementation and verification are documented in [READONLY_FILE_WORKFLOWS.md](READONLY_FILE_WORKFLOWS.md). The sections below retain historical checkpoints. Subsequent separately reported Windows real-SVN acceptance of `5dbaff4` supersedes the status-only pending-retest statements below; it does not validate the newer file workflows.

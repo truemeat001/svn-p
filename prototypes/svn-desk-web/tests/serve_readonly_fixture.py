@@ -19,20 +19,23 @@ class SyntheticReadAdapter(ReadOnlyAdapter):
     def __init__(self, path):
         with patch.object(backend, 'discover_svn', return_value='/SYNTHETIC-NOT-EXECUTED/svn'):
             super().__init__(path, source)
-        self.client.status = lambda **kwargs: [backend.StatusEntry(name, 'modified', revision=100, changelist='SYNTHETIC') for name in ('one.txt', 'two.txt', 'slow.txt', 'fail.txt')]
+        self.client.status = lambda **kwargs: [backend.StatusEntry(name, 'modified', revision=100, changelist='SYNTHETIC') for name in ('one.txt', 'two.txt', 'slow.txt', 'fail.txt', '中文.txt')]
         self._file_service.manager._run = self.synthetic
 
     def synthetic(self, args, limit):
         if args[0] == 'info':
             target = args[-1]; name = target[:-1] if '@' in target else target
             root = ET.Element('info'); entry = ET.SubElement(root, 'entry', kind='dir' if target == '.' else 'file')
-            ET.SubElement(entry, 'url').text = 'https://synthetic.invalid/repo' + ('' if target == '.' else '/' + quote(name))
+            ET.SubElement(entry, 'url').text = 'https://synthetic.invalid/repo' + ('' if target == '.' else '/' + quote(Path(name).as_posix()))
             repo = ET.SubElement(entry, 'repository'); ET.SubElement(repo, 'uuid').text = 'SYNTHETIC'
             wc = ET.SubElement(entry, 'wc-info'); ET.SubElement(wc, 'wcroot-abspath').text = str(self.workspace)
             return ET.tostring(root)
         if 'slow.txt' in ' '.join(args): time.sleep(3)
         if 'fail.txt' in ' '.join(args): raise RuntimeError('SYNTHETIC secret diagnostic must not leak')
         if args[0] == 'diff':
+            if '中文.txt' in ' '.join(args):
+                return ('Index: 中文.txt\n--- 中文.txt\n+++ 中文.txt\n'.encode('cp936')
+                        + '@@ -1 +1 @@\n-旧正文\n+新正文 ✓ UTF-8\n'.encode('utf-8'))
             return f'Index: SYNTHETIC {self.workspace.name}\n--- old\n+++ working\n@@ -1 +1 @@\n-old content\n+<script>escaped synthetic content</script>\n'.encode()
         if args[0] == 'log':
             start = args[args.index('--revision') + 1].split(':')[0]
@@ -53,7 +56,7 @@ if __name__ == '__main__':
         home = Path(temp)
         for name in ('SYNTHETIC-alpha', 'SYNTHETIC-beta'):
             root = home / name; (root / '.svn').mkdir(parents=True)
-            for filename in ('one.txt', 'two.txt', 'slow.txt', 'fail.txt'): (root / filename).write_text('SYNTHETIC only')
+            for filename in ('one.txt', 'two.txt', 'slow.txt', 'fail.txt', '中文.txt'): (root / filename).write_text('SYNTHETIC only')
         catalog = WorkspaceCatalog(roots=[home / 'SYNTHETIC-alpha', home / 'SYNTHETIC-beta'], discovery=discovery,
             settings=settings, adapter_factory=SyntheticReadAdapter)
         server = PrototypeServer(0, catalog=catalog)

@@ -23,6 +23,7 @@ from .backend import LogEntry, SvnClient, SvnError, redact_credentials
 
 # Web consumers require fail-closed completion of all read-only transports.
 HISTORY_DIAGNOSTICS_POLICY = 1
+DIFF_TEXT_POLICY = 1  # UTF-8 segments plus explicit visible escapes; never locale guessing.
 
 MAX_HISTORY_ENTRIES = 1000
 MAX_HISTORY_BYTES = 4 * 1024 * 1024
@@ -42,6 +43,9 @@ class BoundedText:
     truncated: bool
     source_utf8_bytes: int
     returned_utf8_bytes: int
+    text_encoding: str = 'utf-8'
+    undecodable_bytes: int = 0
+    escaped_controls: int = 0
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,44 @@ class ComparisonResult:
     to_revision: str
     diff: BoundedText
     binary_payloads_included: bool = False
+
+
+def decode_diff_output(raw: bytes) -> tuple[str, int, int]:
+    """Preserve valid UTF-8 even when SVN's native-encoded headers differ.
+
+    Diff is not one guaranteed-encoding document: Windows metadata can use the
+    native code page while file hunks retain their original bytes. No locale
+    fallback can safely decode that whole stream (or determine file encoding).
+    Undecodable bytes stay individually visible as \\xNN, with explicit counts
+    for every caller to disclose. This is display-only, never an exact patch.
+    """
+    if b'\0' in raw or b'\xff\xfe' in raw or b'\xfe\xff' in raw:
+        raise HistoryError('SVN diff contains NUL bytes or a UTF-16 byte-order marker; binary or UTF-16 data is not displayed. No partial comparison was returned.')
+    value = raw.decode('utf-8', errors='surrogateescape')
+    undecodable = controls = 0
+
+    def visible(match):
+        nonlocal undecodable, controls
+        code = ord(match.group())
+        if 0xDC80 <= code <= 0xDCFF:
+            undecodable += 1
+            return '\\x%02x' % (code - 0xDC00)
+        controls += 1
+        return '\\x%02x' % code if code < 128 else '\\u%04x' % code
+
+    # Bound re.sub's temporary replacement list even for an all-invalid 8-MiB
+    # stream. Keep CRLF together at chunk boundaries so policy is unchanged.
+    pattern = re.compile(r'[\udc80-\udcff\x01-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)')
+    parts = []
+    start = 0
+    while start < len(value):
+        end = min(start + 64 * 1024, len(value))
+        if end < len(value) and value[end - 1] == '\r' and value[end] == '\n':
+            end += 1
+        parts.append(pattern.sub(visible, value[start:end]))
+        start = end
+    return ''.join(parts), undecodable, controls
+
 
 
 def normalize_revision(value: str | int, *, working: bool = False) -> str:
@@ -297,6 +339,8 @@ class HistoryManager:
                 max_text_bytes: int = DEFAULT_DIFF_TEXT_BYTES) -> ComparisonResult:
         left = normalize_revision(from_revision)
         right = normalize_revision(to_revision, working=True)
+        if left == right == 'BASE':
+            raise ValueError('BASE to BASE comparison is unsupported. Use BASE to WORKING for local changes, or explicit numeric revisions; no comparison was run.')
         if isinstance(max_text_bytes, bool) or not isinstance(max_text_bytes, int) or not 1 <= max_text_bytes <= MAX_DIFF_BYTES:
             raise ValueError(f"Comparison text limit must be between 1 and {MAX_DIFF_BYTES} bytes.")
         relative, target = self._target(path)
@@ -312,8 +356,11 @@ class HistoryManager:
             raw = self._run(["diff", "--old=" + relative + "@",
                              "--new=" + relative + "@", "--revision", revision],
                             MAX_DIFF_BYTES)
-        text = redact_credentials(self.client._decode(raw))
+        decoded, undecodable, controls = decode_diff_output(raw)
+        text = redact_credentials(decoded)
         encoded = text.encode("utf-8", errors="replace")
         prefix = encoded[:max_text_bytes].decode("utf-8", errors="ignore")
-        field = BoundedText(prefix, len(encoded) > max_text_bytes, len(encoded), len(prefix.encode("utf-8")))
+        field = BoundedText(prefix, len(encoded) > max_text_bytes, len(encoded), len(prefix.encode("utf-8")),
+                            'utf-8-visible-escapes' if undecodable or controls else 'utf-8',
+                            undecodable, controls)
         return ComparisonResult(relative, left, right, field)

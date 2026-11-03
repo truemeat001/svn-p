@@ -1,6 +1,6 @@
 # Exact-file read-only workflows · 2026-11-03
 
-This source checkpoint extends integrated `5dbaff4` with real backend wiring for file comparison and history. It is not a release, a replacement for the native client, or a claim of real-SVN/Windows acceptance. The earlier status-warning fix has separate separately reported Windows acceptance; do not extend that result to these new features.
+This source checkpoint extends integrated `5dbaff4` with real backend wiring for file comparison and history. It is not a release, a replacement for the native client, or a claim of real-SVN/Windows acceptance. The earlier status-warning fix has separate Windows acceptance. Later Windows tests of `9864460` confirmed history pagination and identified mixed diff encoding and BASE → BASE issues; see [DIFF_ENCODING_FIX.md](DIFF_ENCODING_FIX.md) for the corrective checkpoint and its pending real-SVN retest.
 
 ## What is implemented
 
@@ -30,9 +30,10 @@ No write endpoint, arbitrary file-content API, upload, checkout, update, commit,
 - Diagnostic capture: existing 64 KiB cap, never echoed to the Web UI. A failing or oversized command returns no partial result.
 - Each backend subprocess uses the existing 25-second adapter timeout plus bounded cleanup. A multi-command read can take longer than one subprocess timeout. Closing/navigating invalidates presentation, not the already running SVN process; it may continue until its bounded completion. There is no claim of immediate cancellation.
 - `HISTORY_DIAGNOSTICS_POLICY=1` requires exit zero **and no stderr bytes** for every bounded history/info/diff read. This deliberately rejects even harmless localized notices, wrapper banners, or whitespace. It does not guess from English text or error numbers. Fix the emitting client's configuration with a trusted SVN tool rather than silently treating warnings as a complete/empty result.
-- If the trusted history module lacks that capability, status can still work but file reads stay disabled. Existing strict status checks in both `backend.py` and `status_stream.py` remain unchanged.
+- File reads also require `DIFF_TEXT_POLICY=1`: UTF-8 interpretation with explicit visible byte/control escapes and warnings, never whole-stream locale fallback. BASE → BASE is rejected before SVN. See [DIFF_ENCODING_FIX.md](DIFF_ENCODING_FIX.md).
+- If the trusted history module lacks either capability, status can still work but file reads stay disabled. Existing strict status checks in both `backend.py` and `status_stream.py` remain unchanged.
 
-## Verification actually run
+## Original checkpoint verification
 
 Source/API tests on this Linux environment:
 
@@ -67,6 +68,6 @@ The browser's captured console included extension metadata errors; these are not
 
 ## Remaining acceptance
 
-No `svn`/`svnadmin` is installed in this environment. New real SVN network/history/diff behavior, historical rename/copy/deletion edge cases, native Windows path/encoding/diagnostics behavior, and Windows WebView2/Tauri still need acceptance. No Rust build, installer, release, main merge, or deployment occurred. The paired root backend changes are limited to strict `history.py` completion and its tests; Shelf was not changed.
+No `svn`/`svnadmin` is installed in this environment. New real SVN network/history/diff behavior, historical rename/copy/deletion edge cases, native Windows path/encoding/diagnostics behavior, and Windows WebView2/Tauri still need acceptance. No Rust build, installer, release, main merge, or deployment occurred. The original checkpoint changed strict `history.py` completion and its tests; the subsequent encoding fix also updates native comparison warnings. Shelf was not changed.
 
 Suggested Windows read-only acceptance on an existing explicit test working copy: ordinary text edit, property-only diff, binary notice, Chinese/space/`@` filename, deleted file, directory and external/switched refusal, old snapshot rejection, history pagination, revision compare, output-limit rejection, zero-exit stderr rejection, and close/navigation during delayed repository reads. Use a trusted installed SVN client with preconfigured credentials; do not add auth prompts or write operations to the Web bridge.

@@ -98,6 +98,11 @@ class HistoryTests(unittest.TestCase):
         for left in ("BASE", "HEAD", "3"):
             for right in ("WORKING", "BASE", "HEAD", "7"):
                 with self.subTest(left=left, right=right):
+                    if left == right == "BASE":
+                        with patch.object(self.manager, "_run") as run, self.assertRaisesRegex(ValueError, "BASE to BASE"):
+                            self.manager.compare("中文 @.txt", from_revision=left, to_revision=right)
+                        run.assert_not_called()
+                        continue
                     with self.responses(INFO, b"diff") as run:
                         result = self.manager.compare("中文 @.txt", from_revision=left, to_revision=right)
                     expected = left if right == "WORKING" else left + ":" + right

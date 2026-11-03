@@ -1,4 +1,4 @@
-import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,canReadFile,sameReadScope,validateFileResponse} from './model.js';
+import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse} from './model.js';
 import {demoRows,demoDiff,demoHistory} from './demo-data.js';
 const $=id=>document.getElementById(id);
 const paths={
@@ -105,13 +105,14 @@ function showHistory(){
 }
 function diffMarkup(){
  if(!diffResult)return '';
- return `<p class="read-notice">${esc(diffResult.fromRevision)} → ${esc(diffResult.toRevision)} · ${diffResult.returnedUtf8Bytes} / ${diffResult.sourceUtf8Bytes} UTF-8 字节${diffResult.truncated?' · 预览已截断（256 KiB 上限）':''}。不包含二进制负载。</p>${diffResult.text?`<pre class="live-diff-text">${esc(diffResult.text)}</pre>`:'<p class="read-notice">此次命令没有返回文本差异；这不证明二进制内容相同，也不代表整个工作副本干净。</p>'}`;
+ const warning=diffResult.undecodableBytes||diffResult.escapedControls?`<p class="read-error diff-encoding-warning" role="alert"><strong>显示转义警告：不是完整、精确的补丁。</strong> 文件名元数据或文件内容中有无法按 UTF-8 解码的字节（${diffResult.undecodableBytes} 个），或需转义的控制字符（${diffResult.escapedControls} 个）。可见字节转义仅用于展示；有效 UTF-8 正文已保留，未知字节未猜测为其他编码。请勿将此预览直接用作补丁。</p>`:'';
+ return `${warning}<p class="read-notice">${esc(diffResult.fromRevision)} → ${esc(diffResult.toRevision)} · ${diffResult.returnedUtf8Bytes} / ${diffResult.sourceUtf8Bytes} UTF-8 字节${diffResult.truncated?' · 预览已截断（256 KiB 上限）':''}。不包含二进制负载。</p>${diffResult.text?`<pre class="live-diff-text">${esc(diffResult.text)}</pre>`:'<p class="read-notice">此次命令没有返回文本差异；这不证明二进制内容相同，也不代表整个工作副本干净。</p>'}`;
 }
 function renderLiveDiff(){
  const enabled=readsAvailable();
- $('diff-content').innerHTML=`<div class="live-read"><div class="revision-controls"><label>从 <input id="diff-from" value="${esc(diffFrom)}" aria-label="起始修订"></label><label>到 <input id="diff-to" value="${esc(diffTo)}" aria-label="结束修订"></label><button class="subtle-button" id="read-diff" ${!enabled||readPending?'disabled':''}>读取差异</button></div><p class="read-notice read-network">BASE → WORKING：本地读取；其他修订：访问仓库，使用现有 SVN 凭据。点击「读取差异」才发起请求。</p><details class="read-restrictions"><summary>读取范围与限制</summary><p>支持 BASE、HEAD、非负整数；WORKING 仅限右侧。网络挂载目录的本地读取也可能访问文件系统。使用现有 SVN 配置；不写工作副本。预览最多 256 KiB，不包含二进制负载，截断会明确标记。</p></details>${!enabled?'<p class="read-notice">当前条目或状态不支持文件读取。请确保已启用配套严格后端并刷新状态。未版本化、忽略、external、switched 与 file external 不可用；服务端会再次验证。</p>':''}${readPending?'<p role="status">正在读取… 关闭或导航后不再显示结果；服务端命令可能持续至超时。</p>':''}${diffError?`<p class="read-error" role="alert">${esc(diffError)} 未显示旧结果；失败不代表没有差异。</p>`:''}${diffMarkup()}</div>`;
+ $('diff-content').innerHTML=`<div class="live-read"><div class="revision-controls"><label>从 <input id="diff-from" value="${esc(diffFrom)}" aria-label="起始修订"></label><label>到 <input id="diff-to" value="${esc(diffTo)}" aria-label="结束修订"></label><button class="subtle-button" id="read-diff" ${!enabled||readPending?'disabled':''}>读取差异</button></div><p class="read-notice read-network">BASE → WORKING：本地读取；其他修订：访问仓库，使用现有 SVN 凭据。点击「读取差异」才发起请求。</p><details class="read-restrictions"><summary>读取范围与限制</summary><p>支持 BASE、HEAD、非负整数；WORKING 仅限右侧。不支持 BASE → BASE；本地修改请选择 BASE → WORKING。网络挂载目录的本地读取也可能访问文件系统。使用现有 SVN 配置；不写工作副本。预览最多 256 KiB，不包含二进制负载，截断会明确标记。</p></details>${!enabled?'<p class="read-notice">当前条目或状态不支持文件读取。请确保已启用配套严格后端并刷新状态。未版本化、忽略、external、switched 与 file external 不可用；服务端会再次验证。</p>':''}${readPending?'<p role="status">正在读取… 关闭或导航后不再显示结果；服务端命令可能持续至超时。</p>':''}${diffError?`<p class="read-error" role="alert">${esc(diffError)} 未显示旧结果；失败不代表没有差异。</p>`:''}${diffMarkup()}</div>`;
  for(const id of ['diff-from','diff-to'])$(id).oninput=event=>editReadRevision(event,false);
- $('read-diff').onclick=()=>{let revisions;try{revisions={fromRevision:parseRevision($('diff-from').value),toRevision:parseRevision($('diff-to').value,{working:true})};}catch(error){diffResult=null;diffError=error.message;renderLiveDiff();return;}requestDiff(revisions);};
+ $('read-diff').onclick=()=>{let revisions;try{revisions=parseComparisonPair($('diff-from').value,$('diff-to').value);}catch(error){diffResult=null;diffError=error.message;renderLiveDiff();return;}requestDiff(revisions);};
 }
 function editReadRevision(event,history){
  const id=event.target.id,start=event.target.selectionStart,end=event.target.selectionEnd;
@@ -126,6 +127,7 @@ async function requestDiff(revisions,inHistory=false){
  const scope=readScope(),generation=++readGeneration;readPending=true;diffResult=null;diffError='';
  const paint=()=>inHistory?renderHistory():renderPreview();paint();
  try{
+  revisions=parseComparisonPair(revisions.fromRevision,revisions.toRevision);
   const {path,...body}=scope;const data=await api('/api/file-diff',{...body,...revisions});
   if(generation!==readGeneration||!sameReadScope(scope,readScope())||inHistory&&(!$('modal').open||modalView!=='history'))return;
   diffResult=validateFileResponse(data,scope,'diff',revisions);log(`只读差异完成：${revisions.fromRevision} → ${revisions.toRevision}${data.truncated?'（截断预览）':''}。`);

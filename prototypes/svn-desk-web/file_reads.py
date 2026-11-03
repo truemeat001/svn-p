@@ -20,6 +20,10 @@ class StaleRead(ValueError):
     """The UI's workspace/status capability no longer identifies this read."""
 
 
+class UnsupportedComparison(ValueError):
+    """An explicit comparison combination has no supported SVN operation."""
+
+
 def revision(value, *, working=False):
     # Wire values are strings: JS numbers cannot represent all SVN revisions.
     if not isinstance(value, str):
@@ -29,6 +33,14 @@ def revision(value, *, working=False):
     if re.fullmatch(r'0|[1-9][0-9]{0,18}', value) and int(value) <= MAX_REVISION:
         return value
     raise ValueError('Unsupported revision.')
+
+
+def comparison_revisions(data):
+    left = revision(data['fromRevision'])
+    right = revision(data['toRevision'], working=True)
+    if left == right == 'BASE':
+        raise UnsupportedComparison('BASE to BASE is not supported.')
+    return left, right
 
 
 def strict_relative_path(value):
@@ -90,7 +102,8 @@ def history_module(source):
     module = importlib.import_module('svn_client.history')
     # Check the imported module AND dependencies rather than trusting sys.path.
     trusted_modules(source)
-    return module if getattr(module, 'HISTORY_DIAGNOSTICS_POLICY', None) == 1 else None
+    return module if (getattr(module, 'HISTORY_DIAGNOSTICS_POLICY', None) == 1
+                      and getattr(module, 'DIFF_TEXT_POLICY', None) == 1) else None
 
 
 class FileReadService:
@@ -107,8 +120,7 @@ class FileReadService:
 
     def read(self, kind, row, data):
         if kind == 'diff':
-            left = revision(data['fromRevision'])
-            right = revision(data['toRevision'], working=True)
+            left, right = comparison_revisions(data)
         elif kind == 'history':
             start = revision(data['startRevision'])
         else:
@@ -138,6 +150,10 @@ class FileReadService:
                         or result.to_revision != right or result.binary_payloads_included):
                     raise ValueError('Comparison scope mismatch.')
                 diff = result.diff
+                escaped = (diff.undecodable_bytes, diff.escaped_controls)
+                if (any(type(n) is not int or not 0 <= n <= 8 * 1024 * 1024 for n in escaped)
+                        or diff.text_encoding != ('utf-8-visible-escapes' if any(escaped) else 'utf-8')):
+                    raise ValueError('Comparison encoding metadata is invalid.')
                 if (len(diff.text.encode('utf-8')) > DIFF_TEXT_BYTES
                         or diff.returned_utf8_bytes != len(diff.text.encode('utf-8'))
                         or diff.source_utf8_bytes < diff.returned_utf8_bytes
@@ -148,6 +164,9 @@ class FileReadService:
                     'toRevision': right, 'text': diff.text, 'truncated': diff.truncated,
                     'sourceUtf8Bytes': diff.source_utf8_bytes,
                     'returnedUtf8Bytes': diff.returned_utf8_bytes,
+                    'textEncoding': diff.text_encoding,
+                    'undecodableBytes': diff.undecodable_bytes,
+                    'escapedControls': diff.escaped_controls,
                     'binaryPayloadsIncluded': False}
             elif kind == 'history':
                 result = self.manager.history(path, limit=HISTORY_PAGE_SIZE, start_revision=start)

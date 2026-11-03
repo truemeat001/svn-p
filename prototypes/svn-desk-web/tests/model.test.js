@@ -24,7 +24,7 @@ test('older workspace catalogs cannot roll back a newer selected generation',()=
  assert.equal(isStaleWorkspaceCatalog({enabled:false},3),false);
 });
 
-import {parseRevision,canReadFile,sameReadScope,validateFileResponse} from '../web/model.js';
+import {parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse} from '../web/model.js';
 test('revision grammar disallows ranges, arbitrary args, unsafe numbers and wrong endpoints',()=>{
  assert.equal(parseRevision(' base '),'BASE');assert.equal(parseRevision('9223372036854775807'),'9223372036854775807');
  assert.equal(parseRevision('WORKING',{working:true}),'WORKING');assert.equal(parseRevision('0',{history:true}),'0');
@@ -32,7 +32,7 @@ test('revision grammar disallows ranges, arbitrary args, unsafe numbers and wron
  assert.throws(()=>parseRevision('BASE',{history:true}));assert.throws(()=>parseRevision(1));
 });
 const readScope={workspaceId:'a',selectionVersion:2,snapshotToken:'snapshot-a',id:'same-id',path:'a.txt'};
-const diffResponse={...readScope,mode:'live',fromRevision:'BASE',toRevision:'WORKING',text:'汉',truncated:false,sourceUtf8Bytes:3,returnedUtf8Bytes:3,binaryPayloadsIncluded:false};
+const diffResponse={...readScope,mode:'live',fromRevision:'BASE',toRevision:'WORKING',text:'汉',truncated:false,sourceUtf8Bytes:3,returnedUtf8Bytes:3,binaryPayloadsIncluded:false,textEncoding:'utf-8',undecodableBytes:0,escapedControls:0};
 test('read scope binds identical native IDs to workspace, selection, snapshot and path',()=>{
  assert.equal(sameReadScope(readScope,{...readScope}),true);
  for(const field of ['workspaceId','selectionVersion','snapshotToken','id','path'])assert.equal(sameReadScope(readScope,{...readScope,[field]:'other'}),false);
@@ -73,4 +73,21 @@ test('diff truncation flag matches source and returned byte counts',()=>{
 });
 test('obstructed and incomplete entries disable file reads',()=>{
  assert.equal(canReadFile({item:'obstructed'}),false);assert.equal(canReadFile({item:'incomplete'}),false);
+});
+
+test('comparison pairs reject BASE to BASE but preserve other supported comparisons',()=>{
+ assert.throws(()=>parseComparisonPair(' base ','BASE'),/BASE → WORKING/);
+ for(const [from,to] of [['BASE','WORKING'],['BASE','HEAD'],['HEAD','BASE'],['HEAD','HEAD'],['7','7'],['0','8'],['7','WORKING']])assert.deepEqual(parseComparisonPair(from,to),{fromRevision:from,toRevision:to});
+ for(const [from,to] of [['WORKING','BASE'],['HEAD','-1'],['1:2','8']])assert.throws(()=>parseComparisonPair(from,to));
+ assert.throws(()=>validateFileResponse({...diffResponse,toRevision:'BASE'},readScope,'diff',{fromRevision:'BASE',toRevision:'BASE'}));
+});
+test('diff requires bounded consistent encoding metadata, also for truncated previews',()=>{
+ const check=data=>validateFileResponse(data,readScope,'diff',{fromRevision:'BASE',toRevision:'WORKING'});
+ for(const field of ['textEncoding','undecodableBytes','escapedControls']){const data={...diffResponse};delete data[field];assert.throws(()=>check(data));}
+ for(const field of ['undecodableBytes','escapedControls'])for(const bad of [-1,0.5,NaN,Infinity,8388609,'0',null,true,undefined])assert.throws(()=>check({...diffResponse,[field]:bad}));
+ for(const textEncoding of ['cp936','utf8','utf-8-visible-escapes',null,undefined])assert.throws(()=>check({...diffResponse,textEncoding}));
+ for(const field of ['undecodableBytes','escapedControls']){
+  assert.throws(()=>check({...diffResponse,[field]:1}));
+  for(const count of [1,8388608])for(const truncated of [false,true])assert.doesNotThrow(()=>check({...diffResponse,[field]:count,textEncoding:'utf-8-visible-escapes',truncated,sourceUtf8Bytes:truncated?4:3}));
+ }
 });

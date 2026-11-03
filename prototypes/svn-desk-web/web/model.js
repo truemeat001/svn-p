@@ -49,11 +49,18 @@ export function parseRevision(value,{working=false,history=false}={}){
  if(token==='HEAD'||(!history&&token==='BASE')||(!history&&working&&token==='WORKING'))return token;
  throw Error(history?'请输入 HEAD 或非负整数修订。':'请输入 BASE、HEAD 或非负整数修订；WORKING 仅用于右侧。');
 }
+export function parseComparisonPair(from,to){
+ const fromRevision=parseRevision(from),toRevision=parseRevision(to,{working:true});
+ if(fromRevision==='BASE'&&toRevision==='BASE')throw Error('不支持 BASE → BASE；查看本地修改请选择 BASE → WORKING，或输入明确的数字修订进行比较。');
+ return {fromRevision,toRevision};
+}
 export function canReadFile(row){return !!row&&!['unversioned','ignored','external','obstructed','incomplete'].includes(row.item)&&!row.switched&&!row.file_external;}
 export function sameReadScope(a,b){return !!a&&!!b&&['workspaceId','selectionVersion','snapshotToken','id','path'].every(key=>a[key]===b[key]);}
 export function validateFileResponse(data,scope,kind,revision){
  if(data?.mode!=='live'||!sameReadScope(data,scope))throw Error('文件结果已过期或身份不匹配，请刷新状态。');
  if(kind==='diff'){
+  parseComparisonPair(data.fromRevision,data.toRevision);
+  if(![data.undecodableBytes,data.escapedControls].every(n=>Number.isSafeInteger(n)&&n>=0&&n<=8388608)||data.textEncoding!==(data.undecodableBytes===0&&data.escapedControls===0?'utf-8':'utf-8-visible-escapes'))throw Error('差异编码信息缺失或无效；无法确认是否需要显示转义警告。');
   if(!(['BASE','HEAD'].includes(data.fromRevision)||numericRevision(data.fromRevision))||!(['BASE','HEAD','WORKING'].includes(data.toRevision)||numericRevision(data.toRevision))||data.fromRevision!==revision.fromRevision||data.toRevision!==revision.toRevision||typeof data.text!=='string'||typeof data.truncated!=='boolean'||data.binaryPayloadsIncluded!==false||!Number.isSafeInteger(data.sourceUtf8Bytes)||!Number.isSafeInteger(data.returnedUtf8Bytes)||data.returnedUtf8Bytes<0||data.sourceUtf8Bytes<data.returnedUtf8Bytes||data.truncated!==(data.sourceUtf8Bytes>data.returnedUtf8Bytes)||data.returnedUtf8Bytes>262144||new TextEncoder().encode(data.text).length!==data.returnedUtf8Bytes)throw Error('差异响应无效。');
  }else{
   if(!(data.startRevision==='HEAD'||numericRevision(data.startRevision))||data.startRevision!==revision.startRevision||!Array.isArray(data.entries)||data.entries.length>50||typeof data.hasMore!=='boolean'||(data.hasMore?!numericRevision(data.nextStartRevision):data.nextStartRevision!==null))throw Error('历史响应无效。');
