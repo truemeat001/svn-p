@@ -84,6 +84,9 @@ class RepoEntry:
     date: str = ""
 
 
+# The web bridge requires this policy in both backend and status_stream.
+STATUS_DIAGNOSTICS_POLICY = 1
+
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 _URL_SCHEMES = {"http", "https", "svn", "svn+ssh", "file"}
@@ -395,9 +398,11 @@ class SvnClient:
         The returned list still grows with the number of entries. Custom
         ``command`` transports remain supported; their own output capture is
         outside this method's memory guarantees. No partial list is returned
-        on cancellation, timeout, malformed XML, or the explicit output limit.
+        on cancellation, timeout, malformed XML, stderr diagnostics (even with
+        exit code zero), or the explicit output limit.
         """
-        from .status_stream import parse_status_chunks, run_status, status_lock, text_chunks
+        from .status_stream import (check_status_command_result, parse_status_chunks,
+                                    run_status, status_lock, text_chunks)
 
         if cancel_event is not None and cancel_event.is_set():
             raise SvnError("SVN status was cancelled; no partial status was returned.")
@@ -411,6 +416,7 @@ class SvnClient:
         # bypassing them. The normal installed-SVN path never captures full XML.
         if getattr(self.command, "__func__", None) is not SvnClient.command:
             result = self.command(args)
+            check_status_command_result(result, self._display_args(args))
             return parse_status_chunks(text_chunks(result.stdout), self._relative,
                                        cancel_event=cancel_event)
         argv = [self.executable, "status", "--non-interactive", "--no-auth-cache", *args[1:]]

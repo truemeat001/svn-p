@@ -156,9 +156,46 @@ for i in range(6000):
     sys.stdout.write('<entry path="f%d"><wc-status item="modified"/></entry>' % i)
 sys.stdout.write('</target></status>')
 '''
-        rows = self.run_python(code)
-        self.assertEqual(len(rows), 6000)
-        self.assertEqual(rows[-1].path, "f5999")
+        with self.assertRaisesRegex(SvnError, "diagnostic output") as caught:
+            self.run_python(code)
+        self.assertEqual(caught.exception.result.returncode, 0)
+        self.assertEqual(caught.exception.result.stdout, "")
+        self.assertIn("truncated", caught.exception.result.stderr)
+        self.assertLess(len(caught.exception.result.stderr), DIAGNOSTIC_BYTES + 100)
+
+    def test_zero_exit_warning_discards_empty_status(self):
+        with self.assertRaisesRegex(SvnError, "W155007") as caught:
+            self.run_python("import sys; print('<status><target path=\".\"/></status>'); sys.stderr.write('svn: warning: W155007: not a working copy')")
+        self.assertEqual(caught.exception.result.returncode, 0)
+        self.assertEqual(caught.exception.result.stdout, "")
+
+    def test_zero_exit_warning_discards_valid_entries(self):
+        with self.assertRaisesRegex(SvnError, "no complete status"):
+            self.run_python("import sys; print('<status><entry path=\"f\"><wc-status item=\"modified\"/></entry></status>'); sys.stderr.write('svn: warning: W155010: skipped target')")
+
+    def test_warning_free_empty_status_is_valid(self):
+        self.assertEqual(self.run_python("print('<status><target path=\".\"/></status>')"), [])
+
+    def test_zero_exit_warning_is_bounded_redacted_and_precedes_xml_error(self):
+        code = "import sys; print('not XML'); sys.stderr.write('https://user:secret@example.test/repo warning\\n' + 'x' * 200000)"
+        with self.assertRaisesRegex(SvnError, "diagnostic output") as caught:
+            self.run_python(code)
+        result = caught.exception.result
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("secret", str(caught.exception))
+        self.assertNotIn("secret", result.stderr)
+        self.assertIn("truncated", result.stderr)
+        self.assertLess(len(result.stderr), DIAGNOSTIC_BYTES + 100)
+
+    def test_warning_after_discarded_whitespace_prefix_cannot_pass(self):
+        with self.assertRaisesRegex(SvnError, "diagnostic output"):
+            self.run_python("import sys; print('<status/>'); sys.stderr.write(' ' * 200000 + 'W155007: not a working copy')")
+
+    def test_any_stderr_bytes_are_not_a_success_even_when_decoder_erases_them(self):
+        argv = [sys.executable, "-c", "import sys; print('<status/>'); sys.stderr.write('x')"]
+        with self.assertRaisesRegex(SvnError, "diagnostic bytes"):
+            run_status(argv, cwd=self.root, timeout=10, relative=str,
+                       display_args=('synthetic',), decode=lambda _: '')
 
     def test_nonzero_exit_discards_valid_entries_and_bounds_redacted_error(self):
         code = '''import sys
@@ -344,6 +381,39 @@ sys.exit(3)
             with self.assertRaisesRegex(SvnError, "cancelled"):
                 client.status(cancel_event=event)
         command.assert_not_called()
+
+    def test_injected_command_warning_and_nonzero_result_fail_closed(self):
+        with patch("svn_client.backend.discover_svn", return_value="/trusted/svn"):
+            client = SvnClient(self.root)
+        for code, xml, error in ((0, '<status/>', 'svn: warning: W155007: invalid WC'),
+                                 (0, STATUS_XML, 'svn: warning: W155010: skipped'),
+                                 (2, STATUS_XML, 'failed'),
+                                 (0, '<status/>', ' ' * (DIAGNOSTIC_BYTES + 1) + 'W155007')):
+            with self.subTest(code=code, xml_size=len(xml), error_size=len(error)):
+                client.command = lambda args: CommandResult(tuple(args), code, xml, error)
+                with self.assertRaises(SvnError) as caught:
+                    client.status()
+                self.assertEqual(caught.exception.result.returncode, code)
+                self.assertEqual(caught.exception.result.stdout, '')
+
+    def test_injected_warning_is_bounded_and_redacts_partial_secret(self):
+        with patch("svn_client.backend.discover_svn", return_value="/trusted/svn"):
+            client = SvnClient(self.root)
+        prefix = 'x' * (DIAGNOSTIC_BYTES - len(' https://user:')) + ' https://user:'
+        client.command = lambda args: CommandResult(tuple(args), 0, STATUS_XML, prefix + 'secret' * 20000)
+        with self.assertRaises(SvnError) as caught:
+            client.status()
+        self.assertEqual(caught.exception.result.stdout, '')
+        self.assertNotIn('secret', str(caught.exception))
+        self.assertNotIn('secret', caught.exception.result.stderr)
+        self.assertIn('truncated', caught.exception.result.stderr)
+        self.assertLess(len(caught.exception.result.stderr), DIAGNOSTIC_BYTES + 100)
+
+    def test_injected_clean_empty_status_remains_supported(self):
+        with patch("svn_client.backend.discover_svn", return_value="/trusted/svn"):
+            client = SvnClient(self.root)
+        client.command = lambda args: CommandResult(tuple(args), 0, '<status/>', '')
+        self.assertEqual(client.status(), [])
 
     def test_injected_command_transport_remains_supported(self):
         with patch("svn_client.backend.discover_svn", return_value="/trusted/svn"):

@@ -2,7 +2,7 @@
 
 Only the final StatusEntry list grows with the working copy. XML tree nodes,
 pipe buffering and diagnostics do not accumulate with the complete output.
-The caller receives no result until XML, EOF and process success are verified.
+The caller receives no result until XML, EOF, zero exit and empty stderr are verified.
 """
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ DIAGNOSTIC_BYTES = 64 * 1024
 MAX_XML_BYTES = 512 * 1024 * 1024
 MAX_ENTRY_BYTES = 4 * 1024 * 1024
 MAX_XML_DEPTH = 64
+# Checked by the web bridge along with backend.STATUS_DIAGNOSTICS_POLICY.
+STATUS_DIAGNOSTICS_POLICY = 1
 
 
 class StatusXmlParser:
@@ -201,6 +203,38 @@ def _diagnostic(value: bytes, truncated: bool, decode: Callable[[bytes], str]) -
     return text
 
 
+def require_status_success(returncode: int, stderr: str, display_args: tuple[str, ...],
+                           *, had_stderr: bool = False) -> None:
+    """Accept only a diagnostic-free status process, never just exit code zero.
+
+    W155007 (not a working copy) and other warnings can coexist with valid XML
+    and exit 0. Any diagnostic makes completeness unknown. Callers must provide
+    bounded, redacted stderr and never attach the full stdout XML to an error.
+    had_stderr also preserves a byte-level diagnostic that decoding may erase.
+    """
+    result = CommandResult(display_args, returncode, "", stderr)
+    if returncode:
+        detail = stderr.strip() or "No diagnostic output."
+        raise SvnError(f"SVN exited with code {returncode}: {detail}", result)
+    if had_stderr or stderr:
+        detail = stderr.strip() or "SVN wrote diagnostic bytes to stderr."
+        raise SvnError(
+            "SVN status emitted diagnostic output despite exit code 0; "
+            f"no complete status was returned: {detail}", result)
+
+
+def check_status_command_result(result: CommandResult, display_args: tuple[str, ...]) -> None:
+    """Apply the same failure rule to an already-buffered custom transport."""
+    # Bound before encoding: a custom transport may already hold a very large
+    # string, but error construction must not duplicate all of it.
+    prefix = result.stderr[:DIAGNOSTIC_BYTES].encode("utf-8", errors="replace")
+    truncated = len(result.stderr) > DIAGNOSTIC_BYTES or len(prefix) > DIAGNOSTIC_BYTES
+    diagnostic = _diagnostic(prefix[:DIAGNOSTIC_BYTES], truncated,
+                             lambda value: value.decode("utf-8", errors="replace"))
+    require_status_success(result.returncode, diagnostic, display_args,
+                           had_stderr=bool(result.stderr))
+
+
 def run_status(argv: Sequence[str], *, cwd: Path, timeout: float,
                relative: Callable[[str], str], display_args: tuple[str, ...],
                decode: Callable[[bytes], str], cancel_event: threading.Event | None = None,
@@ -322,10 +356,8 @@ def run_status(argv: Sequence[str], *, cwd: Path, timeout: float,
         if errors:
             raise SvnError(f"Could not read SVN status output: {errors[0]}")
         stderr = _diagnostic(bytes(diagnostics), stderr_truncated, decode)
-        if process.returncode:
-            result = CommandResult(display_args, process.returncode, "", stderr)
-            detail = stderr.strip() or "No diagnostic output."
-            raise SvnError(f"SVN exited with code {result.returncode}: {detail}", result)
+        require_status_success(process.returncode, stderr, display_args,
+                               had_stderr=bool(diagnostics) or stderr_truncated)
         if parse_error is not None:
             raise parse_error
         return parser.finish()
