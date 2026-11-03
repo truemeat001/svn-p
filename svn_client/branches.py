@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
@@ -228,7 +229,7 @@ class BranchManager:
                 raise BranchError("Nested working copies are unsupported.")
         return path
 
-    def _properties(self, target: str, revision: int | None = None) -> str:
+    def _properties(self, target: str, revision: int | str | None = None) -> str:
         args = ["proplist", "--xml", "--verbose", "--depth", "infinity"]
         if revision is not None:
             args += ["--revision", str(revision)]
@@ -251,8 +252,49 @@ class BranchManager:
             raise BranchError("Working-copy status is empty or exceeds the supported 10,000-entry limit.")
         return entries
 
-    def _clean_tree(self) -> _TreeState:
-        root_path = self.client.working_copy
+    def _verify_base_tree(self, expected: dict[str, tuple[str, str, int]]) -> None:
+        """Compare with SVN-translated local BASE, not its size/mtime cache.
+
+        A single isolated export preserves EOL/keyword translation and binary
+        bytes without writing in the working copy or issuing per-file commands.
+        """
+        try:
+            temporary_root = Path(tempfile.gettempdir()).resolve()
+            if temporary_root == self.client.working_copy or self.client.working_copy in temporary_root.parents:
+                raise BranchError("BASE verification requires temporary storage outside this working copy.")
+            with tempfile.TemporaryDirectory(prefix="svn-branches-base-", dir=temporary_root) as temporary:
+                destination = Path(temporary) / "base-tree"
+                self.client.command(["export", "--quiet", "--ignore-externals", "--revision", "BASE",
+                                     "--", ".", str(destination)])
+                pending, seen = [destination], set()
+                while pending:
+                    path = pending.pop()
+                    relative = path.relative_to(destination).as_posix()
+                    if relative not in expected or relative in seen:
+                        raise BranchError("The working tree does not match the complete translated BASE tree.")
+                    seen.add(relative)
+                    kind, digest, size = expected[relative]
+                    node = path.lstat()
+                    if (stat.S_ISLNK(node.st_mode) or getattr(node, "st_file_attributes", 0)
+                            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                        raise BranchError("Translated BASE contains an unsupported symbolic link or reparse point.")
+                    if kind == "dir":
+                        if not stat.S_ISDIR(node.st_mode):
+                            raise BranchError("A working directory does not match translated BASE.")
+                        with os.scandir(path) as children:
+                            for child in children:
+                                pending.append(Path(child.path))
+                                if len(seen) + len(pending) > MAX_TREE_ENTRIES:
+                                    raise BranchError("Translated BASE exceeds the supported 10,000-entry limit.")
+                    elif (not stat.S_ISREG(node.st_mode) or node.st_size != size
+                          or _snapshot_bytes(path)[:2] != (digest, size)):
+                        raise BranchError("File bytes differ from translated BASE; the whole working copy must be clean.")
+                if seen != set(expected):
+                    raise BranchError("The working tree does not match the complete translated BASE tree.")
+        except (OSError, FileOperationError, SvnError) as error:
+            raise BranchError("Could not verify translated BASE safely; no mutation was started." + _codes(error)) from None
+
+    def _working_metadata(self) -> dict[Path, dict[str, object]]:
         self._path(".")
         root = self._xml(["info", "--xml", "--depth", "infinity", "--", "."], "info")
         entries = root.findall("entry")
@@ -264,6 +306,11 @@ class BranchManager:
             if path in metadata:
                 raise BranchError("SVN returned duplicate working-copy metadata.")
             metadata[path] = self._info(entry)
+        return metadata
+
+    def _clean_tree(self) -> _TreeState:
+        root_path = self.client.working_copy
+        metadata = self._working_metadata()
         info = metadata.get(root_path)
         if (info is None or info["kind"] != "dir" or not info["wc_root"]
                 or Path(str(info["wc_root"])).resolve() != root_path):
@@ -283,7 +330,7 @@ class BranchManager:
             observed[path] = status
         if set(observed) != set(metadata):
             raise BranchError("Status and metadata do not describe the same complete working tree.")
-        files, total = [], 0
+        files, total, expected_base = [], 0, {}
         for path, item in sorted(metadata.items(), key=lambda pair: str(pair[0])):
             relative = path.relative_to(root_path).as_posix()
             expected = str(info["url"]).rstrip("/") + ("/" + quote(relative, safe="/") if relative != "." else "")
@@ -298,6 +345,7 @@ class BranchManager:
             if item["kind"] == "dir":
                 if not stat.S_ISDIR(node.st_mode):
                     raise BranchError("A versioned directory is obstructed.")
+                expected_base[relative] = ("dir", "", 0)
                 continue
             if node.st_nlink != 1:
                 raise BranchError("Hard-linked versioned files are unsupported because edits can affect another path.")
@@ -309,7 +357,27 @@ class BranchManager:
                 raise BranchError("A file changed or could not be inspected safely during preflight.") from None
             total += size
             files.append((relative, digest, size, fingerprint))
+            expected_base[relative] = ("file", digest, size)
         properties = self._properties(".")
+        if properties != self._properties(".", "BASE"):
+            raise BranchError("Working properties differ from BASE; the whole working copy must be clean.")
+        # SVN status can report normal for different bytes with the recorded
+        # size and mtime. Hashes alone bind review state, not cleanliness.
+        self._verify_base_tree(expected_base)
+        # Export can take time. Do not return the pre-export review hash if an
+        # editor (including one restoring mtime) or SVN changed the WC during
+        # that work. This narrows the race; it is not an interprocess lock.
+        for relative, digest, size, fingerprint in files:
+            try:
+                current = _snapshot_bytes(self._path(relative))
+            except (OSError, FileOperationError):
+                raise BranchError("A file changed or could not be inspected safely after BASE verification.") from None
+            if current != (digest, size, fingerprint):
+                raise BranchError("The working-copy state changed during BASE verification. Review again.")
+        if (self._working_metadata() != metadata
+                or sorted(self._statuses(), key=lambda item: item.path) != sorted(statuses, key=lambda item: item.path)
+                or self._properties(".") != properties):
+            raise BranchError("The working-copy state changed during BASE verification. Review again.")
         state = {"workspace": str(root_path), "metadata": [(str(path), item) for path, item in sorted(metadata.items(), key=lambda pair: str(pair[0]))],
                  "status": [asdict(item) for item in sorted(statuses, key=lambda item: item.path)],
                  "files": files, "properties": properties}

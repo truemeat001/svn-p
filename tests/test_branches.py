@@ -42,8 +42,11 @@ class FakeBranchRepository:
         self.fail_postread = False
         self.during_preview = None
         self.other_node = None
+        self.other_nodes = []
+        self.base_files = {"file.txt": b"original\n"}
+        self.base_directories = {"."}
         (root / ".svn").mkdir()
-        (root / "file.txt").write_text("original\n")
+        (root / "file.txt").write_bytes(self.base_files["file.txt"])
 
     def info(self, target, recursive):
         root = ET.Element("info")
@@ -57,6 +60,7 @@ class FakeBranchRepository:
                 items.append(("file.txt", "file", self.revision, self.url + "/file.txt"))
                 if self.other_node:
                     items.append(self.other_node)
+                items.extend(self.other_nodes)
         for name, kind, revision, url in items:
             override = self.info_changes.get(name, {}) if not remote else {}
             entry = ET.SubElement(root, "entry", path=name, kind=kind, revision=str(override.get("revision", revision)))
@@ -76,6 +80,7 @@ class FakeBranchRepository:
         root = ET.Element("status")
         target = ET.SubElement(root, "target", path=".")
         names = [".", "file.txt"] + ([self.other_node[0]] if self.other_node else [])
+        names.extend(item[0] for item in self.other_nodes)
         for name in names:
             entry = ET.SubElement(target, "entry", path=name)
             attrs = {"item": "normal", "props": "none", "revision": str(self.revision)}
@@ -94,13 +99,23 @@ class FakeBranchRepository:
             return CommandResult(tuple(args), 0, self.status(), "")
         if command == "proplist":
             root = ET.Element("properties")
-            revision = int(args[args.index("--revision") + 1]) if "--revision" in args else None
+            revision = args[args.index("--revision") + 1] if "--revision" in args else None
+            if revision is not None and revision != "BASE":
+                revision = int(revision)
             values = self.properties.get((args[-1], revision), self.properties.get(args[-1], {}))
             if values:
                 target = ET.SubElement(root, "target", path=args[-1])
                 for key, value in values.items():
                     ET.SubElement(target, "property", name=key).text = value
             return CommandResult(tuple(args), 0, ET.tostring(root, encoding="unicode"), "")
+        if command == "export":
+            destination = Path(args[-1])
+            for directory in sorted(self.base_directories):
+                (destination / directory).mkdir(parents=True, exist_ok=True)
+            for name, content in self.base_files.items():
+                (destination / name).parent.mkdir(parents=True, exist_ok=True)
+                (destination / name).write_bytes(content)
+            return CommandResult(tuple(args), 0, "", "")
         if command == "list":
             root = ET.Element("lists")
             node = ET.SubElement(root, "list", path=args[-1].rsplit("@", 1)[0])
@@ -212,15 +227,240 @@ class BranchTests(unittest.TestCase):
         with self.assertRaisesRegex(BranchError, "state changed"):
             self.manager.switch(self.repo.source, revision=11, confirmed=True, expected_state_sha256=plan.state_sha256)
         (self.root / "file.txt").write_text("different\n")
-        with self.assertRaisesRegex(BranchError, "state changed"):
+        with self.assertRaisesRegex(BranchError, "translated BASE"):
             self.manager.switch(self.repo.source, revision=10, confirmed=True, expected_state_sha256=plan.state_sha256)
         self.assertEqual(self.repo.mutations, [])
 
     def test_edit_during_preview_refused(self):
         self.repo.during_preview = lambda: (self.root / "file.txt").write_text("edited during read\n")
-        with self.assertRaisesRegex(BranchError, "changed during preflight"):
+        with self.assertRaisesRegex(BranchError, "translated BASE"):
             self.merge_plan()
         self.assertEqual(self.repo.mutations, [])
+
+    def test_same_size_restored_mtime_edit_refused_before_either_preview(self):
+        path = self.root / "file.txt"
+        before = path.stat()
+        path.write_bytes(b"modified\n")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(path.stat().st_size, before.st_size)
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertTrue(all(item.item == "normal" for item in self.client.status(verbose=True)))
+        for preflight in (self.switch_plan, self.merge_plan):
+            with self.subTest(operation=preflight.__name__), self.assertRaisesRegex(BranchError, "translated BASE"):
+                preflight()
+        self.assertFalse(any(call[0] in {"switch", "merge"} for call in self.repo.calls))
+        self.assertEqual(path.read_bytes(), b"modified\n")
+
+    def test_hidden_edit_after_review_blocks_switch_and_merge_apply(self):
+        path = self.root / "file.txt"
+        for operation in ("switch", "merge"):
+            path.write_bytes(b"original\n")
+            plan = self.switch_plan() if operation == "switch" else self.merge_plan()
+            before = path.stat()
+            path.write_bytes(b"modified\n")
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            with self.subTest(operation=operation), self.assertRaisesRegex(BranchError, "translated BASE"):
+                if operation == "switch":
+                    self.manager.switch(self.repo.source, revision=10, confirmed=True,
+                                        expected_state_sha256=plan.state_sha256)
+                else:
+                    self.manager.merge(self.repo.source, start_revision=8, end_revision=10, confirmed=True,
+                                       expected_state_sha256=plan.state_sha256)
+            self.assertEqual(path.read_bytes(), b"modified\n")
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_hidden_edit_during_final_execution_export_blocks_apply(self):
+        path = self.root / "file.txt"
+        original = self.repo.command
+        for operation in ("switch", "merge"):
+            path.write_bytes(b"original\n")
+            plan = self.switch_plan() if operation == "switch" else self.merge_plan()
+            exports = []
+            def edit_after_final_export(args, **kwargs):
+                result = original(args, **kwargs)
+                if args[0] == "export":
+                    exports.append(Path(args[-1]))
+                    if len(exports) == 2:
+                        before = path.stat()
+                        path.write_bytes(b"modified\n")
+                        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                return result
+            with self.subTest(operation=operation), patch.object(self.client, "command", side_effect=edit_after_final_export):
+                with self.assertRaisesRegex(BranchError, "changed during BASE verification"):
+                    if operation == "switch":
+                        self.manager.switch(self.repo.source, revision=10, confirmed=True,
+                                            expected_state_sha256=plan.state_sha256)
+                    else:
+                        self.manager.merge(self.repo.source, start_revision=8, end_revision=10, confirmed=True,
+                                           expected_state_sha256=plan.state_sha256)
+            self.assertEqual(len(exports), 2)
+            self.assertTrue(all(not destination.parent.exists() for destination in exports))
+            self.assertEqual(path.read_bytes(), b"modified\n")
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_property_change_during_final_execution_export_blocks_apply(self):
+        original = self.repo.command
+        self.repo.properties[(".", "BASE")] = {}
+        for operation in ("switch", "merge"):
+            self.repo.properties["."] = {}
+            plan = self.switch_plan() if operation == "switch" else self.merge_plan()
+            exports = []
+            def edit_after_final_export(args, **kwargs):
+                result = original(args, **kwargs)
+                if args[0] == "export":
+                    exports.append(args[-1])
+                    if len(exports) == 2:
+                        self.repo.properties["."] = {"custom:local": "keep this edit"}
+                return result
+            with self.subTest(operation=operation), patch.object(self.client, "command", side_effect=edit_after_final_export):
+                with self.assertRaisesRegex(BranchError, "changed during BASE verification"):
+                    if operation == "switch":
+                        self.manager.switch(self.repo.source, revision=10, confirmed=True,
+                                            expected_state_sha256=plan.state_sha256)
+                    else:
+                        self.manager.merge(self.repo.source, start_revision=8, end_revision=10, confirmed=True,
+                                           expected_state_sha256=plan.state_sha256)
+            self.assertEqual(len(exports), 2)
+            self.assertEqual(self.repo.properties["."], {"custom:local": "keep this edit"})
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_metadata_or_status_change_during_export_refused(self):
+        original = self.repo.command
+        for change in ("metadata", "status"):
+            self.repo.info_changes.clear()
+            self.repo.status_changes.clear()
+            def change_after_export(args, **kwargs):
+                result = original(args, **kwargs)
+                if args[0] == "export":
+                    if change == "metadata":
+                        self.repo.info_changes["file.txt"] = {"revision": 7}
+                    else:
+                        self.repo.status_changes["."] = {"props": "modified"}
+                return result
+            with self.subTest(change=change), patch.object(self.client, "command", side_effect=change_after_export):
+                with self.assertRaisesRegex(BranchError, "changed during BASE verification"):
+                    self.switch_plan()
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_nested_binary_and_empty_directory_compared_with_base(self):
+        binary = "nested/中文@name.bin"
+        content = bytes(range(256)) + b"\x00\xff\r\n"
+        self.repo.other_nodes = [(name, kind, 8, self.repo.url + "/" + name) for name, kind in
+                                 (("nested", "dir"), (binary, "file"), ("empty", "dir"))]
+        self.repo.base_directories.update({"nested", "empty"})
+        self.repo.base_files[binary] = content
+        (self.root / "nested").mkdir()
+        (self.root / "empty").mkdir()
+        path = self.root / binary
+        path.write_bytes(content)
+        self.switch_plan()
+        self.merge_plan()
+        before = path.stat()
+        path.write_bytes(content[:-1] + b"x")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        for preflight in (self.switch_plan, self.merge_plan):
+            with self.subTest(operation=preflight.__name__), self.assertRaisesRegex(BranchError, "translated BASE"):
+                preflight()
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_base_verification_uses_isolated_translated_export_and_removes_it(self):
+        # The fixture provides already translated bytes, not repository-normal
+        # content. Real EOL/keyword behavior is covered by integration below.
+        content = b"$Id: file.txt 8 2026-11-03 00:00:00Z author $\r\n"
+        (self.root / "file.txt").write_bytes(content)
+        self.repo.base_files["file.txt"] = content
+        self.switch_plan()
+        exports = [call for call in self.repo.calls if call[0] == "export"]
+        self.assertEqual(len(exports), 2)
+        for command in exports:
+            self.assertEqual(command[:-1], ["export", "--quiet", "--ignore-externals", "--revision", "BASE", "--", "."])
+            destination = Path(command[-1])
+            self.assertFalse(destination.is_relative_to(self.root))
+            self.assertFalse(destination.parent.exists())
+        self.assertFalse(any(call[0] in {"cat", "diff", "revert", "cleanup"} for call in self.repo.calls))
+        self.assertEqual((self.root / "file.txt").read_bytes(), content)
+
+    def test_base_export_failure_is_closed_and_cleans_temporary_files(self):
+        original = self.repo.command
+        destinations = []
+        def fail_export(args, **kwargs):
+            result = original(args, **kwargs)
+            if args[0] == "export":
+                destinations.append(Path(args[-1]))
+                raise SvnError("svn: E155010 https://user:SECRET@host/base could not be exported")
+            return result
+        with patch.object(self.client, "command", side_effect=fail_export):
+            with self.assertRaisesRegex(BranchError, "BASE") as caught:
+                self.switch_plan()
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertIn("E155010", str(caught.exception))
+        self.assertEqual(len(destinations), 1)
+        self.assertFalse(destinations[0].parent.exists())
+        self.assertEqual(self.repo.mutations, [])
+        self.assertEqual((self.root / "file.txt").read_bytes(), b"original\n")
+
+    def test_base_export_must_have_exact_files_directories_and_kinds(self):
+        cases = (({}, {"."}), ({"file.txt": b"original\n", "extra": b""}, {"."}),
+                 ({"file.txt": b"original\n"}, {".", "extra"}), ({}, {".", "file.txt"}))
+        for files, directories in cases:
+            self.repo.base_files, self.repo.base_directories = files, directories
+            with self.subTest(files=files, directories=directories), self.assertRaisesRegex(BranchError, "BASE"):
+                self.switch_plan()
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_base_export_entry_limit_is_enforced(self):
+        self.repo.base_files["unexpected"] = b""
+        with patch("svn_client.branches.MAX_TREE_ENTRIES", 2):
+            with self.assertRaisesRegex(BranchError, "BASE exceeds"):
+                self.switch_plan()
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_base_export_link_is_refused_without_reading_its_target(self):
+        original = self.repo.command
+        destinations = []
+        def link_export(args, **kwargs):
+            result = original(args, **kwargs)
+            if args[0] == "export":
+                path = Path(args[-1]) / "file.txt"
+                path.unlink()
+                try:
+                    path.symlink_to(self.root / "file.txt")
+                except (OSError, NotImplementedError):
+                    self.skipTest("No symlink support")
+                destinations.append(path.parent)
+            return result
+        with patch.object(self.client, "command", side_effect=link_export):
+            with self.assertRaisesRegex(BranchError, "unsupported symbolic link"):
+                self.switch_plan()
+        self.assertEqual(len(destinations), 1)
+        self.assertFalse(destinations[0].parent.exists())
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_temp_directory_inside_working_copy_is_refused_before_export(self):
+        nested = self.root / "temporary"
+        nested.mkdir()
+        for directory in (self.root, nested):
+            with self.subTest(directory=directory), patch("svn_client.branches.tempfile.gettempdir", return_value=str(directory)):
+                with self.assertRaisesRegex(BranchError, "outside this working copy"):
+                    self.switch_plan()
+        self.assertFalse(any(call[0] == "export" for call in self.repo.calls))
+        self.assertEqual(list(nested.iterdir()), [])
+
+    def test_clean_properties_are_preserved_and_hidden_changes_refused(self):
+        self.repo.properties["."] = {"svn:mergeinfo": "/branches/other:2-5", "custom": "unchanged"}
+        self.switch_plan()
+        self.repo.properties[(".", "BASE")] = {"svn:mergeinfo": "/branches/other:2-5", "custom": "different"}
+        for preflight in (self.switch_plan, self.merge_plan):
+            with self.subTest(operation=preflight.__name__), self.assertRaisesRegex(BranchError, "properties differ from BASE"):
+                preflight()
+        self.assertEqual(self.repo.mutations, [])
+
+    def test_forbidden_base_properties_are_rejected_before_export(self):
+        for name in ("svn:externals", "svn:special"):
+            self.repo.properties[(".", "BASE")] = {name: "unsafe"}
+            with self.subTest(name=name), self.assertRaisesRegex(BranchError, "unsupported"):
+                self.switch_plan()
+        self.assertFalse(any(call[0] == "export" for call in self.repo.calls))
 
     def test_dirty_and_unsupported_statuses_refused(self):
         cases = [{"item": value} for value in ("modified", "added", "deleted", "missing", "obstructed", "incomplete", "unversioned", "ignored", "external", "conflicted")]
@@ -521,6 +761,79 @@ class BranchIntegrationTests(unittest.TestCase):
         with self.assertRaises(BranchError):
             self.manager.preflight_switch(self.source, revision=3)
         self.assertEqual((self.wc / "file.txt").read_text(), "keep this edit\n")
+
+    def test_same_size_restored_mtime_edit_is_not_clean_for_switch_or_merge(self):
+        path = self.wc / "file.txt"
+        before = path.stat()
+        changed = path.read_bytes().replace(b"original", b"modified", 1)
+        path.write_bytes(changed)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(path.stat().st_size, before.st_size)
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+        status = {item.path: item for item in self.client.status(verbose=True)}
+        # Prove this exercises SVN's actual size/mtime fast path, rather than a
+        # fake normal status or the existing modified-status rejection.
+        self.assertEqual(status["file.txt"].item, "normal")
+        for operation in ("switch", "merge"):
+            with self.subTest(operation=operation), self.assertRaisesRegex(BranchError, "translated BASE"):
+                if operation == "switch":
+                    self.manager.preflight_switch(self.source, revision=3)
+                else:
+                    self.manager.preflight_merge(self.source, start_revision=2, end_revision=3)
+        self.assertEqual(path.read_bytes(), changed)
+        self.assertEqual(self.client.info()["url"], self.base + "/trunk")
+        self.assertEqual(self.run_svn("info", "--show-item", "revision", self.base).stdout.strip(), "3")
+
+    def test_translated_keywords_crlf_binary_and_directory_properties_supported(self):
+        (self.wc / "nested").mkdir()
+        (self.wc / "empty").mkdir()
+        text = self.wc / "nested" / "keywords.txt"
+        text.write_bytes(b"$Id$\n$URL$\ntext\n")
+        binary = self.wc / "nested" / "binary.bin"
+        binary_content = bytes(range(256)) + b"\x00\xff\r\n"
+        binary.write_bytes(binary_content)
+        self.run_svn("add", str(self.wc / "nested"), str(self.wc / "empty"))
+        self.run_svn("propset", "svn:eol-style", "CRLF", str(text))
+        self.run_svn("propset", "svn:keywords", "Id URL", str(text))
+        self.run_svn("propset", "svn:mime-type", "application/octet-stream", str(binary))
+        self.run_svn("propset", "custom:directory", "preserved", str(self.wc / "nested"))
+        self.run_svn("commit", str(self.wc), "-m", "translated content")
+        translated_branch = self.base + "/branches/translated"
+        self.run_svn("copy", self.base + "/trunk", translated_branch, "-m", "translated branch")
+        # A fresh checkout guarantees genuine working-format EOL and keyword
+        # expansion, independently of propset's handling of the original file.
+        wc = self.root / "translated-wc"
+        self.run_svn("checkout", self.base + "/trunk", str(wc))
+        client = SvnClient(wc)
+        manager = BranchManager(client)
+        before = (wc / "nested" / "keywords.txt").read_bytes()
+        self.assertIn(b"$Id: ", before)
+        self.assertIn(b"$URL: ", before)
+        self.assertEqual(before.count(b"\n"), before.count(b"\r\n"))
+        manager.preflight_merge(self.source, start_revision=3, end_revision=5)
+        plan = manager.preflight_switch(translated_branch, revision=5)
+        self.assertEqual((wc / "nested" / "keywords.txt").read_bytes(), before)
+        result = manager.switch(translated_branch, revision=5, confirmed=True,
+                                expected_state_sha256=plan.state_sha256)
+        self.assertEqual(result.outcome, "switched")
+        self.assertEqual(client.status(), [])
+        self.assertIn(translated_branch.encode("ascii"), (wc / "nested" / "keywords.txt").read_bytes())
+        self.assertEqual((wc / "nested" / "binary.bin").read_bytes(), binary_content)
+        self.assertTrue((wc / "empty").is_dir())
+        self.assertEqual(self.run_svn("propget", "--strict", "custom:directory", str(wc / "nested")).stdout, "preserved")
+
+    def test_directory_and_file_property_edits_rejected_without_mutation(self):
+        for target in (self.wc, self.wc / "file.txt"):
+            self.run_svn("propset", "custom:local", "keep this property", str(target))
+            for operation in ("switch", "merge"):
+                with self.subTest(target=target, operation=operation), self.assertRaises(BranchError):
+                    if operation == "switch":
+                        self.manager.preflight_switch(self.source, revision=3)
+                    else:
+                        self.manager.preflight_merge(self.source, start_revision=2, end_revision=3)
+            self.assertEqual(self.run_svn("propget", "--strict", "custom:local", str(target)).stdout, "keep this property")
+            self.run_svn("propdel", "custom:local", str(target))
+        self.assertEqual(self.client.info()["url"], self.base + "/trunk")
 
     def test_ignored_file_rejected(self):
         self.run_svn("propset", "svn:ignore", "ignored.bin", str(self.wc))

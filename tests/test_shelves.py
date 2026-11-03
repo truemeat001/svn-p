@@ -65,10 +65,12 @@ class FakeManager(ShelfManager):
     def _properties_many(self, paths, base=False):
         return {path: self._properties(path, base=base) for path in paths}
 
-    def _status(self, paths=None):
+    def _status(self, paths=None, *, depth=None):
         result = []
         for path, node in sorted(self.states.items()):
             if paths and not any(p == "." or path == p or path.startswith(p + "/") for p in paths):
+                continue
+            if paths and depth == "empty" and path not in paths:
                 continue
             props = "modified" if self.current_props.get(path, {}) != self.base_props.get(path, {}) else "none"
             result.append({"path": path, "item": node["item"], "props": props,
@@ -149,7 +151,8 @@ class XmlManager(FakeManager):
         if command == "status":
             root = ET.Element("status")
             target = ET.SubElement(root, "target", path=".")
-            for state in FakeManager._status(self, targets):
+            depth = args[args.index("--depth") + 1] if "--depth" in args else None
+            for state in FakeManager._status(self, targets, depth=depth):
                 entry = ET.SubElement(target, "entry", path=state["path"])
                 attrs = {key: value for key, value in state.items() if key != "path" and value is not None}
                 attrs["revision"] = self.revision
@@ -820,6 +823,114 @@ class ShelvesTests(unittest.TestCase):
             self.manager.create("incomplete", ["new/child"])
         self.assertEqual(self.manager.list(), [])
 
+    def test_explicit_child_selection_rejects_unsafe_ancestors(self):
+        flags = ({"switched": "true"}, {"copied": "true"}, {"file-external": "true"},
+                 {"wc-locked": "true"}, {"tree-conflicted": "true"},
+                 {"item": "replaced"}, {"item": "missing"}, {"item": "deleted"})
+        for operation in ("preflight_create", "create"):
+            for flag in flags:
+                with self.subTest(operation=operation, flag=flag):
+                    self.manager.node("parent", "normal", kind="dir")
+                    self.manager.node("parent/child", "modified", content=b"local work")
+                    self.manager.states["parent"].update(flag)
+                    with self.assertRaises(ShelfError):
+                        if operation == "create":
+                            self.manager.create("unsafe ancestor", ["parent/child"])
+                        else:
+                            self.manager.preflight_create(["parent/child"])
+                    self.assertEqual(self.manager.list(), [])
+                    self.assertEqual((self.wc / "parent/child").read_bytes(), b"local work")
+
+    def test_explicit_child_selection_checks_root_and_distant_ancestors(self):
+        for ancestor in (".", "parent"):
+            with self.subTest(ancestor=ancestor):
+                self.manager.node("parent", "normal", kind="dir")
+                self.manager.node("parent/nested", "normal", kind="dir")
+                self.manager.node("parent/nested/child", "added", content=b"local work")
+                self.manager.states[ancestor]["switched"] = "true"
+                with self.assertRaisesRegex(ShelfError, "switched"):
+                    self.manager.create("unsafe ancestor", ["parent/nested/child"])
+                self.manager.states[ancestor].pop("switched")
+
+    def test_explicit_child_does_not_select_dirty_parent_or_unsafe_siblings(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("parent", "normal", kind="dir", props={"unrelated": enc(b"edit")})
+        manager.node("parent/child", "modified", content=b"local work")
+        manager.node("parent/sibling", "modified", content=b"other work", switched="true")
+        shelf = manager.create("only child", ["parent/child"])
+        self.assertEqual(shelf["paths"], ["parent/child"])
+        ancestor_calls = [args for args in manager.commands if args[0] == "status" and "--depth" in args]
+        self.assertEqual(len(ancestor_calls), 2)
+        for args in ancestor_calls:
+            self.assertEqual(args[args.index("--depth") + 1], "empty")
+            self.assertEqual(set(args[args.index("--") + 1:]), {".@", "parent@"})
+        manager.states["parent/child"]["item"] = "normal"
+        (self.wc / "parent/child").write_bytes(b"base")
+        manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "parent/child").read_bytes(), b"local work")
+        self.assertEqual((self.wc / "parent/sibling").read_bytes(), b"other work")
+        self.assertEqual(manager.current_props["parent"], {"unrelated": enc(b"edit")})
+
+    def test_explicit_selection_ancestor_status_reads_are_bounded(self):
+        manager = XmlManager(self.wc, self.store)
+        paths = []
+        for index in range(130):
+            parent = f"parent {index}@"
+            manager.node(parent, "normal", kind="dir")
+            paths.append(parent + "/child")
+            manager.node(paths[-1], "added", content=b"new")
+        plan = manager.preflight_create(paths)
+        self.assertEqual(plan["entry_count"], 130)
+        ancestor_calls = [args for args in manager.commands if args[0] == "status" and "--depth" in args]
+        self.assertEqual(len(ancestor_calls), 4)
+        for args in ancestor_calls:
+            targets = args[args.index("--") + 1:]
+            self.assertLessEqual(len(targets), 128)
+            self.assertTrue(all(target.endswith("@") for target in targets))
+
+    def test_ancestor_change_during_explicit_backup_aborts(self):
+        self.manager.node("parent", "normal", kind="dir")
+        self.manager.node("parent/child", "modified", content=b"local work")
+        capture = self.manager._capture_file
+        def change_ancestor(path, blobs=None):
+            result = capture(path, blobs)
+            self.manager.states["parent"]["switched"] = "true"
+            return result
+        with patch.object(self.manager, "_capture_file", side_effect=change_ancestor):
+            with self.assertRaisesRegex(ShelfError, "ancestor status changed"):
+                self.manager.create("unstable ancestor", ["parent/child"])
+        self.assertEqual(self.manager.list(), [])
+
+    def test_added_restore_rejects_changed_parent_before_any_writes(self):
+        self.manager.node("a-first", "modified", content=b"saved edit")
+        self.manager.node("parent", "normal", kind="dir")
+        self.manager.node("parent/new", "added", content=b"new")
+        shelf = self.manager.create("new child")
+        self.manager.clean()
+        for item in ("deleted", "added", "unversioned", "ignored", "replaced"):
+            for operation in ("preflight_restore", "restore"):
+                with self.subTest(item=item, operation=operation):
+                    self.manager.states["parent"]["item"] = item
+                    with self.assertRaises(ShelfConflict):
+                        getattr(self.manager, operation)(shelf["id"])
+                    self.assertTrue((self.wc / "parent").is_dir())
+                    self.assertFalse((self.wc / "parent/new").exists())
+                    self.assertEqual((self.wc / "a-first").read_bytes(), b"base")
+                    self.assertEqual(self.manager.commands, [])
+                    self.assertTrue(self.manifest_path(shelf).is_file())
+
+    def test_selected_deleted_child_under_deleted_parent_is_rejected(self):
+        self.manager.node("parent", "deleted", kind="dir")
+        self.manager.node("parent/child", "deleted")
+        with self.assertRaisesRegex(ShelfError, "Deleted parent directory"):
+            self.manager.create("incomplete deleted directory", ["parent/child"])
+
+    def test_explicit_unversioned_child_requires_parent(self):
+        self.manager.node("loose", "unversioned", kind="dir")
+        self.manager.node("loose/child", "unversioned", content=b"new")
+        with self.assertRaisesRegex(ShelfError, "parent directory"):
+            self.manager.preflight_create(["loose/child"])
+
     def test_wrong_repository_rejected(self):
         shelf = self.simple()
         self.manager.clean()
@@ -1085,6 +1196,49 @@ class RealSvnShelfTests(unittest.TestCase):
         with self.assertRaises(ShelfConflict):
             self.manager.restore(shelf["id"])
         self.assertEqual((self.wc / "file.bin").read_bytes(), b"other edit")
+
+    def test_real_explicit_child_under_switched_parent_is_refused(self):
+        (self.wc / "dir/child.txt").write_bytes(b"base")
+        self.svn("add", "dir/child.txt")
+        self.svn("commit", "-m", "nested file")
+        self.svn("copy", self.repo.as_uri() + "/dir", self.repo.as_uri() + "/other", "-m", "branch directory")
+        self.svn("switch", self.repo.as_uri() + "/other", "dir")
+        (self.wc / "dir/child.txt").write_bytes(b"local edit")
+        for operation in ("preflight_create", "create"):
+            with self.subTest(operation=operation), self.assertRaisesRegex(ShelfError, "switched"):
+                if operation == "create":
+                    self.manager.create("switched parent", ["dir/child.txt"])
+                else:
+                    self.manager.preflight_create(["dir/child.txt"])
+        self.assertEqual(self.manager.list(), [])
+        self.assertEqual((self.wc / "dir/child.txt").read_bytes(), b"local edit")
+
+    def test_real_explicit_child_with_dirty_parent_roundtrip(self):
+        (self.wc / "dir/child.txt").write_bytes(b"base")
+        self.svn("add", "dir/child.txt")
+        self.svn("commit", "-m", "nested file")
+        self.svn("propset", "unrelated", "parent edit", "dir")
+        (self.wc / "dir/child.txt").write_bytes(b"local edit")
+        shelf = self.manager.create("explicit child", ["dir/child.txt"])
+        self.assertEqual(shelf["paths"], ["dir/child.txt"])
+        self.svn("revert", "dir/child.txt")
+        self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "dir/child.txt").read_bytes(), b"local edit")
+        self.assertEqual(self.svn("propget", "--strict", "unrelated", "dir"), b"parent edit")
+
+    def test_real_added_restore_under_deleted_keep_local_parent_is_refused(self):
+        (self.wc / "dir/new.txt").write_bytes(b"new")
+        self.svn("add", "dir/new.txt")
+        shelf = self.manager.create("new child", ["dir/new.txt"])
+        self.svn("revert", "dir/new.txt")
+        (self.wc / "dir/new.txt").unlink()
+        self.svn("delete", "--keep-local", "dir")
+        for operation in ("preflight_restore", "restore"):
+            with self.subTest(operation=operation), self.assertRaisesRegex(ShelfConflict, "Deleted parent directory"):
+                getattr(self.manager, operation)(shelf["id"])
+        self.assertTrue((self.wc / "dir").is_dir())
+        self.assertFalse((self.wc / "dir/new.txt").exists())
+        self.assertTrue(self.manager.details(shelf["id"]))
 
 
 if __name__ == "__main__":

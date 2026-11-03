@@ -87,6 +87,10 @@ conflicts, obstructions, switched nodes, externals, working-copy locks, sparse
 selected directories, symbolic links/reparse points, special filesystem objects,
 and nested working copies are refused instead of silently losing their semantics.
 A scheduled deletion whose file still contains local data is also refused.
+Creation and restore also validate every selected path's ancestors, including
+the working-copy root. Selecting a child alone cannot bypass a switched, copied,
+conflicted, or scheduled-deleted parent. Creation rechecks ancestor status before
+publishing, so a changed ancestor invalidates the backup snapshot.
 
 Select an added/unversioned parent together with its children. An incomplete child
 selection is rejected. Paths that cannot be represented safely on Windows, paths
@@ -106,6 +110,10 @@ A restore does not merge. Before making any change it verifies:
    line endings and keyword expansion correctly. This does not contact the server.
 4. Every new/unversioned destination is absent, including identical existing files.
 5. All shelf data checksums and all destination paths are safe.
+6. Parent directories are supported versioned nodes or new directories included
+   in the shelf. A directory scheduled for deletion is rejected even when
+   `svn delete --keep-local` left it on disk; unrelated added/unversioned parents
+   cannot replace the original hierarchy.
 
 An added directory left behind after `svn revert` is a collision. Move or remove
 it deliberately before restoring. Keep unrelated local work safe: never use
@@ -130,6 +138,12 @@ budget. Longer selections are split without dropping entries or broadening to a
 recursive query. Paths are checked for traversal, redirected ancestors and nested
 working copies before the command. Every target still has an individual trailing
 `@` peg-escape, after `--`.
+
+Explicit child selections additionally read any omitted ancestors with bounded
+`svn status --depth empty` batches. These reads do not select parent property
+edits or scan unrelated siblings. Both creation and its final snapshot check
+perform these reads; whole-working-copy selections already include the ancestors
+and need no extra status commands.
 
 XML entries are associated by normalized local path, never by response order.
 Info must return every requested target exactly once. Property output rejects

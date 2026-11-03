@@ -352,9 +352,10 @@ class ShelfManager:
         path = self._relative(path)
         return self._properties_many([path], base=base)[path]
 
-    def _status(self, paths=None) -> list[dict]:
+    def _status(self, paths=None, *, depth=None) -> list[dict]:
         targets = [self._target(self._relative(p)) for p in (paths or ["."])]
-        root = self._xml("status", "--xml", "--verbose", "--no-ignore", "--ignore-externals", "--", *targets)
+        options = ["--depth", depth] if depth is not None else []
+        root = self._xml("status", "--xml", "--verbose", "--no-ignore", "--ignore-externals", *options, "--", *targets)
         entries = {}
         for node in root.findall(".//entry"):
             path = self._relative(node.get("path", ""))
@@ -374,6 +375,38 @@ class ShelfManager:
         if any(entry.get(key) not in (None, "false", "") for key in
                ("copied", "switched", "tree-conflicted", "moved-from", "moved-to", "file-external", "wc-locked")):
             raise ShelfError(f"Copied, moved, switched or conflicted path is unsupported: {entry['path']}")
+
+    @staticmethod
+    def _ancestor_paths(paths):
+        return {str(parent) for path in paths for parent in PurePosixPath(path).parents}
+
+    def _create_ancestor_status(self, selected, status_entries):
+        # Explicit child selections omit their parents from svn status. Query
+        # only missing ancestors, not their unrelated siblings or descendants.
+        ancestors = self._ancestor_paths(selected)
+        known = {entry["path"]: entry for entry in status_entries}
+        known.update(selected)  # Includes recursively expanded unversioned dirs.
+        for batch in self._target_batches(sorted(ancestors - known.keys())):
+            for entry in self._status(batch, depth="empty"):
+                if entry["path"] not in batch:
+                    raise ShelfError("SVN ancestor status returned an unexpected target")
+                if entry["path"] in known:
+                    raise ShelfError("SVN ancestor status returned a duplicate target")
+                known[entry["path"]] = entry
+        return {path: known.get(path) for path in ancestors}
+
+    def _check_ancestors(self, paths, by_path, planned_dirs):
+        for parent in sorted(self._ancestor_paths(paths)):
+            entry = by_path.get(parent)
+            if entry is None:
+                if parent not in planned_dirs:
+                    raise ShelfError(f"Parent directory is not versioned or included in the shelf: {parent}")
+                continue
+            self._check_status(entry)
+            if entry["item"] == "deleted":
+                raise ShelfError(f"Deleted parent directory is unsupported: {parent}")
+            if entry["item"] in ("added", "unversioned", "ignored") and parent not in planned_dirs:
+                raise ShelfError(f"Select the added/unversioned parent directory as well: {parent}")
 
     def _walk_unversioned(self, relative: str) -> list[dict]:
         result = []
@@ -490,20 +523,9 @@ class ShelfManager:
                 raise ShelfError(f"Unsupported status: {status_entry['item']}")
         if not selected:
             raise ShelfError("No supported changes selected for backup")
-        for relative, entry in selected.items():
-            if entry["item"] not in ("added", "unversioned"):
-                continue
-            parent = str(PurePosixPath(relative).parent)
-            while parent != ".":
-                if parent not in selected:
-                    # An added or unversioned ancestor would disappear when
-                    # cleaned. Refuse an incomplete selection rather than
-                    # creating a shelf that cannot reconstruct its hierarchy.
-                    parent_status = next((s for s in self._status([parent]) if s["path"] == parent), None)
-                    if parent_status and parent_status["item"] in ("added", "unversioned"):
-                        raise ShelfError(f"Select the added/unversioned parent directory as well: {parent}")
-                parent = str(PurePosixPath(parent).parent)
-        return repository, status_entries, selected
+        ancestors = self._create_ancestor_status(selected, status_entries)
+        self._check_ancestors(selected, ancestors, selected)
+        return repository, status_entries, selected, ancestors
 
     @staticmethod
     def _capture_file(path, blobs=None):
@@ -653,11 +675,14 @@ class ShelfManager:
             entries.append(entry)
         return entries
 
-    def _verify_create_snapshot(self, paths, status_entries, selected, entries):
+    def _verify_create_snapshot(self, paths, status_entries, selected, entries, ancestors):
         # Status changes during the snapshot invalidate it. Byte checks above
         # additionally detect in-place edits that SVN status cannot distinguish.
-        if self._status(paths) != status_entries:
+        latest_status = self._status(paths)
+        if latest_status != status_entries:
             raise ShelfError("Working-copy status changed while backing up; retry")
+        if self._create_ancestor_status(selected, latest_status) != ancestors:
+            raise ShelfError("Working-copy ancestor status changed while backing up; retry")
         for entry in entries:
             relative, item = entry["path"], entry["state"]
             source = self._path(relative)
@@ -705,9 +730,9 @@ class ShelfManager:
             self._check_storage()
             if (self.storage_dir / ".operation.lock").exists():
                 raise ShelfError("Another shelf operation is running; retry preflight when it finishes")
-            repository, status_entries, selected = self._select_create(paths)
+            repository, status_entries, selected, ancestors = self._select_create(paths)
             entries = self._capture_create_entries(selected)
-            self._verify_create_snapshot(paths, status_entries, selected, entries)
+            self._verify_create_snapshot(paths, status_entries, selected, entries, ancestors)
             # The normal manifest validator enforces portable path collisions and
             # property/base schemas even though no manifest or blobs are written.
             manifest = {"format": _FORMAT, "id": "0" * 32, "name": "Preflight",
@@ -727,14 +752,14 @@ class ShelfManager:
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
             raise ShelfError("Shelf name must contain 1–200 characters")
         with self._locked():
-            repository, status_entries, selected = self._select_create(paths)
+            repository, status_entries, selected, ancestors = self._select_create(paths)
             shelf_id = uuid.uuid4().hex
             temporary = Path(tempfile.mkdtemp(prefix=".creating-", dir=self.storage_dir))
             try:
                 blobs = temporary / "blobs"
                 blobs.mkdir(mode=0o700)
                 entries = self._capture_create_entries(selected, blobs)
-                self._verify_create_snapshot(paths, status_entries, selected, entries)
+                self._verify_create_snapshot(paths, status_entries, selected, entries, ancestors)
                 manifest = {"format": _FORMAT, "id": shelf_id, "name": name.strip(),
                             "created_at": datetime.now(timezone.utc).isoformat(),
                             "repository": {"uuid": repository["uuid"], "url": repository["url"]},
@@ -901,22 +926,18 @@ class ShelfManager:
         by_path = {s["path"]: s for s in statuses}
         observations = {}
         planned_dirs = {e["path"] for e in entries if e["kind"] == "dir" and e["state"] in ("added", "unversioned")}
+        try:
+            self._check_ancestors((entry["path"] for entry in entries), by_path, planned_dirs)
+        except ShelfError as exc:
+            raise ShelfConflict(str(exc)) from exc
         for entry in entries:
             rel = entry["path"]
             target = self._path(rel)
-            # Check ancestors as well: a clean-looking file under a switched or
-            # copied directory is not the same restoration destination.
-            ancestor = PurePosixPath(rel)
-            while True:
-                candidate = str(ancestor)
-                if candidate in by_path:
-                    try:
-                        self._check_status(by_path[candidate])
-                    except ShelfError as exc:
-                        raise ShelfConflict(str(exc)) from exc
-                if candidate == ".":
-                    break
-                ancestor = ancestor.parent
+            if rel in by_path:
+                try:
+                    self._check_status(by_path[rel])
+                except ShelfError as exc:
+                    raise ShelfConflict(str(exc)) from exc
             if entry["state"] in ("added", "unversioned"):
                 if target.exists() or target.is_symlink() or rel in by_path:
                     raise ShelfConflict(f"Restore would overwrite an existing or scheduled path: {rel}")
