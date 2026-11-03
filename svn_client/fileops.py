@@ -20,6 +20,7 @@ from typing import Sequence
 from urllib.parse import quote, unquote
 
 from .backend import CommandResult, StatusEntry, SvnClient, SvnError
+from .file_identity import identity_time_ns
 
 
 MAX_DELETE_PATHS = 128
@@ -76,7 +77,7 @@ def _linked(node: os.stat_result) -> bool:
 
 def _fingerprint(node: os.stat_result) -> tuple[int, ...]:
     return (node.st_dev, node.st_ino, node.st_mode, node.st_size,
-            node.st_mtime_ns, node.st_ctime_ns, node.st_nlink)
+            node.st_mtime_ns, identity_time_ns(node), node.st_nlink)
 
 
 def _snapshot_bytes(path: Path) -> tuple[str, int, tuple[int, ...]]:
@@ -102,7 +103,8 @@ def _snapshot_bytes(path: Path) -> tuple[str, int, tuple[int, ...]]:
             if total > opened.st_size:
                 raise FileOperationError("A file grew while it was being inspected. Refresh and retry the preflight.")
         after = os.fstat(handle.fileno())
-    if _fingerprint(before) != _fingerprint(after) or _fingerprint(path.lstat()) != _fingerprint(before):
+    if (opened.st_ctime_ns != after.st_ctime_ns or _fingerprint(before) != _fingerprint(after)
+            or _fingerprint(path.lstat()) != _fingerprint(before)):
         raise FileOperationError("A file changed while it was being inspected. Refresh and retry the preflight.")
     return digest.hexdigest(), total, _fingerprint(after)
 
@@ -121,8 +123,17 @@ class FileOperationManager:
             raise FileOperationError("Select an explicit local file path.") from exc
         if (not isinstance(raw, str) or not raw or any(ord(c) < 32 or ord(c) == 127 for c in raw)
                 or "://" in raw or raw.lower().startswith("file:")
+                or (ntpath.splitdrive(raw)[0] and not ntpath.isabs(raw))
                 or (os.name != "nt" and (ntpath.splitdrive(raw)[0] or "\\" in raw))):
             raise FileOperationError("Select an explicit local path inside this working copy; URLs are not allowed.")
+        # Windows abspath can strip trailing dots/spaces. Validate the user's
+        # components before normalization can turn an unsafe name into an alias.
+        supplied = Path(raw)
+        for part in supplied.parts:
+            if part not in {supplied.anchor, ".", ".."} and (
+                    part.casefold() == ".svn" or ":" in part
+                    or part.endswith((" ", ".")) or _RESERVED.match(part)):
+                raise FileOperationError("Administrative or nonportable path components are not supported.")
         absolute = Path(os.path.abspath(self.working_copy / raw))
         try:
             relative = absolute.relative_to(self.working_copy)

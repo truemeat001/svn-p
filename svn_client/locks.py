@@ -274,7 +274,8 @@ class LockManager:
             try:
                 # Exact local targets retain native token semantics. Never use
                 # URL-only mutation, --force, or supplied lock tokens.
-                self.client._command_with_targets(options, self.client._local_targets(plan.paths))
+                self.client._command_with_targets(options, self.client._local_targets(plan.paths),
+                                                  _message_index=1 if action == "lock" else None)
             except (SvnError, ValueError, OSError, KeyboardInterrupt) as error:
                 attempted_error = ", ".join(dict.fromkeys(_ERROR_CODE.findall(str(error))))
             try:

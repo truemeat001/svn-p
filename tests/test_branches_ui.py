@@ -1,6 +1,8 @@
 """Conservative whole-WC GUI contracts; no real Tk/SVN verification claim."""
 import ast
 import inspect
+import json
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +19,7 @@ from svn_client.ui import SvnDesk
 
 ROOT = 'https://repo.test/project'
 SOURCE = ROOT + '/branches/feature'
-CONTEXT = BranchContext('/selected-wc', ROOT + '/trunk', 8, 'uuid', ROOT)
+CONTEXT = BranchContext(str(Path(tempfile.gettempdir()) / 'selected-wc'), ROOT + '/trunk', 8, 'uuid', ROOT)
 
 
 def request(operation='switch'):
@@ -297,7 +299,7 @@ class BranchWorkflowTests(unittest.TestCase):
         app.refresh.assert_called_once_with(reset_navigation=True)
         self.assertEqual(len(app.pending), 2)
         self.assertIn('部分或全部内容可能已改变', warning.call_args.args[1])
-        self.assertIn('/selected-wc', warning.call_args.args[1])
+        self.assertIn(json.dumps(CONTEXT.workspace, ensure_ascii=False), warning.call_args.args[1])
 
     @patch('svn_client.branches_ui.messagebox.showwarning')
     @patch('svn_client.branches_ui.BranchPlanDialog')
@@ -390,7 +392,7 @@ class ResultAndCacheTests(unittest.TestCase):
 
     def test_failed_callback_exception_does_not_stop_polling_or_repeat_mutation(self):
         import queue
-        app = Mock(_closing=False, root_path=Path('/selected-wc'))
+        app = Mock(_closing=False, root_path=Path(CONTEXT.workspace))
         app._queue = queue.Queue()
         failed = Mock(side_effect=RuntimeError('messagebox failed after queuing refresh'))
         app._queue.put((False, BranchOperationError('uncertain'), None, 'merge', False, failed, True))

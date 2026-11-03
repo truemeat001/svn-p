@@ -334,6 +334,7 @@ class DiscoveryTests(unittest.TestCase):
 
         class Entries:
             def __init__(inner, target):
+                inner.target = target
                 inner.entries = original(target)
 
             def __enter__(inner):
@@ -344,9 +345,16 @@ class DiscoveryTests(unittest.TestCase):
 
             def __next__(inner):
                 entry = next(inner.entries)
+
+                def transformed_stat(**kwargs):
+                    # Start with complete IDs on every host. Windows' real
+                    # DirEntry.stat() would otherwise erase fixture identities.
+                    info = (os.stat(entry.name, dir_fd=inner.target, **kwargs)
+                            if isinstance(inner.target, int) else os.stat(Path(inner.target) / entry.name, **kwargs))
+                    return transform(entry, info)
+
                 return SimpleNamespace(name=entry.name, is_symlink=entry.is_symlink,
-                                       is_dir=entry.is_dir,
-                                       stat=lambda **kwargs: transform(entry, entry.stat(**kwargs)))
+                                       is_dir=entry.is_dir, stat=transformed_stat)
 
         return patch.object(discovery.os, "scandir", side_effect=Entries)
 
@@ -365,6 +373,85 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result.skipped_mounts, 1)
         self.assertEqual(result.working_copies, ())
         self.assertEqual(result.directories_scanned, 1)
+
+    def test_incomplete_direntry_ids_are_refreshed_before_boundary_and_identity_checks(self):
+        first = self.wc("first")
+        second = self.wc("second")
+        nested = self.wc("first/nested")
+
+        def incomplete_ids(entry, info):
+            return SimpleNamespace(st_mode=info.st_mode, st_dev=0, st_ino=0)
+
+        # Exercise the portable path traversal even on a POSIX test host.
+        with patch.object(discovery, "_CAN_OPEN_NOFOLLOW", False), self._transformed_entries(incomplete_ids):
+            result = discover_working_copies(self.root)
+        self.assertTrue(result.complete)
+        self.assertEqual(self.paths(result), {first, second, nested})
+        self.assertEqual(result.skipped_mounts, 0)
+        self.assertEqual(result.skipped_duplicates, 0)
+        self.assertEqual(result.directories_scanned, 4)
+
+    def test_incomplete_direntry_refresh_still_rejects_reparse_points(self):
+        child = self.wc("child")
+        original = os.lstat
+
+        def incomplete_ids(entry, info):
+            return SimpleNamespace(st_mode=info.st_mode, st_dev=0, st_ino=0)
+
+        def changed_metadata(path):
+            info = original(path)
+            if Path(path) == child:
+                return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+            return info
+
+        with patch.object(discovery, "_CAN_OPEN_NOFOLLOW", False), self._transformed_entries(incomplete_ids), \
+                patch.object(discovery.os, "lstat", side_effect=changed_metadata):
+            result = discover_working_copies(self.root)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.working_copies, ())
+        self.assertEqual(result.skipped_links, 1)
+        self.assertEqual(result.directories_scanned, 1)
+
+    def test_incomplete_direntry_refresh_failure_is_reported(self):
+        child = self.wc("child")
+        original = os.lstat
+
+        def incomplete_ids(entry, info):
+            return SimpleNamespace(st_mode=info.st_mode, st_dev=0, st_ino=0)
+
+        def unavailable(path):
+            if Path(path) == child:
+                raise PermissionError("private detail")
+            return original(path)
+
+        with patch.object(discovery, "_CAN_OPEN_NOFOLLOW", False), self._transformed_entries(incomplete_ids), \
+                patch.object(discovery.os, "lstat", side_effect=unavailable):
+            result = discover_working_copies(self.root)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.working_copies, ())
+        self.assertEqual(result.reasons, ("entry_unavailable",))
+        self.assertNotIn("private detail", result.issues[0].message)
+
+    def test_incomplete_direntry_refresh_keeps_real_mount_boundary(self):
+        child = self.wc("mount")
+        original = os.lstat
+
+        def incomplete_ids(entry, info):
+            return SimpleNamespace(st_mode=info.st_mode, st_dev=0, st_ino=0)
+
+        def other_device(path):
+            info = original(path)
+            if Path(path) == child:
+                return SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev + 1, st_ino=info.st_ino)
+            return info
+
+        with patch.object(discovery, "_CAN_OPEN_NOFOLLOW", False), self._transformed_entries(incomplete_ids), \
+                patch.object(discovery.os, "lstat", side_effect=other_device):
+            result = discover_working_copies(self.root)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.reasons, ("mount_boundary",))
+        self.assertEqual(result.skipped_mounts, 1)
+        self.assertEqual(result.working_copies, ())
 
     def test_duplicate_directory_identity_is_never_queued_twice(self):
         self.wc("alias")

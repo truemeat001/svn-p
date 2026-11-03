@@ -1,6 +1,7 @@
 """Display-free regression coverage for explicit conflict GUI transitions."""
 import ast
 import inspect
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -166,7 +167,7 @@ class ConflictContextTests(unittest.TestCase):
 class ConflictExecutionTests(unittest.TestCase):
     def start(self):
         app, client = app_context()
-        manager = Mock(working_copy=Path("/selected-wc"))
+        manager = Mock(working_copy=Path(tempfile.gettempdir()) / "selected-wc")
         SvnDesk._preflight_conflict_resolution(app, manager, client, ("src/file.txt",))
         return app, client, manager, app._run.call_args.args[2]
 
@@ -217,7 +218,7 @@ class ConflictExecutionTests(unittest.TestCase):
         self.assertEqual(app._run.call_count, 2)
         app.refresh.assert_called_once_with()
         self.assertIn("可能已处理", warning.call_args.args[1])
-        self.assertIn("/selected-wc", warning.call_args.args[1])
+        self.assertIn(str(manager.working_copy), warning.call_args.args[1])
         manager.resolve.assert_not_called()
 
     @patch("svn_client.ui.messagebox.showwarning")

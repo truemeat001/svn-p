@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import copy
 import hashlib
 import json
@@ -13,6 +14,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 import zlib
 
 from svn_client.shelves import ShelfConflict, ShelfError, ShelfManager, _safe_relative
@@ -55,6 +57,12 @@ class FakeManager(ShelfManager):
     def _properties(self, path, base=False):
         return copy.deepcopy((self.base_props if base else self.current_props).get(path, {}))
 
+    def _infos(self, paths):
+        return {path: self._info(path) for path in paths}
+
+    def _properties_many(self, paths, base=False):
+        return {path: self._properties(path, base=base) for path in paths}
+
     def _status(self, paths=None):
         result = []
         for path, node in sorted(self.states.items()):
@@ -65,10 +73,10 @@ class FakeManager(ShelfManager):
                            **{k: v for k, v in node.items() if k not in ("item", "kind")}})
         return result
 
-    def _base(self, path, info=None):
+    def _base(self, path, info=None, properties=None):
         info = info or self._info(path)
         result = {k: info[k] for k in ("kind", "revision", "url", "uuid")}
-        result["properties"] = self._properties(path, base=True)
+        result["properties"] = self._properties(path, base=True) if properties is None else properties
         if info["kind"] == "file":
             result["sha256"] = hashlib.sha256(self.base_data[path]).hexdigest()
             result["working_sha256"] = result["sha256"]
@@ -109,6 +117,66 @@ class FakeManager(ShelfManager):
                 self.current_props[rel] = copy.deepcopy(self.base_props.get(rel, {}))
 
 
+class XmlManager(FakeManager):
+    """Use production parsers/commands, substituting only deterministic SVN I/O."""
+    _info = ShelfManager._info
+    _infos = ShelfManager._infos
+    _properties = ShelfManager._properties
+    _properties_many = ShelfManager._properties_many
+    _base = ShelfManager._base
+    _status = ShelfManager._status
+
+    def _svn(self, *args):
+        command = args[0]
+        if command not in ("info", "status", "proplist", "cat", "export"):
+            return super()._svn(*args)
+        self.commands.append(args)
+        targets = [value[:-1] for value in args[args.index("--") + 1:]]
+        if command == "info":
+            root = ET.Element("info")
+            for path in reversed(targets):  # Deliberately differ from argv order.
+                info = FakeManager._info(self, path)
+                entry = ET.SubElement(root, "entry", path=path, kind=info["kind"], revision=info["revision"])
+                ET.SubElement(entry, "url").text = info["url"]
+                repo = ET.SubElement(entry, "repository")
+                ET.SubElement(repo, "uuid").text = info["uuid"]
+                wc = ET.SubElement(entry, "wc-info")
+                ET.SubElement(wc, "schedule").text = info["schedule"]
+                ET.SubElement(wc, "depth").text = info["depth"]
+            return ET.tostring(root)
+        if command == "status":
+            root = ET.Element("status")
+            target = ET.SubElement(root, "target", path=".")
+            for state in FakeManager._status(self, targets):
+                entry = ET.SubElement(target, "entry", path=state["path"])
+                attrs = {key: value for key, value in state.items() if key != "path" and value is not None}
+                attrs["revision"] = self.revision
+                ET.SubElement(entry, "wc-status", attrs)
+            return ET.tostring(root)
+        if command == "proplist":
+            root = ET.Element("properties")
+            for path in reversed(targets):
+                props = FakeManager._properties(self, path, base="BASE" in args)
+                if props:  # Real SVN omits empty-property targets entirely.
+                    target = ET.SubElement(root, "target", path=path)
+                    for name, value in props.items():
+                        ET.SubElement(target, "property", name=name, encoding="base64").text = value
+            return ET.tostring(root)
+        if command == "cat":
+            return self.base_data[targets[0]]
+        if command == "export":
+            Path(args[-1]).write_bytes(self.base_data[args[-2][:-1]])
+            return b""
+        raise AssertionError(command)
+
+
+class UnbatchedXmlManager(XmlManager):
+    """Previous one-command-per-target strategy for reproducible count comparison."""
+    def _target_batches(self, paths):
+        for path in paths:
+            yield [self._relative(path)]
+
+
 class ShelvesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -133,6 +201,176 @@ class ShelvesTests(unittest.TestCase):
         data = json.loads(path.read_text())
         fn(data)
         path.write_text(json.dumps(data))
+
+    def test_batch_metadata_reduces_100_file_create_from_603_to_207_calls(self):
+        manifests, counts = [], []
+        for index, manager_type in enumerate((UnbatchedXmlManager, XmlManager)):
+            wc = self.root / f"wc-{index}"
+            wc.mkdir()
+            manager = manager_type(wc, self.root / f"store-{index}")
+            for i in range(100):
+                manager.node(f"file {i}@.bin", "modified", content=(f"modified {i}\r\n".encode() * 300),
+                             base=(f"base {i}\r\n".encode() * 300),
+                             props={"custom:binary": enc(bytes([i, 0, 255]))} if i % 2 else {},
+                             base_props={"custom:base": enc(b"\x00\xff")} if i % 3 else {})
+            with patch("svn_client.shelves.subprocess.run", side_effect=AssertionError("no real SVN")):
+                shelf = manager.create("batch count comparison")
+                counts.append(Counter(args[0] for args in manager.commands))
+                manifests.append(manager.details(shelf["id"])["entries"])
+                manager.clean()
+                manager.restore(shelf["id"])
+            for i in range(100):
+                self.assertEqual((wc / f"file {i}@.bin").read_bytes(), f"modified {i}\r\n".encode() * 300)
+                self.assertEqual(manager.current_props[f"file {i}@.bin"],
+                                 {"custom:binary": enc(bytes([i, 0, 255]))} if i % 2 else {})
+        self.assertEqual(manifests[0], manifests[1])
+        self.assertEqual(counts[0], {"info": 101, "status": 2, "proplist": 300, "cat": 100, "export": 100})
+        self.assertEqual(counts[1], {"info": 2, "status": 2, "proplist": 3, "cat": 100, "export": 100})
+        self.assertEqual(sum(counts[0].values()), 603)
+        self.assertEqual(sum(counts[1].values()), 207)
+
+    def test_preflight_uses_fresh_batches_and_never_reuses_previous_results(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("a@b", "modified", content=b"changed", props={"binary": enc(b"\x00\xff")})
+        first = manager.preflight_create()
+        first_calls = Counter(args[0] for args in manager.commands)
+        manager.current_props["a@b"] = {"binary": enc(b"new value")}
+        manager.commands.clear()
+        second = manager.preflight_create()
+        self.assertEqual(Counter(args[0] for args in manager.commands), first_calls)
+        self.assertNotEqual(first["entries"][0]["properties"], second["entries"][0]["properties"])
+        self.assertFalse(self.store.exists())
+
+    def test_batch_property_recheck_detects_change_with_same_status_flags(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("file", "modified", content=b"edit", props={"value": enc(b"one")})
+        original = manager._capture_file
+        def capture(path, blobs=None):
+            result = original(path, blobs)
+            manager.current_props["file"] = {"value": enc(b"two")}
+            return result
+        with patch.object(manager, "_capture_file", side_effect=capture):
+            with self.assertRaisesRegex(ShelfError, "Properties changed"):
+                manager.create("unstable properties")
+        self.assertEqual(manager.list(), [])
+        self.assertEqual((self.wc / "file").read_bytes(), b"edit")
+
+    def test_batched_mixed_root_added_deleted_and_unversioned_roundtrip(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.current_props["."] = {"root": enc(b"\x00\xff")}
+        manager.node("deleted", "deleted", base=b"removed")
+        manager.node("new", "added", kind="dir", props={"dir": enc(b"new directory")})
+        manager.node("new/child@name", "added", content=b"added\x00\xff")
+        manager.node("loose", "unversioned", content=b"loose\x00")
+        shelf = manager.create("mixed batches")
+        manager.clean()
+        manager.restore(shelf["id"])
+        self.assertEqual(manager.current_props["."], {"root": enc(b"\x00\xff")})
+        self.assertFalse((self.wc / "deleted").exists())
+        self.assertEqual((self.wc / "new/child@name").read_bytes(), b"added\x00\xff")
+        self.assertEqual((self.wc / "loose").read_bytes(), b"loose\x00")
+        self.assertEqual(manager.current_props["new"], {"dir": enc(b"new directory")})
+
+    def test_failed_later_metadata_batch_does_not_publish_or_change_sources(self):
+        manager = XmlManager(self.wc, self.store)
+        for name in ("a", "b", "c"):
+            manager.node(name, "modified", content=name.encode())
+        original = manager._svn
+        def svn(*args):
+            if args[0] == "proplist" and args[-1] == "c@":
+                raise ShelfError("synthetic later-batch failure")
+            return original(*args)
+        with patch("svn_client.shelves._SVN_BATCH_TARGETS", 2), patch.object(manager, "_svn", side_effect=svn):
+            with self.assertRaisesRegex(ShelfError, "later-batch failure"):
+                manager.create("no partial batch")
+        self.assertEqual(manager.list(), [])
+        self.assertEqual(list(self.store.glob(".creating-*")), [])
+        self.assertFalse((self.store / ".operation.lock").exists())
+        for name in ("a", "b", "c"):
+            self.assertEqual((self.wc / name).read_bytes(), name.encode())
+
+    def test_info_batches_reject_missing_extra_duplicate_or_copied_targets(self):
+        manager = ShelfManager(self.wc, self.store)
+        valid = '<entry path="a" kind="file" revision="1"><url>file:///repo/a</url><repository><uuid>id</uuid></repository></entry>'
+        cases = ("<info/>", "<wrong/>", "<info>" + valid * 2 + "</info>",
+                 "<info>" + valid.replace('path="a"', 'path="other"') + "</info>",
+                 "<info>" + valid.replace("</entry>", "<wc-info><copy-from-url>file:///copy</copy-from-url></wc-info></entry>") + "</info>")
+        for xml in cases:
+            with self.subTest(xml=xml), patch.object(manager, "_svn", return_value=xml.encode()):
+                with self.assertRaises(ShelfError):
+                    manager._infos(["a"])
+
+    def test_property_batches_handle_empty_targets_binary_values_and_absolute_paths(self):
+        manager = ShelfManager(self.wc, self.store)
+        root = ET.Element("properties")
+        target = ET.SubElement(root, "target", path=str(self.wc / "a@b"))
+        ET.SubElement(target, "property", name="binary", encoding="base64").text = " AP8N\nCg== "
+        ET.SubElement(target, "property", name="text").text = "a\r\nb"
+        with patch.object(manager, "_svn", return_value=ET.tostring(root).replace(b"\r", b"&#13;")) as svn:
+            result = manager._properties_many(["empty", "a@b"], base=True)
+        self.assertEqual(result, {"empty": {}, "a@b": {"binary": enc(b"\x00\xff\r\n"), "text": enc(b"a\r\nb")}})
+        self.assertEqual(svn.call_args.args, ("proplist", "--xml", "--verbose", "--depth", "empty", "-r", "BASE", "--", "empty@", "a@b@"))
+
+    def test_property_batches_reject_extra_duplicate_or_invalid_xml_fields(self):
+        manager = ShelfManager(self.wc, self.store)
+        target = '<target path="a"><property name="x">v</property></target>'
+        cases = ("<wrong/>", "<properties>" + target * 2 + "</properties>",
+                 '<properties><target path="unexpected"/></properties>',
+                 '<properties><target path="../escape"/></properties>',
+                 '<properties><target path="a"><property name="x">one</property><property name="x">two</property></target></properties>',
+                 '<properties><target path="a"><property name="x" encoding="unknown">a</property></target></properties>',
+                 '<properties><target path="a"><property name="svn:special">link</property></target></properties>',
+                 '<properties><target path="a"><property name="x"><nested/></property></target></properties>')
+        for xml in cases:
+            with self.subTest(xml=xml), patch.object(manager, "_svn", return_value=xml.encode()):
+                with self.assertRaises(ShelfError):
+                    manager._properties_many(["a"])
+
+    def test_nonzero_batch_exit_rejects_well_formed_partial_xml(self):
+        manager = ShelfManager(self.wc, self.store)
+        result = subprocess.CompletedProcess([], 1, b'<properties><target path="a"/></properties>', b"path b not found")
+        with patch("svn_client.backend.discover_svn", return_value="svn"), \
+             patch("svn_client.shelves.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(ShelfError, "path b not found"):
+                manager._properties_many(["a", "b"])
+
+    def test_batch_bounds_cover_every_target_without_recursive_scope(self):
+        manager = ShelfManager(self.wc, self.store)
+        paths = [f"{i}-" + "文" * 60 for i in range(300)]
+        batches = list(manager._target_batches(paths))
+        self.assertEqual([path for batch in batches for path in batch], paths)
+        self.assertGreater(len(batches), 3)
+        for batch in batches:
+            self.assertLessEqual(len(batch), 128)
+            self.assertLessEqual(sum(len((path + "@").encode("utf-8")) + 3 for path in batch), 12000)
+        with patch.object(manager, "_svn", return_value=b"<properties/>") as svn:
+            self.assertEqual(manager._properties_many(paths), {path: {} for path in paths})
+        for call in svn.call_args_list:
+            self.assertIn("empty", call.args)
+            self.assertNotIn("-R", call.args)
+            self.assertNotIn(".@", call.args)
+        with patch.object(manager, "_svn", side_effect=AssertionError("empty selection must not run SVN")):
+            self.assertEqual(manager._infos([]), {})
+            self.assertEqual(manager._properties_many([]), {})
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_batch_targets_refuse_symlink_ancestors_before_svn(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.wc / "link").symlink_to(outside, target_is_directory=True)
+        manager = ShelfManager(self.wc, self.store)
+        with patch.object(manager, "_svn", side_effect=AssertionError("unsafe SVN target")):
+            with self.assertRaisesRegex(ShelfError, "Symlink"):
+                manager._properties_many(["link/file"])
+
+    def test_oversized_file_is_refused_before_buffered_base_cat(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("large", "modified", content=b"12345")
+        with patch("svn_client.shelves._MAX_FILE_BYTES", 4):
+            with self.assertRaisesRegex(ShelfError, "size limits"):
+                manager.preflight_create()
+        self.assertNotIn("cat", [command[0] for command in manager.commands])
+        self.assertFalse(self.store.exists())
 
     def test_compressed_large_file_and_binary_properties_roundtrip(self):
         content = b"line\x00\xff\r\n" * (384 * 1024)
@@ -623,7 +861,12 @@ class ShelvesTests(unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "file").write_bytes(b"private")
-        (self.wc / "link").symlink_to(outside, target_is_directory=True)
+        try:
+            (self.wc / "link").symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                self.skipTest("Creating symlinks requires a Windows privilege unavailable in this environment")
+            raise
         with self.assertRaisesRegex(ShelfError, "Symlink"):
             self.manager._path("link/file")
         self.manager.states["link"] = {"item": "unversioned", "kind": "dir"}
@@ -790,6 +1033,26 @@ class RealSvnShelfTests(unittest.TestCase):
         self.manager.restore(shelf["id"])
         self.assertEqual((self.wc / "file.bin").read_bytes(), content)
         self.assertEqual(self.svn("propget", "--strict", "custom:binary", "file.bin"), b"\x00\xff\r\n")
+
+    def test_real_multiple_metadata_batches_and_empty_property_targets(self):
+        paths = [f"batch {i}.bin" for i in range(130)]
+        for relative in paths:
+            (self.wc / relative).write_bytes(b"base\r\n")
+        self.svn("add", "--", *paths)
+        self.svn("commit", "-m", "batched fixture")
+        self.svn("update")
+        for relative in paths:
+            (self.wc / relative).write_bytes(relative.encode() + b"\x00\xff\r\n")
+        prop = self.root / "prop.bin"
+        prop.write_bytes(b"\x00\xff\r\n")
+        self.svn("propset", "custom:binary", "--file", str(prop), paths[129])
+        shelf = self.manager.create("real metadata batches")
+        self.assertEqual(shelf["entry_count"], 130)
+        self.svn("revert", "-R", ".")
+        self.manager.restore(shelf["id"])
+        for relative in paths:
+            self.assertEqual((self.wc / relative).read_bytes(), relative.encode() + b"\x00\xff\r\n")
+        self.assertEqual(self.svn("propget", "--strict", "custom:binary", paths[129]), b"\x00\xff\r\n")
 
     def test_real_local_conflict_refuses_entire_restore(self):
         (self.wc / "file.bin").write_bytes(b"edit")

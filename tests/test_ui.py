@@ -43,8 +43,12 @@ class LocalReadTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_preview_utf8(self):
-        (self.root / "file.txt").write_text("你好，SVN\n", encoding="utf-8")
+        (self.root / "file.txt").write_bytes("你好，SVN\n".encode("utf-8"))
         self.assertEqual(read_preview(self.root, "file.txt"), "你好，SVN\n")
+
+    def test_preview_preserves_crlf_bytes(self):
+        (self.root / "file.txt").write_bytes("你好，SVN\r\n".encode("utf-8"))
+        self.assertEqual(read_preview(self.root, "file.txt"), "你好，SVN\r\n")
 
     def test_preview_blocks_traversal(self):
         self.assertIn("之外", read_preview(self.root, "../outside.txt"))

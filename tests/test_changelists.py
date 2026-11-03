@@ -1,6 +1,7 @@
 """Native SVN changelist safety and scope tests."""
 
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -160,6 +161,60 @@ class ChangelistUnitTests(unittest.TestCase):
         argv = self.commit(keep=True, name="--password")
         self.assertIn("--keep-changelists", argv)
         self.assertIn("--changelist=--password", argv)
+
+    def test_commit_marks_only_its_explicit_message_for_conversion(self):
+        members = [StatusEntry("file.txt", "modified", changelist="--message=label")]
+        with patch.object(self.client, "preflight_changelist_commit", return_value=members), \
+                patch.object(self.client, "_command_with_targets") as command:
+            self.client.commit_changelist("--message=label", "中文提交 🚀")
+        options, targets = command.call_args.args
+        self.assertEqual(options[1:3], ["--changelist=--message=label", "--message=中文提交 🚀"])
+        self.assertEqual(command.call_args.kwargs, {"_message_index": 2})
+        self.assertEqual(targets, ["file.txt"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows native argv encoding")
+    def test_unicode_commit_message_file_direct_and_targets_cleanup(self):
+        names = [f"ordinary-long-filename-{index:03d}.txt" for index in range(30)]
+        members = [StatusEntry(name, "modified", changelist="fix") for name in names]
+        message = "中文提交\nemoji 🚀"
+        for limit in (24000, 600):
+            for outcome in ("success", "failure", "start_error", "timeout"):
+                files, mutations = [], []
+                def run(argv, **kwargs):
+                    if "--targets" in argv:
+                        targets = Path(argv[argv.index("--targets") + 1])
+                        files.append(targets)
+                        self.assertNotIn(message.encode("utf-8"), targets.read_bytes())
+                    if argv[1] == "info":
+                        root = ET.Element("info")
+                        for name in names:
+                            ET.SubElement(root, "entry", path=name)
+                        return subprocess.CompletedProcess(argv, 0, ET.tostring(root), b"")
+                    mutations.append(argv)
+                    temporary = Path(argv[argv.index("--file") + 1])
+                    files.append(temporary)
+                    self.assertEqual(temporary.read_bytes(), message.encode("utf-8"))
+                    self.assertNotIn(message, argv)
+                    self.assertEqual(argv[argv.index("--encoding") + 1], "UTF-8")
+                    if outcome == "start_error":
+                        raise OSError("synthetic process-start failure")
+                    if outcome == "timeout":
+                        raise subprocess.TimeoutExpired(argv, 1)
+                    return subprocess.CompletedProcess(argv, int(outcome == "failure"), b"", b"synthetic failure")
+                with self.subTest(limit=limit, outcome=outcome), \
+                        patch.object(self.client, "preflight_changelist_commit", return_value=members), \
+                        patch("svn_client.backend._DIRECT_TARGET_LIMIT", limit), \
+                        patch("svn_client.backend.subprocess.run", side_effect=run) as execute:
+                    if outcome == "success":
+                        result = self.client.commit_changelist("fix", message)
+                        self.assertNotIn(message, str(result.args))
+                    else:
+                        with self.assertRaises(SvnError):
+                            self.client.commit_changelist("fix", message)
+                    self.assertEqual(execute.call_count, 2 if limit == 600 else 1)
+                self.assertEqual(len(mutations), 1)
+                self.assertTrue(files)
+                self.assertTrue(all(not path.exists() for path in files))
 
     def test_stale_membership_refused_before_mutation(self):
         with patch.object(self.client, "command") as command:
@@ -322,15 +377,17 @@ class ChangelistIntegrationTests(unittest.TestCase):
             self.assertEqual(len(self.client.changelists()["large group"]), len(names))
             for name in names:
                 (self.wc / name).write_text("changed\n", encoding="utf-8")
-            self.client.commit_changelist("large group", "all exact members", expected_paths=names)
+            self.client.commit_changelist("large group", "中文批量提交 🚀", expected_paths=names)
         self.assertEqual(self.client.changelists(), {})
+        self.assertEqual(self.client.log(limit=1)[0].message, "中文批量提交 🚀")
 
     def test_commit_only_one_list_and_default_clears_label(self):
         for name in self.names:
             (self.wc / name).write_text("modified\n", encoding="utf-8")
         self.client.assign_changelist("任务 甲", [self.names[0]])
         self.client.assign_changelist("任务 乙", [self.names[1]])
-        self.client.commit_changelist("任务 甲", "only first", expected_paths=[self.names[0]])
+        self.client.commit_changelist("任务 甲", "只提交第一组 🚀", expected_paths=[self.names[0]])
+        self.assertEqual(self.client.log(limit=1)[0].message, "只提交第一组 🚀")
         changes = self.client.status()
         self.assertEqual([(entry.path, entry.item) for entry in changes], [(self.names[1], "modified")])
         self.assertNotIn("任务 甲", self.client.changelists())
@@ -414,12 +471,34 @@ class TargetFileUnitTests(unittest.TestCase):
         self.assertEqual(len(self.payloads[0].splitlines()), len(self.names))
         self.assertNotIn(".", self.commands[-1])
 
+    def test_marked_message_position_survives_direct_and_targets_routes(self):
+        targets = self.client._local_targets(self.names)
+        options = ["commit", "--changelist=fix", "--message=中文提交"]
+        def command(args, **kwargs):
+            if "--targets" in args:
+                return self.response(args)
+            return CommandResult((), 0, "done", "")
+        for limit in (24000, 450):
+            with self.subTest(limit=limit), \
+                    patch("svn_client.backend._DIRECT_TARGET_LIMIT", limit), \
+                    patch("svn_client.backend.locale.getencoding", return_value="utf-8", create=True), \
+                    patch.object(self.client, "command", side_effect=command) as execute:
+                self.client._command_with_targets(options, targets, _message_index=2)
+                self.assertEqual(execute.call_count, 2 if limit == 450 else 1)
+                self.assertEqual(execute.call_args.kwargs, {"_message_index": 2})
+                self.assertEqual(execute.call_args.args[0][2], options[2])
+                if limit == 450:
+                    self.assertEqual(execute.call_args_list[0].kwargs, {})
+
     def test_spaces_unicode_at_and_leading_dash_roundtrip(self):
-        names = [*self.names, " leading.txt", "trailing.txt ", "中文 @ file.txt", "--password"]
+        names = [*self.names, " leading.txt", "中文 @ file.txt", "--password"]
+        if os.name != "nt":
+            names.append("trailing.txt ")
         self.run_targets(names)
         payload = self.payloads[0].decode("utf-8")
         self.assertIn("./ leading.txt@\n", payload)
-        self.assertIn("./trailing.txt @\n", payload)
+        if os.name != "nt":
+            self.assertIn("./trailing.txt @\n", payload)
         self.assertIn("./中文 @ file.txt@\n", payload)
         self.assertIn("./--password@\n", payload)
 

@@ -236,6 +236,13 @@ class ConflictTests(unittest.TestCase):
                 self.manager.inspect(path)
         self.assertEqual(self.client.calls, [])
 
+    def test_nonportable_components_rejected_before_abspath_normalization(self):
+        for path in ("trailing.", "trailing ", "folder./a", ".svn/../a.txt"):
+            with self.subTest(path=path), patch("svn_client.conflicts.os.path.abspath") as normalize:
+                with self.assertRaises(ConflictError):
+                    self.manager._path(path)
+                normalize.assert_not_called()
+
     def test_links_inside_working_copy_are_refused(self):
         try:
             (self.root / "alias").symlink_to(self.root / "a.txt")

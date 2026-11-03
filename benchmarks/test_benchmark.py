@@ -46,8 +46,19 @@ class BenchmarkHarnessTests(unittest.TestCase):
                 result = bench.benchmark_shelf(Path(temporary), "modified", 3, 4096, 1,
                                                versioned=True, compressible=True)
         self.assertTrue(result["restore_hashes_verified"])
-        self.assertEqual(sum(result["simulated_svn_calls"]["create"].values()), 6 * 3 + 3)
+        self.assertEqual(sum(result["simulated_svn_calls"]["create"].values()), 2 * 3 + 7)
+        self.assertEqual(result["simulated_svn_calls"]["create"],
+                         {"info": 2, "status": 2, "proplist": 3, "cat": 3, "export": 3})
         self.assertEqual(result["blob_encodings"], {"zlib": 3})
+
+    def test_large_selection_splits_metadata_batches_without_dropping_files(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            with patch("subprocess.run", side_effect=AssertionError("must not execute SVN")):
+                result = bench.benchmark_shelf(Path(temporary), "multi-batch", 129, 64, 1,
+                                               versioned=True, compressible=True)
+        self.assertTrue(result["restore_hashes_verified"])
+        self.assertEqual(result["simulated_svn_calls"]["create"],
+                         {"info": 3, "status": 2, "proplist": 6, "cat": 129, "export": 129})
 
     def test_large_unversioned_compression_and_raw_fallback(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):

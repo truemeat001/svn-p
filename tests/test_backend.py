@@ -1,6 +1,7 @@
 """Backend unit tests plus optional real-SVN integration tests."""
 
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -94,7 +95,28 @@ class BackendUnitTests(unittest.TestCase):
             self.client.diff(["-danger", "a@b.txt", "ends@", Path(self.directory.name) / "file"])
         argv = run.call_args.args[0]
         self.assertIn("--internal-diff", argv)
-        self.assertEqual(argv[-5:], ["--", "-danger", "a@b.txt@", "ends@@", "file"])
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([call.args[0][-4:] for call in run.call_args_list], [
+            ["--old=-danger@", "--new=-danger@", "--revision", "BASE"],
+            ["--old=a@b.txt@", "--new=a@b.txt@", "--revision", "BASE"],
+            ["--old=ends@@", "--new=ends@@", "--revision", "BASE"],
+            ["--old=file@", "--new=file@", "--revision", "BASE"],
+        ])
+
+    def test_ordinary_diff_selection_keeps_one_batch_command(self):
+        with patch("svn_client.backend.subprocess.run", return_value=self.result("diff")) as run:
+            self.client.diff(["a.txt", "b.txt"])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-3:], ["--", "a.txt", "b.txt"])
+
+    def test_generic_command_preserves_option_looking_values(self):
+        for args in (
+            ["commit", "--changelist", "--message=label", "--message=actual", "--encoding", "UTF-8", "--", "f.txt"],
+            ["commit", "--message=actual", "--changelist", "--encoding=label", "--encoding", "UTF-8", "--", "f.txt"],
+        ):
+            with self.subTest(args=args), patch("svn_client.backend.subprocess.run", return_value=self.result()) as run:
+                self.client.command(args)
+            self.assertEqual(run.call_args.args[0][4:], args[1:])
 
     def test_url_peg_is_preserved(self):
         with patch("svn_client.backend.subprocess.run", return_value=self.result(LOG_XML)) as run:
@@ -113,6 +135,14 @@ class BackendUnitTests(unittest.TestCase):
         for target in ("../outside", "/outside", "https://svn.example.test/repo"):
             with self.subTest(target=target), self.assertRaises(ValueError):
                 self.client.add([target])
+
+    @unittest.skipUnless(os.name == "nt", "Windows filename normalization")
+    def test_trailing_dot_or_space_is_rejected_before_windows_normalization(self):
+        with patch("svn_client.backend.subprocess.run") as run:
+            for target in ("file.txt ", "file.txt.", "folder /child.txt"):
+                with self.subTest(target=target), self.assertRaisesRegex(ValueError, "dot or space"):
+                    self.client.add([target])
+        run.assert_not_called()
 
     def test_symlink_ancestor_cannot_escape(self):
         with tempfile.TemporaryDirectory() as outside:
@@ -154,10 +184,53 @@ class BackendUnitTests(unittest.TestCase):
             self.client.commit(" \n")
 
     def test_message_hidden_from_result_arguments(self):
-        with patch("svn_client.backend.subprocess.run", return_value=self.result()) as run:
+        seen_files = []
+        def execute(argv, **kwargs):
+            if os.name == "nt":
+                path = Path(argv[argv.index("--file") + 1])
+                self.assertEqual(path.read_bytes(), b"Private working note")
+                seen_files.append(path)
+                self.assertNotIn("Private working note", argv)
+            else:
+                self.assertIn("Private working note", argv)
+            return self.result()
+        with patch("svn_client.backend.subprocess.run", side_effect=execute):
             result = self.client.commit("Private working note")
         self.assertNotIn("Private working note", result.args)
-        self.assertIn("Private working note", run.call_args.args[0])
+        for path in seen_files:
+            self.assertFalse(path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows native argv encoding")
+    def test_unicode_message_file_is_utf8_and_removed_after_timeout(self):
+        message = "\u4e2d\u6587\u63d0\u4ea4\nemoji \U0001f680"
+        seen = []
+        def execute(argv, **kwargs):
+            path = Path(argv[argv.index("--file") + 1])
+            self.assertEqual(path.read_bytes(), message.encode("utf-8"))
+            self.assertEqual(argv[argv.index("--encoding") + 1], "UTF-8")
+            self.assertNotIn(message, argv)
+            seen.append(path)
+            raise subprocess.TimeoutExpired(argv, 1)
+        with patch("svn_client.backend.subprocess.run", side_effect=execute) as run:
+            with self.assertRaisesRegex(SvnError, "uncertain"):
+                self.client.commit(message)
+        self.assertEqual(run.call_count, 1)
+        self.assertFalse(seen[0].exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows native argv encoding")
+    def test_literal_separator_message_is_not_mistaken_for_end_of_options(self):
+        def execute(argv, **kwargs):
+            self.assertEqual(Path(argv[argv.index("--file") + 1]).read_bytes(), b"--")
+            self.assertEqual(argv[argv.index("--encoding") + 1], "UTF-8")
+            return self.result()
+        with patch("svn_client.backend.subprocess.run", side_effect=execute):
+            self.client.commit("--")
+
+    def test_log_explicitly_reads_latest_path_history_without_updating(self):
+        with patch.object(self.client, "command", return_value=CommandResult((), 0, LOG_XML, "")) as command:
+            self.client.log(limit=1)
+        command.assert_called_once_with(["log", "--xml", "--verbose", "--limit", "1",
+                                         "--revision", "HEAD:0", "--", "."])
 
     def test_error_has_result_and_redacts_url(self):
         with patch("svn_client.backend.subprocess.run", return_value=self.result(code=1, stderr="https://user:secret@example.test failed")):
@@ -302,6 +375,19 @@ class BackendIntegrationTests(unittest.TestCase):
         self.client.add([file.name])
         self.client.commit("literal filename", [file.name])
         self.assertEqual(self.client.status(), [])
+        file.write_text("changed", encoding="utf-8")
+        self.assertIn("+changed", self.client.diff([file.name]))
+
+    def test_unicode_message_and_latest_path_log_without_update(self):
+        file = self.wc / "ascii.txt"
+        file.write_bytes(b"base\n")
+        self.client.add([file.name])
+        message = "\u4e2d\u6587\u63d0\u4ea4\nemoji \U0001f680"
+        self.client.commit(message, [file.name])
+        # Committing a child does not update the containing directory's BASE.
+        self.assertEqual(self.client.info()["revision"], 0)
+        self.assertEqual(self.client.log(limit=1)[0].message, message)
+        self.assertEqual(self.client.info()["revision"], 0)
 
     def test_conflict_is_reported_without_prompt(self):
         file = self.wc / "conflict.txt"

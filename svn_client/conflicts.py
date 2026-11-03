@@ -21,6 +21,7 @@ from typing import Sequence
 import xml.etree.ElementTree as ET
 
 from .backend import CommandResult, StatusEntry, SvnClient, SvnError
+from .file_identity import identity_time_ns
 
 
 ACCEPT_CHOICES = ("working",)
@@ -69,7 +70,7 @@ def _linked(info: os.stat_result) -> bool:
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, identity_time_ns(info))
 
 
 def _file_digest(path: Path, expected: tuple[int, ...]) -> str:
@@ -113,6 +114,7 @@ def _file_digest(path: Path, expected: tuple[int, ...]) -> str:
         after = os.fstat(descriptor)
         current = path.lstat()
         if (_linked(current) or not stat.S_ISREG(current.st_mode) or total != expected[2]
+                or before.st_ctime_ns != after.st_ctime_ns
                 or _fingerprint(after) != expected or _fingerprint(current) != expected):
             raise ConflictError("The working file changed while its content was being checked.")
         return digest.hexdigest()
@@ -140,6 +142,14 @@ class ConflictManager:
                 or (ntpath.splitdrive(raw)[0] and not ntpath.isabs(raw))
                 or (os.name != "nt" and (ntpath.splitdrive(raw)[0] or "\\" in raw))):
             raise ConflictError("Select a local path inside this working copy.")
+        # Validate before Windows abspath strips trailing dots/spaces and can
+        # silently map a rejected spelling onto another file.
+        supplied = Path(raw)
+        if any(part not in {supplied.anchor, ".", ".."} and (
+                part.casefold() == ".svn" or ":" in part
+                or part.endswith((" ", ".")) or _RESERVED.match(part))
+               for part in supplied.parts):
+            raise ConflictError("SVN administrative or nonportable paths cannot be conflict targets.")
         absolute = Path(os.path.abspath(self.working_copy / raw))
         try:
             relative = absolute.relative_to(self.working_copy)

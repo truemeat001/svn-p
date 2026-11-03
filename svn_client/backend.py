@@ -11,6 +11,7 @@ This module is a local desktop utility, not a sandbox for untrusted commands.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 import locale
 import math
 import os
@@ -165,6 +166,31 @@ def _validate_executable(path: str) -> str:
     return path
 
 
+@contextmanager
+def _windows_message_file(argv: list[str], message_index: int | None):
+    """Convert only a message explicitly marked by our high-level APIs.
+
+    A UTF-8 file avoids Windows native-code-page argv conversion. Generic
+    command() vectors are never scanned or rewritten: option-looking labels
+    and operands retain their exact values. Callers there may use --file.
+    """
+    if os.name != "nt" or message_index is None:
+        yield argv
+        return
+    option = argv[message_index]
+    if option.startswith("--message="):
+        message, consumed = option.split("=", 1)[1], 1
+    elif option == "--message" and message_index + 1 < len(argv):
+        message, consumed = argv[message_index + 1], 2
+    else:
+        raise ValueError("Invalid internal commit-message position.")
+    with tempfile.TemporaryDirectory(prefix="svn-desk-message-", ignore_cleanup_errors=True) as directory:
+        path = Path(directory) / "message.txt"
+        path.write_bytes(message.encode("utf-8"))
+        yield [*argv[:message_index], "--file", str(path),
+               *argv[message_index + consumed:]]
+
+
 class SvnClient:
     """Thread-safe per-directory facade over a trusted installed svn executable."""
 
@@ -187,7 +213,8 @@ class SvnClient:
         with _LOCKS_GUARD:
             self._lock = _LOCKS.setdefault(os.path.normcase(str(lock_root)), threading.RLock())
 
-    def command(self, args: Sequence[str], *, timeout: float | None = None) -> CommandResult:
+    def command(self, args: Sequence[str], *, timeout: float | None = None,
+                _message_index: int | None = None) -> CommandResult:
         """Run an explicit SVN argument list and return captured Unicode output.
 
         This is an advanced escape hatch. It does not shell-split a string or
@@ -239,11 +266,12 @@ class SvnClient:
         display_args = self._display_args(argv)
         with self._lock:
             try:
-                completed = subprocess.run(
-                    argv, cwd=self.working_copy, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    shell=False, timeout=duration, env=environment, **kwargs,
-                )
+                with _windows_message_file(argv, None if _message_index is None else _message_index + 3) as execution_argv:
+                    completed = subprocess.run(
+                        execution_argv, cwd=self.working_copy, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        shell=False, timeout=duration, env=environment, **kwargs,
+                    )
             except subprocess.TimeoutExpired as error:
                 # Never automatically retry: a commit may already have reached
                 # the server, and a local operation may have partially finished.
@@ -308,6 +336,9 @@ class SvnClient:
             value = os.fspath(path)
             if not value or "\0" in value or _is_url(value):
                 raise ValueError("Expected a local path inside the selected working copy.")
+            if os.name == "nt" and any(part not in {".", ".."} and part.endswith((" ", "."))
+                                       for part in Path(value).parts):
+                raise ValueError("Windows paths ending in a dot or space are not supported; choose the exact portable filename.")
             absolute = Path(os.path.abspath(self.working_copy / value))
             try:
                 relative = absolute.relative_to(self.working_copy)
@@ -393,8 +424,7 @@ class SvnClient:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError("Log limit must be a positive integer.")
         args = ["log", "--xml", "--verbose", "--limit", str(limit)]
-        if revision:
-            args.extend(["--revision", revision])
+        args.extend(["--revision", revision or "HEAD:0"])
         root = self._xml([*args, "--", self._target(target)])
         return [LogEntry(
             revision=int(entry.get("revision", "0")), author=entry.findtext("author", ""),
@@ -420,10 +450,20 @@ class SvnClient:
 
     def diff(self, paths: Sequence[str | os.PathLike[str]] | None = None,
              *, revision: str | None = None) -> str:
+        targets = self._local_targets(paths)
+        if (revision is None or revision == "BASE") and any("@" in target for target in targets):
+            # The BASE/WORKING shortcut treats targets literally rather than
+            # removing empty pegs. Explicit old/new operands consistently parse
+            # pegs, including filenames with a space immediately before '@'.
+            return "".join(self.command([
+                "diff", "--old=" + (target[:-1] if "@" in target else target) + "@",
+                "--new=" + (target[:-1] if "@" in target else target) + "@",
+                "--revision", "BASE",
+            ]).stdout for target in targets)
         args = ["diff"]
         if revision:
             args.extend(["--revision", revision])
-        return self.command([*args, "--", *self._local_targets(paths)]).stdout
+        return self.command([*args, "--", *targets]).stdout
 
     def update(self, paths: Sequence[str | os.PathLike[str]] | None = None) -> CommandResult:
         return self.command(["update", "--ignore-externals", "--accept", "postpone", "--", *self._local_targets(paths)])
@@ -431,7 +471,8 @@ class SvnClient:
     def commit(self, message: str, paths: Sequence[str | os.PathLike[str]] | None = None) -> CommandResult:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("A nonempty commit message is required.")
-        return self.command(["commit", "--message", message, "--encoding", "UTF-8", "--", *self._local_targets(paths)])
+        return self.command(["commit", "--message", message, "--encoding", "UTF-8", "--", *self._local_targets(paths)],
+                            _message_index=1)
 
     @staticmethod
     def _changelist_name(name: str) -> str:
@@ -510,18 +551,18 @@ class SvnClient:
         return len(text.encode("utf-16-le")) // 2
 
     def _command_with_targets(self, options: Sequence[str], targets: Sequence[str],
-                              positionals: Sequence[str] = ()) -> CommandResult:
+                              positionals: Sequence[str] = (), *, _message_index: int | None = None) -> CommandResult:
         """Keep large exact selections below the Windows argument limit.
 
         SVN reads --targets using the native locale and trims line whitespace.
         Encoding is strict, with a read-only XML roundtrip before any mutation.
         Names that cannot be represented as target-file lines stay on argv.
-        No passwords, commit messages, or file contents are written to disk.
+        No passwords, commit messages, or file contents are written to the targets file.
         """
         targets = list(dict.fromkeys(targets))
         direct = [*options, "--", *positionals, *targets]
         if self._command_size(direct) <= _DIRECT_TARGET_LIMIT:
-            return self.command(direct)
+            return self.command(direct, _message_index=_message_index) if _message_index is not None else self.command(direct)
         encoding = locale.getencoding() if hasattr(locale, "getencoding") else locale.getpreferredencoding(False)
         buffered: list[str] = []
         lines: list[str] = []
@@ -567,7 +608,7 @@ class SvnClient:
                 raise SvnError("SVN could not safely read the exact target filenames. No changelist operation was started; select fewer files or check the SVN locale.") from error
             if sorted(observed) != sorted(buffered):
                 raise SvnError("SVN target-file decoding changed the filename selection. No changelist operation was started.")
-            return self.command(args)
+            return self.command(args, _message_index=_message_index) if _message_index is not None else self.command(args)
 
     def assign_changelist(self, name: str, paths: Sequence[str | os.PathLike[str]]) -> CommandResult:
         """Move selected versioned files into one native SVN changelist.
@@ -663,7 +704,7 @@ class SvnClient:
                     "--encoding", "UTF-8", "--depth", "empty"]
             if keep_changelist:
                 args.append("--keep-changelists")
-            return self._command_with_targets(args, targets)
+            return self._command_with_targets(args, targets, _message_index=2)
 
     def add(self, paths: Sequence[str | os.PathLike[str]]) -> CommandResult:
         return self.command(["add", "--parents", "--", *self._local_targets(paths)])
@@ -765,16 +806,26 @@ def checkout_working_copy(url: str, destination: str | os.PathLike[str], *,
     with client._lock:
         validate_checkout_destination(path)
         try:
-            # Unlike normal SVN targets, checkout's explicit local destination
-            # is not peg-parsed. Preserve every literal '@' without a suffix.
-            result = client.command(["checkout", "--ignore-externals", "--", url, str(path)])
-        except SvnError as error:
+            # On Windows SVN can canonicalize the portion before a literal '@'
+            # and trim a preceding space. Do not let SVN reinterpret the chosen
+            # destination spelling. Create/recheck it, then check out into '.'.
+            path.mkdir(exist_ok=True)
+            validate_checkout_destination(path)
+            destination_identity = path.lstat()
+            if not destination_identity.st_ino:
+                raise ValueError("The checkout destination does not expose a stable file identity; no checkout was started.")
+            checkout_client = SvnClient(path, executable=client.executable, timeout=timeout)
+            result = checkout_client.command(["checkout", "--ignore-externals", "--", url, "."])
+        except (SvnError, OSError, ValueError) as error:
             raise SvnError(
                 "Checkout did not finish successfully. Any files created at the destination were retained; "
-                "inspect that directory before retrying. " + str(error), error.result
+                "inspect that directory before retrying. " + str(error), getattr(error, "result", None)
             ) from error
         try:
             _check_checkout_path_components(path)
+            after = path.lstat()
+            if (after.st_dev, after.st_ino) != (destination_identity.st_dev, destination_identity.st_ino):
+                raise ValueError("The checkout destination directory was replaced during the operation.")
             info = SvnClient(path, executable=client.executable, timeout=timeout).info()
             actual_root = str(info.get("wc_root") or "")
             if not actual_root or os.path.normcase(os.path.abspath(actual_root)) != os.path.normcase(str(path)):

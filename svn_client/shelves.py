@@ -28,6 +28,8 @@ import uuid
 import xml.etree.ElementTree as ET
 import zlib
 
+from .file_identity import identity_time_ns
+
 
 class ShelfError(RuntimeError):
     """An unsupported state, invalid shelf, or failed SVN operation."""
@@ -44,6 +46,10 @@ _MIN_COMPRESSION_SAVING = 256
 # Legacy raw shelves do not need an expansion limit and remain readable.
 _MAX_FILE_BYTES = 16 * 1024 ** 3
 _MAX_SHELF_BYTES = 64 * 1024 ** 3
+# Keep target vectors comfortably below Windows command-line limits as well as
+# common POSIX limits. These are batching bounds, not a total selection cap.
+_SVN_BATCH_TARGETS = 128
+_SVN_BATCH_BYTES = 12000
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$", re.I)
@@ -55,7 +61,7 @@ def _digest(data: bytes) -> str:
 
 
 def _file_signature(st):
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, identity_time_ns(st))
 
 
 @contextlib.contextmanager
@@ -71,7 +77,9 @@ def _open_regular(path):
         if _special(opened) or not stat.S_ISREG(opened.st_mode) or _file_signature(before) != _file_signature(opened):
             raise ShelfError(f"File changed while being read; retry: {path.name}")
         yield stream
-        if (_file_signature(opened) != _file_signature(os.fstat(stream.fileno()))
+        after = os.fstat(stream.fileno())
+        if (opened.st_ctime_ns != after.st_ctime_ns
+                or _file_signature(opened) != _file_signature(after)
                 or _file_signature(opened) != _file_signature(path.lstat())):
             raise ShelfError(f"File changed while being read; retry: {path.name}")
 
@@ -240,6 +248,10 @@ class ShelfManager:
         entry = root.find("entry")
         if entry is None:
             raise ShelfError(f"No SVN metadata for {path}")
+        return self._parse_info(entry, path)
+
+    @staticmethod
+    def _parse_info(entry, path):
         info = {
             "kind": entry.get("kind"), "revision": entry.get("revision"),
             "url": entry.findtext("url"), "uuid": entry.findtext("repository/uuid"),
@@ -252,15 +264,54 @@ class ShelfManager:
             raise ShelfError(f"Unsupported SVN node kind: {path}")
         return info
 
-    def _properties(self, path: str, base=False) -> dict[str, str]:
-        args = ["proplist", "--xml", "--verbose", "--depth", "empty"]
-        if base:
-            args.extend(["-r", "BASE"])
-        root = self._xml(*args, "--", self._target(path))
+    def _target_batches(self, paths):
+        batch, cost, seen = [], 0, set()
+        for supplied in paths:
+            path = self._relative(supplied)
+            self._path(path)  # Reject redirected/nested targets before any SVN read.
+            if path in seen:
+                raise ShelfError(f"Duplicate SVN metadata target: {path}")
+            seen.add(path)
+            # UTF-8 bytes bound POSIX argv; they also conservatively cover UTF-16
+            # code units and quoting (portable paths cannot contain quotes).
+            path_cost = len(self._target(path).encode("utf-8")) + 3
+            if path_cost > _SVN_BATCH_BYTES:
+                raise ShelfError(f"SVN metadata target exceeds safe command-line length: {path}")
+            if batch and (len(batch) >= _SVN_BATCH_TARGETS or cost + path_cost > _SVN_BATCH_BYTES):
+                yield batch
+                batch, cost = [], 0
+            batch.append(path)
+            cost += path_cost
+        if batch:
+            yield batch
+
+    def _infos(self, paths):
+        """Read exact local targets, matching XML by path rather than order."""
+        result = {}
+        for batch in self._target_batches(paths):
+            root = self._xml("info", "--xml", "--depth", "empty", "--",
+                             *(self._target(path) for path in batch))
+            if root.tag != "info" or any(child.tag != "entry" for child in root):
+                raise ShelfError("SVN returned an invalid info batch")
+            expected, observed = set(batch), set()
+            for entry in root:
+                path = self._relative(entry.get("path", ""))
+                if path not in expected or path in observed:
+                    raise ShelfError(f"Unexpected or duplicate SVN info target: {path}")
+                observed.add(path)
+                result[path] = self._parse_info(entry, path)
+            if observed != expected:
+                raise ShelfError("SVN info batch omitted required targets")
+        return result
+
+    @staticmethod
+    def _parse_properties(target, path):
         properties = {}
-        for node in root.findall(".//property"):
+        for node in target:
+            if node.tag != "property":
+                raise ShelfError(f"Unexpected SVN property element on {path}")
             name, value = node.get("name"), node.text or ""
-            if not name or "\x00" in name:
+            if not name or "\x00" in name or name in properties or len(node):
                 raise ShelfError(f"Invalid SVN property on {path}")
             if node.get("encoding") == "base64":
                 data = _decoded("".join(value.split()))
@@ -272,6 +323,34 @@ class ShelfManager:
         if "svn:special" in properties:
             raise ShelfError(f"SVN special files (including symlinks) are unsupported: {path}")
         return properties
+
+    def _properties_many(self, paths, base=False):
+        """Empty properties are omitted by SVN, but failed batches are never used.
+
+        _xml calls _svn, which rejects nonzero exit codes before parsing even a
+        well-formed partial XML result. Do not add a partial-result fallback here.
+        """
+        result = {}
+        for batch in self._target_batches(paths):
+            args = ["proplist", "--xml", "--verbose", "--depth", "empty"]
+            if base:
+                args.extend(["-r", "BASE"])
+            root = self._xml(*args, "--", *(self._target(path) for path in batch))
+            if root.tag != "properties" or any(child.tag != "target" for child in root):
+                raise ShelfError("SVN returned an invalid property batch")
+            expected, observed = set(batch), set()
+            result.update((path, {}) for path in batch)
+            for target in root:
+                path = self._relative(target.get("path", ""))
+                if path not in expected or path in observed:
+                    raise ShelfError(f"Unexpected or duplicate SVN property target: {path}")
+                observed.add(path)
+                result[path] = self._parse_properties(target, path)
+        return result
+
+    def _properties(self, path: str, base=False) -> dict[str, str]:
+        path = self._relative(path)
+        return self._properties_many([path], base=base)[path]
 
     def _status(self, paths=None) -> list[dict]:
         targets = [self._target(self._relative(p)) for p in (paths or ["."])]
@@ -376,9 +455,9 @@ class ShelfManager:
                 raise ShelfError(f"Cannot verify translated BASE content: {path}")
             return _file_digest(destination)
 
-    def _base(self, path: str, info=None) -> dict:
+    def _base(self, path: str, info=None, properties=None) -> dict:
         info = info or self._info(path)
-        props = self._properties(path, base=True)
+        props = self._properties(path, base=True) if properties is None else properties
         base = {"revision": info["revision"], "kind": info["kind"],
                 "url": info["url"], "uuid": info["uuid"], "properties": props}
         if info["kind"] == "file":
@@ -529,10 +608,19 @@ class ShelfManager:
     def _capture_create_entries(self, selected, blobs=None):
         entries = []
         total_size = 0
+        ordered = sorted(selected, key=lambda path: (path.count("/"), path))
+        versioned = [path for path in ordered if selected[path]["item"] != "unversioned"]
+        live = [path for path in versioned if selected[path]["item"] != "deleted"]
+        based = [path for path in versioned if selected[path]["item"] != "added"]
+        # These are operation-local snapshots, not persistent caches. Reads are
+        # depth=empty on explicit targets only; never broaden to an entire tree.
+        infos = self._infos(versioned)
+        current_properties = self._properties_many(live)
+        base_properties = self._properties_many(based, base=True)
         for relative, status_entry in sorted(selected.items(), key=lambda item: (item[0].count("/"), item[0])):
             path = self._path(relative)
             item = status_entry["item"]
-            info = None if item == "unversioned" else self._info(relative)
+            info = infos.get(relative)
             if info and info["kind"] == "dir" and info["depth"] != "infinity":
                 raise ShelfError(f"Sparse directories are unsupported: {relative}")
             kind = info["kind"] if info else ("dir" if path.is_dir() else "file")
@@ -540,10 +628,14 @@ class ShelfManager:
                 raise ShelfError(f"Deleted path still contains local data; back it up separately first: {relative}")
             if item == "deleted" and kind == "dir":
                 raise ShelfError(f"Deleted directories are not yet supported; back up before deleting: {relative}")
+            if item != "deleted" and kind == "file":
+                size = path.lstat().st_size
+                if size > _MAX_FILE_BYTES or total_size + size > _MAX_SHELF_BYTES:
+                    raise ShelfError(f"File exceeds the shelf content size limits: {relative}")
             entry = {"path": relative, "state": item, "kind": kind,
-                     "properties": {} if info is None or item == "deleted" else self._properties(relative)}
+                     "properties": {} if info is None or item == "deleted" else current_properties[relative]}
             if item not in ("added", "unversioned"):
-                entry["base"] = self._base(relative, info)
+                entry["base"] = self._base(relative, info, properties=base_properties[relative])
             if item != "deleted":
                 st = path.lstat()
                 if _special(st) or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
@@ -577,7 +669,13 @@ class ShelfManager:
                 raise ShelfError(f"File changed while being backed up; retry: {relative}")
             if stat.S_IMODE(source.stat().st_mode) & 0o777 != entry["mode"]:
                 raise ShelfError(f"Permissions changed during backup; retry: {relative}")
-            if item != "unversioned" and self._properties(relative) != entry["properties"]:
+        # Always make a new read after source hashing. Never reuse the capture
+        # snapshot, even if status still reports the same "modified" flag.
+        latest_properties = self._properties_many(
+            [entry["path"] for entry in entries if entry["state"] not in ("unversioned", "deleted")])
+        for entry in entries:
+            relative, item = entry["path"], entry["state"]
+            if item not in ("unversioned", "deleted") and latest_properties[relative] != entry["properties"]:
                 raise ShelfError(f"Properties changed during backup; retry: {relative}")
         for status_entry in status_entries:
             if status_entry["item"] == "unversioned":

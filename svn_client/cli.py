@@ -22,6 +22,7 @@ from .backend import CommandResult, SvnClient, SvnError, redact_credentials
 from .branches import (BranchError, BranchManager, BranchOperationError,
                        validate_branch_revision, validate_branch_url)
 from .conflicts import ACCEPT_CHOICES, ConflictManager
+from .connection import ConnectionDiagnostics, validate_probe_url
 from .fileops import FileOperationManager
 from .history import HistoryManager
 from .locks import LockError, LockManager, LockOperationError, MAX_LOCK_FILES
@@ -36,15 +37,15 @@ EXIT_CODES = {
     "ok": 0, "usage_error": 2, "confirmation_required": 3,
     "validation_failed": 4, "dependency_missing": 5, "svn_failed": 6,
     "shelf_failed": 7, "operation_uncertain": 8, "output_limit": 9,
-    "internal_error": 70, "io_error": 74, "interrupted": 130,
+    "diagnostics_failed": 10, "internal_error": 70, "io_error": 74, "interrupted": 130,
 }
 
 
 class CliError(Exception):
     def __init__(self, code: str, message: str, *, details: Any = None,
-                 outcome: str = "refused"):
+                 outcome: str = "refused", data: Any = None):
         super().__init__(message)
-        self.code, self.details, self.outcome = code, details, outcome
+        self.code, self.details, self.outcome, self.data = code, details, outcome, data
 
 
 class HelpRequested(Exception):
@@ -101,9 +102,9 @@ def _mutation(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> JsonParser:
     parser = JsonParser(prog="python -m svn_client.cli", allow_abbrev=False,
                         description="SVN Desk JSON tool. Global options precede the command; no prompts.")
-    parser.add_argument("--workspace", required=True, help="Existing local SVN working-copy directory")
-    parser.add_argument("--timeout", type=_timeout, default=120.0,
-                        help="Per SVN process timeout in seconds (default: 120)")
+    parser.add_argument("--workspace", help="Local SVN working-copy directory; required except for diagnostics")
+    parser.add_argument("--timeout", type=_timeout,
+                        help="Per SVN process timeout: default 120 seconds, or 15 for diagnostics (max 120)")
     parser.add_argument("--shelf-store", help="Optional shelf directory outside the workspace")
     parser.add_argument("--max-text-bytes", type=_positive_int, default=DEFAULT_TEXT_BYTES,
                         help="UTF-8 byte limit per diff/diagnostic text field")
@@ -111,6 +112,11 @@ def build_parser() -> JsonParser:
                         help="Serialized JSON output limit (minimum 2048 bytes)")
     parser.set_defaults(mutating=False, dry_run=False, yes=False)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=JsonParser)
+    diagnostics = commands.add_parser("diagnostics", allow_abbrev=False,
+                                       help="Read-only SVN installation/local metadata checks; remote only by explicit opt-in")
+    diagnostics.add_argument("--check-remote", action="store_true",
+                             help="Explicitly probe the repository URL supplied with --url")
+    diagnostics.add_argument("--url", help="Explicit credential-free repository URL; requires --check-remote")
     status = commands.add_parser("status", allow_abbrev=False, help="Read local status")
     _paths(status)
     status.add_argument("--all", action="store_true", help="Include clean versioned entries")
@@ -360,6 +366,28 @@ def _execute(args: argparse.Namespace, stdin: TextIO, context: RunContext) -> An
         raise CliError("usage_error", "--max-output-bytes must be between 2048 and 67108864.")
     if args.max_text_bytes > 67_108_864:
         raise CliError("usage_error", "--max-text-bytes must not exceed 67108864.")
+    if args.command != "diagnostics" and args.workspace is None:
+        raise CliError("usage_error", "--workspace is required for this command.")
+    if args.command == "diagnostics":
+        # Validate the two-part opt-in before any executable/local inspection.
+        # Never infer the requested URL from stored working-copy metadata.
+        if args.check_remote != (args.url is not None):
+            raise CliError("validation_failed", "Remote diagnostics require both --check-remote and an explicit --url.")
+        url = validate_probe_url(args.url) if args.check_remote else None
+        timeout = 15.0 if args.timeout is None else args.timeout
+        diagnostics = ConnectionDiagnostics(args.workspace, timeout=timeout)
+        report = diagnostics.probe(url=url, check_remote=args.check_remote)
+        if report.working_copy is not None:
+            context.workspace = report.working_copy.path
+        context.warnings.extend(report.warnings)
+        if not args.check_remote:
+            context.warnings.append("No repository URL was contacted. Local diagnostics do not establish server connectivity or authentication.")
+        data = {"report": _plain(report), "read_only": True,
+                "working_copy_unchanged": True, "repository_unchanged": True}
+        if not report.ok:
+            raise CliError("diagnostics_failed", "One or more requested diagnostic checks failed or were skipped. Inspect data.report.steps for safe categories and error codes.",
+                           outcome="failed", data=data)
+        return data
     if args.mutating and not (args.yes or args.dry_run):
         raise CliError("confirmation_required", "Mutation requires --yes. Use --dry-run to inspect and validate first.")
     if args.command == "branch":
@@ -402,7 +430,7 @@ def _execute(args: argparse.Namespace, stdin: TextIO, context: RunContext) -> An
         context.mutate(manager.delete, args.shelf_id)
         return {"deleted_shelf_id": args.shelf_id, "working_copy_unchanged": True}
     try:
-        client = SvnClient(workspace, timeout=args.timeout)
+        client = SvnClient(workspace, timeout=120.0 if args.timeout is None else args.timeout)
     except SvnError as exc:
         raise CliError("dependency_missing", str(exc)) from exc
     if args.command == "status":
@@ -665,7 +693,7 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None,
         else:
             fault = CliError("validation_failed", str(exc))
         code = EXIT_CODES[fault.code]
-        payload = _envelope(context, ok=False, outcome=fault.outcome,
+        payload = _envelope(context, ok=False, outcome=fault.outcome, data=fault.data,
                             error={"code": fault.code, "message": _text(str(fault), text_limit)["text"],
                                    "message_truncated": _text(str(fault), text_limit)["truncated"],
                                    "details": fault.details})

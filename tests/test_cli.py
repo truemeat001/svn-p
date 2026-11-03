@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 from svn_client.backend import CommandResult, LogEntry, StatusEntry, SvnError
 from svn_client.branches import BranchError, BranchOperationError, BranchPlan, BranchResult, CopyPlan
 from svn_client.cli import DEFAULT_TEXT_BYTES, EXIT_CODES, MAX_INPUT_BYTES, main
+from svn_client.connection import ConnectionReport, ProbeStep, RepositoryIdentity, WorkingCopyIdentity
 from svn_client.shelves import ShelfConflict, ShelfError
 
 
@@ -201,7 +202,7 @@ class CliTests(unittest.TestCase):
 
     def test_info_and_log_local_paths(self):
         self.invoke(["info", "--path", "sub/a"])
-        self.client.info.assert_called_once_with("sub/a")
+        self.client.info.assert_called_once_with(str(Path("sub/a")))
         code, payload = self.invoke(["log", "--path", "a", "--limit", "2", "--revision", "HEAD:1"])
         self.assertEqual(code, 0)
         self.assertEqual(payload["data"]["entries"][0]["revision"], 3)
@@ -732,6 +733,239 @@ class CliBranchTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("--expect-state-sha256", payload["data"]["help"])
         self.client_factory.assert_not_called()
+
+
+class CliDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.workspace = Path(self.directory.name)
+        self.url = "https://svn.example.test/repo/trunk"
+        self.identity = RepositoryIdentity(self.url, "https://svn.example.test/repo",
+                                            "11111111-2222-3333-4444-555555555555", 12, "dir")
+        self.local = WorkingCopyIdentity(str(self.workspace), str(self.workspace), self.identity)
+        self.report = ConnectionReport(True, (ProbeStep("executable", "ok", "ok", "Version read"),),
+                                        executable="/trusted/svn", version="1.14.3")
+        self.diagnostics = Mock()
+        self.diagnostics.probe.return_value = self.report
+        diagnostic_patch = patch("svn_client.cli.ConnectionDiagnostics", return_value=self.diagnostics)
+        client_patch = patch("svn_client.cli.SvnClient")
+        self.factory = diagnostic_patch.start()
+        self.client_factory = client_patch.start()
+        self.addCleanup(diagnostic_patch.stop)
+        self.addCleanup(client_patch.stop)
+
+    def invoke(self, arguments=(), *, workspace=None, globals_=()):
+        output = io.StringIO()
+        prefix = ["--workspace", str(workspace)] if workspace is not None else []
+        code = main([*prefix, *globals_, "diagnostics", *arguments], stdout=output, stdin=NoRead())
+        self.assertEqual(output.getvalue().count("\n"), 1)
+        self.assertTrue(output.getvalue().isascii())
+        return code, json.loads(output.getvalue())
+
+    def test_installation_only_is_default_without_workspace(self):
+        code, payload = self.invoke()
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["command"], "diagnostics")
+        self.assertEqual(payload["outcome"], "read")
+        self.assertFalse(payload["dry_run"])
+        self.assertIsNone(payload["workspace"])
+        self.factory.assert_called_once_with(None, timeout=15.0)
+        self.diagnostics.probe.assert_called_once_with(url=None, check_remote=False)
+        self.client_factory.assert_not_called()
+        self.assertFalse(payload["data"]["report"]["remote_requested"])
+        self.assertFalse(payload["data"]["report"]["remote_attempted"])
+        self.assertTrue(payload["data"]["read_only"])
+        self.assertTrue(any("do not establish server connectivity" in message for message in payload["warnings"]))
+
+    def test_local_workspace_identity_never_becomes_remote_request(self):
+        self.diagnostics.probe.return_value = replace(self.report, working_copy=self.local)
+        code, payload = self.invoke(workspace=self.workspace)
+        self.assertEqual(code, 0)
+        self.factory.assert_called_once_with(str(self.workspace), timeout=15.0)
+        self.diagnostics.probe.assert_called_once_with(url=None, check_remote=False)
+        self.assertEqual(payload["workspace"], str(self.workspace))
+        self.assertEqual(payload["data"]["report"]["working_copy"]["repository"]["url"], self.url)
+        self.client_factory.assert_not_called()
+
+    def test_remote_probe_requires_both_explicit_arguments_before_factory(self):
+        for arguments in (["--check-remote"], ["--url", self.url]):
+            with self.subTest(arguments=arguments):
+                code, payload = self.invoke(arguments)
+                self.assertEqual(code, 4)
+                self.assertEqual(payload["error"]["code"], "validation_failed")
+        self.factory.assert_not_called()
+        self.client_factory.assert_not_called()
+
+    def test_remote_url_is_never_inferred_even_with_working_copy(self):
+        code, payload = self.invoke(["--check-remote"], workspace=self.workspace)
+        self.assertEqual(code, 4)
+        self.assertEqual(payload["outcome"], "refused")
+        self.factory.assert_not_called()
+
+    def test_invalid_credential_or_ssh_urls_refused_before_factory(self):
+        for url in ("https://u:secret@host/repo", "https://user@host/repo", "svn+ssh://host/repo", "file://server/share", "file:////server/share", "file:///%2Fserver/share", "", "https://host/repo?token=secret"):
+            with self.subTest(url=url):
+                code, payload = self.invoke(["--check-remote", "--url", url])
+                self.assertEqual(code, 4)
+                self.assertNotIn("secret", json.dumps(payload))
+        self.factory.assert_not_called()
+
+    def test_explicit_remote_only_passes_exact_url(self):
+        literal = self.url + "/name@123"
+        self.diagnostics.probe.return_value = replace(self.report, remote=self.identity,
+                                                     remote_requested=True, remote_attempted=True)
+        code, payload = self.invoke(["--check-remote", "--url", literal])
+        self.assertEqual(code, 0)
+        self.factory.assert_called_once_with(None, timeout=15.0)
+        self.diagnostics.probe.assert_called_once_with(url=literal, check_remote=True)
+        self.assertTrue(payload["data"]["report"]["remote_attempted"])
+        self.assertFalse(any("No repository URL was contacted" in text for text in payload["warnings"]))
+
+    def test_explicit_timeout_is_forwarded(self):
+        self.invoke(globals_=["--timeout", "6.5"])
+        self.factory.assert_called_once_with(None, timeout=6.5)
+
+    def test_report_failure_has_exit_code_and_preserves_steps(self):
+        failure = ProbeStep("remote", "failed", "tls", "Certificate validation failed", ("230001",), 1)
+        self.diagnostics.probe.return_value = replace(self.report, ok=False, steps=(failure,),
+                                                     remote_requested=True, remote_attempted=True)
+        code, payload = self.invoke(["--check-remote", "--url", self.url])
+        self.assertEqual(code, 10)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["outcome"], "failed")
+        self.assertEqual(payload["error"]["code"], "diagnostics_failed")
+        self.assertEqual(payload["data"]["report"]["steps"][0]["category"], "tls")
+        self.assertEqual(payload["data"]["report"]["steps"][0]["error_codes"], ["230001"])
+        self.diagnostics.probe.assert_called_once()
+
+    def test_missing_svn_remains_structured_report_without_client_initialization(self):
+        self.diagnostics.probe.return_value = ConnectionReport(False,
+            (ProbeStep("executable", "failed", "dependency_missing", "SVN unavailable"),))
+        code, payload = self.invoke()
+        self.assertEqual(code, 10)
+        self.assertEqual(payload["data"]["report"]["steps"][0]["category"], "dependency_missing")
+        self.client_factory.assert_not_called()
+
+    def test_invalid_workspace_can_be_reported_and_explicit_remote_still_allowed(self):
+        missing = self.workspace / "absent"
+        self.diagnostics.probe.return_value = replace(self.report, ok=False,
+            steps=(ProbeStep("working_copy", "failed", "working_copy", "Folder unavailable"),),
+            remote=self.identity, remote_requested=True, remote_attempted=True)
+        code, payload = self.invoke(["--check-remote", "--url", self.url], workspace=missing)
+        self.assertEqual(code, 10)
+        self.factory.assert_called_once_with(str(missing), timeout=15.0)
+        self.assertTrue(payload["data"]["report"]["remote_attempted"])
+
+    def test_repository_uuid_mismatch_is_a_failed_diagnostic_not_mutation(self):
+        self.diagnostics.probe.return_value = replace(self.report, ok=False,
+            steps=(ProbeStep("identity", "failed", "identity_mismatch", "Repository UUIDs differ"),),
+            working_copy=self.local, remote=self.identity, remote_requested=True,
+            remote_attempted=True, repository_identity_matches=False)
+        code, payload = self.invoke(["--check-remote", "--url", self.url], workspace=self.workspace)
+        self.assertEqual(code, 10)
+        self.assertFalse(payload["data"]["report"]["repository_identity_matches"])
+        self.assertTrue(payload["data"]["working_copy_unchanged"])
+        self.assertTrue(payload["data"]["repository_unchanged"])
+
+    def test_report_values_are_redacted_by_json_boundary(self):
+        identity = replace(self.identity, url="https://u:secret@host/repo")
+        self.diagnostics.probe.return_value = replace(self.report, remote=identity)
+        _, payload = self.invoke()
+        self.assertNotIn("secret", json.dumps(payload))
+
+    def test_diagnostics_has_no_write_retry_or_credential_flags(self):
+        for flag in ("--yes", "--dry-run", "--force", "--password", "--trust-server-cert", "--retry"):
+            with self.subTest(flag=flag):
+                code, _ = self.invoke([flag])
+                self.assertEqual(code, 2)
+        self.factory.assert_not_called()
+
+    def test_help_without_workspace_stays_json(self):
+        code, payload = self.invoke(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--check-remote", payload["data"]["help"])
+        self.factory.assert_not_called()
+
+    def test_oversized_report_preserves_diagnostic_failure_code(self):
+        steps = tuple(ProbeStep("remote", "failed", "svn_error", "safe" * 1000) for _ in range(20))
+        self.diagnostics.probe.return_value = replace(self.report, ok=False, steps=steps)
+        code, payload = self.invoke(globals_=["--max-output-bytes", "2048"])
+        self.assertEqual(code, 9)
+        self.assertEqual(payload["error"]["details"]["original_error_code"], "diagnostics_failed")
+        self.assertFalse(payload["error"]["details"]["mutation_attempted"])
+        self.diagnostics.probe.assert_called_once()
+
+
+class CliDiagnosticsTransportTests(unittest.TestCase):
+    """Wire the real diagnostic module to fake process responses, never a server."""
+    def test_local_default_runs_only_version_and_local_info(self):
+        with tempfile.TemporaryDirectory() as directory:
+            xml = (f'<info><entry kind="dir" path="." revision="12"><url>https://server.invalid/repo/trunk</url>'
+                   '<repository><root>https://server.invalid/repo</root><uuid>11111111-2222-3333-4444-555555555555</uuid></repository>'
+                   f'<wc-info><wcroot-abspath>{directory}</wcroot-abspath></wc-info></entry></info>').encode()
+            results = [subprocess.CompletedProcess([], 0, b"1.14.3\n", b""),
+                       subprocess.CompletedProcess([], 0, xml, b"")]
+            output = io.StringIO()
+            with patch("svn_client.connection.discover_svn", return_value="/trusted/svn"), \
+                 patch("svn_client.connection.subprocess.run", side_effect=results) as run:
+                code = main(["--workspace", directory, "diagnostics"], stdout=output, stdin=NoRead())
+            self.assertEqual(code, 0)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[0].args[0], ["/trusted/svn", "--version", "--quiet"])
+            self.assertEqual(run.call_args_list[1].args[0][-1], ".")
+            for call in run.call_args_list:
+                self.assertFalse(any("server.invalid" in arg for arg in call.args[0]))
+                self.assertIs(call.kwargs["shell"], False)
+                self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+                self.assertEqual(call.kwargs["timeout"], 15.0)
+            report = json.loads(output.getvalue())["data"]["report"]
+            self.assertFalse(report["remote_requested"])
+            self.assertFalse(report["remote_attempted"])
+            self.assertIsNone(report["remote"])
+
+    def test_explicit_remote_probe_exposes_safe_category_not_raw_failure(self):
+        url = "https://server.invalid/repo/name@123"
+        results = [subprocess.CompletedProcess([], 0, b"1.14.3\n", b""),
+                   subprocess.CompletedProcess([], 1, b"raw stdout secret-token",
+                                               b"svn: E215004: raw password secret-token certificate text\n")]
+        output = io.StringIO()
+        with patch("svn_client.connection.discover_svn", return_value="/trusted/svn"), \
+             patch("svn_client.connection.subprocess.run", side_effect=results) as run:
+            code = main(["diagnostics", "--check-remote", "--url", url], stdout=output, stdin=NoRead())
+        self.assertEqual(code, 10)
+        self.assertEqual(run.call_count, 2)
+        command = run.call_args_list[1].args[0]
+        self.assertEqual(command[-1], url + "@HEAD")
+        self.assertIn("--non-interactive", command)
+        self.assertIn("--no-auth-cache", command)
+        self.assertNotIn("--trust-server-cert", command)
+        self.assertNotIn("secret-token", output.getvalue())
+        report = json.loads(output.getvalue())["data"]["report"]
+        self.assertTrue(report["remote_requested"])
+        self.assertTrue(report["remote_attempted"])
+        self.assertEqual(report["steps"][-1]["category"], "authentication")
+        self.assertEqual(report["steps"][-1]["error_codes"], ["215004"])
+
+    def test_diagnostic_timeout_upper_bound_before_any_process(self):
+        output = io.StringIO()
+        with patch("svn_client.connection.discover_svn") as discovery, \
+             patch("svn_client.connection.subprocess.run") as run:
+            code = main(["--timeout", "121", "diagnostics"], stdout=output, stdin=NoRead())
+        self.assertEqual(code, 4)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "validation_failed")
+        discovery.assert_not_called()
+        run.assert_not_called()
+
+    def test_missing_dependency_reports_without_workspace(self):
+        output = io.StringIO()
+        with patch("svn_client.connection.discover_svn", side_effect=SvnError("private raw diagnostic")), \
+             patch("svn_client.connection.subprocess.run") as run:
+            code = main(["diagnostics"], stdout=output, stdin=NoRead())
+        self.assertEqual(code, 10)
+        self.assertNotIn("private raw diagnostic", output.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["data"]["report"]["steps"][0]["category"], "dependency_missing")
+        run.assert_not_called()
 
 
 class CliProcessTests(unittest.TestCase):

@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 from .backend import SvnClient, discover_svn
 from .branches_ui import BranchUiMixin
+from .connection_ui import ConnectionUiMixin
 from .conflict_dialogs import (ConflictConfirmDialog, ConflictInspectDialog,
                                can_keep_working, display_path, inspection_text,
                                is_conflicted)
@@ -520,7 +521,7 @@ class WorkspaceDiscoveryDialog(tk.Toplevel):
         self.destroy()
 
 
-class SvnDesk(BranchUiMixin, HistoryUiMixin, OperationUiMixin, tk.Tk):
+class SvnDesk(ConnectionUiMixin, BranchUiMixin, HistoryUiMixin, OperationUiMixin, tk.Tk):
     def __init__(self, working_copy=None, *, demo=False):
         enable_high_dpi()
         super().__init__()
@@ -621,6 +622,7 @@ class SvnDesk(BranchUiMixin, HistoryUiMixin, OperationUiMixin, tk.Tk):
         file_menu.add_command(label="新建工作区 / 检出…", command=self.create_workspace)
         file_menu.add_command(label="扫描含多个副本的父目录…", command=self.discover_workspaces)
         file_menu.add_command(label="设置 SVN 程序…", command=self.configure_svn)
+        file_menu.add_command(label="连接诊断（本地 / 显式 URL）…", command=self.show_connection_diagnostics)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self._close)
         menu.add_cascade(label="文件", menu=file_menu)
@@ -2153,7 +2155,7 @@ class SvnDesk(BranchUiMixin, HistoryUiMixin, OperationUiMixin, tk.Tk):
                 messagebox.showinfo("已保存", "SVN 程序路径已保存。重新打开工作副本后生效。", parent=self)
 
     def show_help(self):
-        self._show_preview("使用说明", "1. 安装 SVN 命令行工具，打开已有工作副本，或通过“新建 / 检出”创建副本。已验证工作区会记住名称和路径，下次启动恢复。\n2. 点击“+ 新建变更列表”，输入名称、选择已版本化文件，点击“创建并归组”。\n3. 也可先按 Ctrl / Shift 多选文件，再点击“移动到列表”。已有列表可从下拉框选择。\n4. 选中分组标题，点击“提交所选列表”，核对全部成员并填写提交说明。筛选隐藏的成员也会列入确认。\n5. “移回未分组”只清除分组标签，不还原、不删除文件；未版本化文件请先添加。\n6. 双击文件查看差异，双击分组查看全部成员。文件操作只作用于明确选中的文件行。\n7. 重要修改可以创建本地 Shelf。创建只备份，不清空修改。恢复前请备份现有工作。\n8. “工作副本文件”页右键普通已版本化文件，可移动 / 重命名、保留历史复制或删除。移动 / 复制限一个文件；删除要求内容和属性均干净。全部需预检和明确确认。\n9. “仓库锁”先只读查询服务器，核对所有者后明确选择加锁 / 解锁。只释放本工作副本持有的锁，不抢锁或破锁。\n10. 冲突文件可使用“检查冲突”：当前只支持人工处理后的纯内容冲突 working，保留当前文件，移除冲突记录与辅助文件；不自动合并，也不证明内容正确。属性、混合、树冲突请用可信 SVN 工具处理。\n11. 一个父目录含多个副本时，可在文件菜单扫描并逐个验证登记。每次仍只对当前独立副本操作，不跨仓库提交。\n12. 选中一个已版本化文件后，可用“文件历史”按路径分页；历史页也能明确查询目录范围。双击修订打开当前路径的前后版本比较。“比较版本”明确选择 BASE / HEAD / 数字，右侧可选 WORKING，并标出预览截断。\n13. “分支与合并”菜单仅支持整个干净工作副本的固定修订切换或明确向前范围合并，需完整预检和二次确认。切换没有 SVN dry-run；合并预演不保证最终无冲突，不会自动提交。分支 / 标签只能生成只读计划，不能创建。\n\nSVN 与 P4V 的差别\n• SVN 变更列表仅在本机工作副本保存；不是服务器上的编号提交单。\n• 列表仅支持文件，每个文件只能归属一个列表；目录无法归组。\n• SVN 不保存空列表，移走最后一个文件后列表自动消失。\n• 提交成功后，已提交文件的标签默认移除。干净的已归组文件仍可显示，但不计入待提交修改数。\n• 分组不保存文件内容，也不锁定文件；Shelf 才是本地内容备份。\n• 新增目录等依赖无法只通过文件分组隔离；SVN 拒绝时不会自动扩大提交范围。\n\n快捷键：Ctrl+O 打开工作副本 · F5 刷新 · Ctrl+D 查看选中差异\n\n安全提示\n• 还原会丢弃未提交更改，删除 Shelf 会永久删除备份。\n• 本地 Shelf 不是服务器备份；不会同步到其他电脑。\n• SVN 身份验证由安装的 SVN 客户端处理，本程序不保存密码。\n• 本界面没有通用 SVN 命令输入框。未覆盖的命令请使用外部 SVN 客户端。")
+        self._show_preview("使用说明", "1. 安装 SVN 命令行工具，打开已有工作副本，或通过“新建 / 检出”创建副本。已验证工作区会记住名称和路径，下次启动恢复。\n2. 点击“+ 新建变更列表”，输入名称、选择已版本化文件，点击“创建并归组”。\n3. 也可先按 Ctrl / Shift 多选文件，再点击“移动到列表”。已有列表可从下拉框选择。\n4. 选中分组标题，点击“提交所选列表”，核对全部成员并填写提交说明。筛选隐藏的成员也会列入确认。\n5. “移回未分组”只清除分组标签，不还原、不删除文件；未版本化文件请先添加。\n6. 双击文件查看差异，双击分组查看全部成员。文件操作只作用于明确选中的文件行。\n7. 重要修改可以创建本地 Shelf。创建只备份，不清空修改。恢复前请备份现有工作。\n8. “工作副本文件”页右键普通已版本化文件，可移动 / 重命名、保留历史复制或删除。移动 / 复制限一个文件；删除要求内容和属性均干净。全部需预检和明确确认。\n9. “仓库锁”先只读查询服务器，核对所有者后明确选择加锁 / 解锁。只释放本工作副本持有的锁，不抢锁或破锁。\n10. 冲突文件可使用“检查冲突”：当前只支持人工处理后的纯内容冲突 working，保留当前文件，移除冲突记录与辅助文件；不自动合并，也不证明内容正确。属性、混合、树冲突请用可信 SVN 工具处理。\n11. 一个父目录含多个副本时，可在文件菜单扫描并逐个验证登记。每次仍只对当前独立副本操作，不跨仓库提交。\n12. 选中一个已版本化文件后，可用“文件历史”按路径分页；历史页也能明确查询目录范围。双击修订打开当前路径的前后版本比较。“比较版本”明确选择 BASE / HEAD / 数字，右侧可选 WORKING，并标出预览截断。\n13. “分支与合并”菜单仅支持整个干净工作副本的固定修订切换或明确向前范围合并，需完整预检和二次确认。切换没有 SVN dry-run；合并预演不保证最终无冲突，不会自动提交。分支 / 标签只能生成只读计划，不能创建。\n14. 文件菜单的“连接诊断”默认不运行检查；本地检查不会连接服务器。远程 URL 需另行填写、勾选同意和核对，不保存 URL 或认证信息，不绕过证书错误。\n\nSVN 与 P4V 的差别\n• SVN 变更列表仅在本机工作副本保存；不是服务器上的编号提交单。\n• 列表仅支持文件，每个文件只能归属一个列表；目录无法归组。\n• SVN 不保存空列表，移走最后一个文件后列表自动消失。\n• 提交成功后，已提交文件的标签默认移除。干净的已归组文件仍可显示，但不计入待提交修改数。\n• 分组不保存文件内容，也不锁定文件；Shelf 才是本地内容备份。\n• 新增目录等依赖无法只通过文件分组隔离；SVN 拒绝时不会自动扩大提交范围。\n\n快捷键：Ctrl+O 打开工作副本 · F5 刷新 · Ctrl+D 查看选中差异\n\n安全提示\n• 还原会丢弃未提交更改，删除 Shelf 会永久删除备份。\n• 本地 Shelf 不是服务器备份；不会同步到其他电脑。\n• SVN 身份验证由安装的 SVN 客户端处理，本程序不保存密码。\n• 本界面没有通用 SVN 命令输入框。未覆盖的命令请使用外部 SVN 客户端。")
 
     def _load_demo(self):
         self._workspace_state_unknown = False

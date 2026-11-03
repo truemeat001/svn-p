@@ -500,7 +500,15 @@ class BranchIntegrationTests(unittest.TestCase):
         self.assertEqual(result.outcome, "needs_review")
         self.assertEqual((self.wc / "file.txt").read_text(), "branch change\n")
         self.assertEqual(self.client.info()["revision"], 4)
-        self.assertEqual(self.client.log(limit=1)[0].revision, 4)
+        # r4 changed the branch, not trunk: path-scoped trunk history still ends
+        # at r2. Check repository HEAD to prove the local merge did not commit.
+        self.assertEqual(self.run_svn("info", "--show-item", "revision", self.base).stdout.strip(), "4")
+        self.assertEqual(self.client.log(limit=1)[0].revision, 2)
+        status = {entry.path: entry for entry in self.client.status()}
+        self.assertEqual(status["file.txt"].item, "modified")
+        self.assertEqual(status["."].props, "modified")
+        self.assertEqual(self.run_svn("propget", "--strict", "svn:mergeinfo", str(self.wc)).stdout.strip(),
+                         "/branches/feature:4")
 
     def test_copy_preview_checks_existing_parent_without_server_write(self):
         plan = self.manager.preflight_copy(self.base + "/trunk", self.base + "/tags/v1", revision=2, kind="tag", message="v1")

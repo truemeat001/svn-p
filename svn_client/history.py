@@ -294,7 +294,15 @@ class HistoryManager:
         revision = left if right == "WORKING" else left + ":" + right
         with self.client._lock:
             self._check_target(target)
-            raw = self._run(["diff", "--revision", revision, "--", target], MAX_DIFF_BYTES)
+            # Explicit old/new operands always parse peg revisions. SVN's
+            # BASE-to-WORKING shortcut instead treats an appended empty peg as
+            # part of the filename, and its Windows canonicalizer can trim a
+            # space before a literal '@'. Both operands retain the exact path.
+            # Keep operative revisions separate from peg identity so a path
+            # renamed/copied after the older revision still follows ancestry.
+            raw = self._run(["diff", "--old=" + relative + "@",
+                             "--new=" + relative + "@", "--revision", revision],
+                            MAX_DIFF_BYTES)
         text = redact_credentials(self.client._decode(raw))
         encoded = text.encode("utf-8", errors="replace")
         prefix = encoded[:max_text_bytes].decode("utf-8", errors="ignore")

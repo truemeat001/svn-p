@@ -1,6 +1,7 @@
 """Read-only GUI workflows tested without a native display or SVN process."""
 import ast
 import inspect
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -225,7 +226,7 @@ class ScopeTests(unittest.TestCase):
     def test_stale_read_error_does_not_switch_details_or_replace_address(self):
         import queue
         for preserve in (True, False):
-            app = Mock(_closing=False, root_path=Path('/current'))
+            app = Mock(_closing=False, root_path=Path(tempfile.gettempdir()) / 'current')
             app._queue = queue.Queue()
             failed = Mock()
             app._queue.put((False, ValueError('old read'), None, 'read', False, failed, preserve))
@@ -236,7 +237,7 @@ class ScopeTests(unittest.TestCase):
                 app.path_var.set.assert_not_called()
             else:
                 app.details_tabs.select.assert_called_once_with(1)
-                app.path_var.set.assert_called_once_with('/current')
+                app.path_var.set.assert_called_once_with(str(app.root_path))
 
     def test_demo_never_queries_or_shows_real_comparison(self):
         app = Harness()

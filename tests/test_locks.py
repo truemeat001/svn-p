@@ -39,7 +39,8 @@ class FakeRepository:
     def decode(self, value):
         if value.endswith("@"):
             value = value[:-1]
-        return str(Path(value))
+        # SVN XML and repository fixture keys use slash-separated paths.
+        return Path(value).as_posix()
 
     def info(self, name, remote=False):
         root = ET.Element("info")
@@ -196,6 +197,19 @@ class LockTests(unittest.TestCase):
         self.assertFalse(result.files[0].local_token_present)
         self.assertEqual(self.repo.mutations[0], ["unlock", "--", self.names[0] + "@"])
 
+    def test_lock_marks_only_its_comment_for_utf8_conversion(self):
+        comment = "中文锁定说明 🚀"
+        with patch.object(self.client, "_command_with_targets",
+                          wraps=self.client._command_with_targets) as execute:
+            result = self.manager.lock([self.names[0]], comment, confirmed=True)
+        self.assertEqual(execute.call_args.kwargs, {"_message_index": 1})
+        self.assertEqual(execute.call_args.args[0][1], "--message=" + comment)
+        self.assertEqual(result.files[0].comment, comment)
+        with patch.object(self.client, "_command_with_targets",
+                          wraps=self.client._command_with_targets) as execute:
+            self.manager.unlock([self.names[0]], confirmed=True)
+        self.assertEqual(execute.call_args.kwargs, {"_message_index": None})
+
     def test_relocked_state_with_identical_public_metadata_invalidates_plan(self):
         self.own(token="custom:first")
         plan = self.manager.preflight_unlock([self.names[0]])
@@ -343,6 +357,16 @@ class LockTests(unittest.TestCase):
                 self.manager.inspect(paths)
         self.assertEqual(self.repo.calls, [])
 
+    def test_nested_regular_file_is_inspected_without_mutation(self):
+        (self.root / "branch").mkdir()
+        self.repo.add("branch/file.txt")
+        inspected = self.manager.inspect(["branch/file.txt"])
+        self.assertEqual([item.path for item in inspected], [str(Path("branch") / "file.txt")])
+        self.assertFalse(inspected[0].locked)
+        self.assertEqual(self.repo.mutations, [])
+        self.assertTrue(any(args[-1] == self.repo.url("branch/file.txt") + "@HEAD"
+                            for args in self.repo.calls if args[0] == "info"))
+
     def test_switched_or_added_ancestor_refused(self):
         (self.root / "branch").mkdir()
         self.repo.add("branch/file.txt")
@@ -368,10 +392,12 @@ class RealLockTests(unittest.TestCase):
             client.commit("base")
             client.update()
             manager = LockManager(client)
-            plan = manager.preflight_lock([name], "binary editing")
-            result = manager.lock([name], "binary editing", confirmed=True, expected_state=plan.state_sha256)
+            comment = "中文锁定说明 🚀"
+            plan = manager.preflight_lock([name], comment)
+            result = manager.lock([name], comment, confirmed=True, expected_state=plan.state_sha256)
             self.assertTrue(result.files[0].owned_by_working_copy)
             self.assertTrue(result.files[0].owner)
+            self.assertEqual(result.files[0].comment, comment)
             plan = manager.preflight_unlock([name])
             result = manager.unlock([name], confirmed=True, expected_state=plan.state_sha256)
             self.assertFalse(result.files[0].locked)

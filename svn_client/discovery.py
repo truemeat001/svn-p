@@ -280,6 +280,14 @@ def discover_working_copies(parent: str | os.PathLike[str], *, max_depth: int = 
                                 if not entry.is_dir(follow_symlinks=False):
                                     continue
                                 entry_info = entry.stat(follow_symlinks=False)
+                                # Windows' cached DirEntry metadata sets device
+                                # and inode IDs to zero. Refresh incomplete IDs
+                                # without following links before using them for
+                                # device boundaries or queued-directory identity.
+                                if (not _unsafe(entry_info) and stat.S_ISDIR(entry_info.st_mode)
+                                        and (not entry_info.st_dev or not entry_info.st_ino)):
+                                    entry_info = (os.stat(entry.name, dir_fd=scan_target, follow_symlinks=False)
+                                                  if isinstance(scan_target, int) else os.lstat(path / entry.name))
                             except OSError:
                                 issue(path / entry.name, "entry_unavailable", "A directory entry could not be inspected.")
                                 continue

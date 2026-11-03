@@ -211,16 +211,17 @@ class SyntheticShelfManager(ShelfManager):
         command = args[0]
         self.calls[command] += 1
         if command == "info":
-            path = self._literal(args[-1])
             root = ET.Element("info")
-            entry = ET.SubElement(root, "entry", kind="dir" if path == "." else "file",
-                                  path=path, revision="1")
-            ET.SubElement(entry, "url").text = "file:///synthetic/repository" + ("" if path == "." else "/" + path)
-            repository = ET.SubElement(entry, "repository")
-            ET.SubElement(repository, "uuid").text = "synthetic-benchmark-repository"
-            wc = ET.SubElement(entry, "wc-info")
-            ET.SubElement(wc, "schedule").text = "normal"
-            ET.SubElement(wc, "depth").text = "infinity"
+            targets = [self._literal(value) for value in args[args.index("--") + 1:]]
+            for path in targets:
+                entry = ET.SubElement(root, "entry", kind="dir" if path == "." else "file",
+                                      path=path, revision="1")
+                ET.SubElement(entry, "url").text = "file:///synthetic/repository" + ("" if path == "." else "/" + path)
+                repository = ET.SubElement(entry, "repository")
+                ET.SubElement(repository, "uuid").text = "synthetic-benchmark-repository"
+                wc = ET.SubElement(entry, "wc-info")
+                ET.SubElement(wc, "schedule").text = "normal"
+                ET.SubElement(wc, "depth").text = "infinity"
             return ET.tostring(root)
         if command == "status":
             targets = [self._literal(value) for value in args[args.index("--") + 1:]]

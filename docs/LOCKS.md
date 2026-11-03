@@ -71,7 +71,7 @@ python -m svn_client.cli --workspace /wc lock release --path asset.png --expect-
 
 ## 验证与资料
 
-单元测试使用模拟 SVN XML 和临时普通文件，覆盖所有权、确认绑定、部分成功、异常、路径与令牌脱敏。CLI 测试覆盖参数确认、只读预检、哈希绑定、JSON 结果与输出失败后不重试。真实集成测试只创建临时 `file://` 仓库；没有 `svn`/`svnadmin` 时跳过。当前环境未验证真实 SVN 服务或原生 Windows 执行。GUI 接入由对应模块单独完成。
+单元测试使用模拟 SVN XML 和临时普通文件，覆盖所有权、确认绑定、部分成功、异常、路径与令牌脱敏。CLI 测试覆盖参数确认、只读预检、哈希绑定、JSON 结果与输出失败后不重试。真实集成测试只创建临时 `file://` 仓库；没有 `svn`/`svnadmin` 时跳过。当前环境未验证真实 SVN 服务或原生 Windows 执行。原生 GUI 已接入“文件与锁”菜单、文件右键和“仓库锁…”按钮，具体选择、检查与确认步骤见 [文件操作与仓库锁 GUI](FILE_OPERATIONS_GUI.md#仓库文件锁)。
 
 - [SVN 文件锁及令牌语义](https://svnbook.red-bean.com/en/1.7/svn.advanced.locking.html)
 - [svn lock](https://www.visualsvn.com/support/svnbook/ref/svn/c/lock/)

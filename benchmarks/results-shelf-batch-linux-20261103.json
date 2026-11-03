@@ -1,0 +1,612 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-11-03T10:47:53.788913+00:00",
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "cpu_count": 9,
+    "processor": ""
+  },
+  "parameters": {
+    "status_sizes": [
+      1000,
+      10000,
+      100000
+    ],
+    "scan_files": 10000,
+    "small_files": 100,
+    "large_mib": 16,
+    "repeats": 3
+  },
+  "source_sha256": {
+    "svn_client/backend.py": "9c00352ec453744df82b4997480b96f08375d368e7086553999973b12bb65ea2",
+    "svn_client/branches.py": "885241ca725b6b682ae500dabb15b0cfa6221e49f1056d67656cd46ea692f88d",
+    "svn_client/branches_dialogs.py": "225388d4dc13ab00e5149b3afd8c710f92b257b5183f14f56383481d323ae9ad",
+    "svn_client/branches_ui.py": "53eec4af89b0ee834531ca594266460f73601fec4c4d15400585760dd24526bf",
+    "svn_client/cli.py": "a9c37339e449029f60e4aa8c1cab79606c7bc7150711ed18ce8e881c14b3f473",
+    "svn_client/conflict_dialogs.py": "7e379cc5b2ab5ee4d9b3e65db05ecf47b0092d145d9231e8268631a5da805e5f",
+    "svn_client/conflicts.py": "40beb09d72ebcdbd748e06554859ecc8607c86d08ef7b38e30cda7e1e05dbac0",
+    "svn_client/connection.py": "96276e4200d722a9850d9502374b65fed72c51ffa180d4a8478a780636b8ca06",
+    "svn_client/discovery.py": "fbb2b0867a0370e29426c3f158592628e0e9bb540a2000719bd902d1cd09fb0c",
+    "svn_client/display.py": "fe32d2997364a6880de46b4fd035b5a2553592677994e7219e5f973ebe308910",
+    "svn_client/fileops.py": "baf53906d2369d246f08c3a13fb7947a8c095f3b8a2a968ef394e227d5723be1",
+    "svn_client/fileops_dialogs.py": "972874312d8590555a660ffd708ddf9da300bb0201bbe5ae45dde9e320b5d943",
+    "svn_client/history.py": "3f009fe7cee53bc88581526158880f48ed86058d88a864aeec30df50c3b3dff3",
+    "svn_client/history_dialogs.py": "d04e78a13840a13d4704504565a6f11dfba175a3b98c1f2d07914585a68883c1",
+    "svn_client/history_ui.py": "d3851c469230a452ce47327c3d0d5fcd7c71264cd6304bea1e1647bdcff84592",
+    "svn_client/locks.py": "e8aad64c83fe250dbf4dafe0d9aefa113355fc3c17f3ead573d1095ccdb5931c",
+    "svn_client/locks_dialogs.py": "117dc6480daf97f004c6c29881d0db04ec42b10bc352f8f51e7621a4adb41cea",
+    "svn_client/operation_ui.py": "9dc16cf265e305c44dc4ea9be07e039054363806ab179bed7386c1919c62e6e7",
+    "svn_client/shelves.py": "19e22abf836921557464a1d03aea63decc22f5a5aeff13c6798335af982075d6",
+    "svn_client/status_stream.py": "b8c5f3ecb2628966d90cb362660b5fd3c5569e00c03edeee7eb370b099378521",
+    "svn_client/theme.py": "7d759a270d2349ec662bcd4aa121f67e4759200240ae6bc1753b333f1ec9c938",
+    "svn_client/ui.py": "2b0f85762989faf063f3d590fd1277aaa9519f17aa8c42d3f6cc9d76f0496132",
+    "svn_client/workspaces.py": "d6523ab8759194184d719aa6cf15e3c9e90357dfbeebe37bbec5136afe2efad7"
+  },
+  "exclusions": [
+    "No real SVN executable, subprocess launch, repository, authentication or network operation.",
+    "No GUI rendering, Windows-native behavior, installer, shell integration or frame timing.",
+    "Memory is separate-run Python tracemalloc, not total RSS/working set or child-process memory.",
+    "Fixtures, XML and existing record inputs are prepared outside measured memory/time windows.",
+    "Warmups and repeated runs warm filesystem caches; these are not cold-disk throughput tests.",
+    "Shelf SVN metadata is simulated; BASE is literal fixture content without EOL/keyword translation.",
+    "Shelf data I/O, compression, hashing, manifests, preflight and restore are production code.",
+    "Large shelf cases are unversioned. They do not measure whole-file svn cat BASE buffering.",
+    "A shelf list measurement contains one shelf, not an accumulated large shelf collection.",
+    "local_files is a retained helper/comparison; current UI uses lazy directory_entries, not this full recursive scan.",
+    "Refresh candidate scan uses 80% clean/20% modified existing files; its SVN response is simulated."
+  ],
+  "status": [
+    {
+      "entries": 1000,
+      "xml_utf8_bytes": 181931,
+      "status_counts": {
+        "normal": 800,
+        "modified": 120,
+        "added": 30,
+        "deleted": 20,
+        "missing": 10,
+        "conflicted": 10,
+        "unversioned": 10
+      },
+      "parse": {
+        "samples_ms": [
+          12.323,
+          11.616,
+          11.454
+        ],
+        "median_ms": 11.616,
+        "min_ms": 11.454,
+        "max_ms": 12.323,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.273,
+        "retained_traced_mib": 0.58
+      },
+      "group_unfiltered": {
+        "samples_ms": [
+          0.247,
+          0.222,
+          0.206
+        ],
+        "median_ms": 0.222,
+        "min_ms": 0.206,
+        "max_ms": 0.247,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.028,
+        "retained_traced_mib": 0.007
+      },
+      "group_filtered": {
+        "samples_ms": [
+          0.322,
+          0.328,
+          0.329
+        ],
+        "median_ms": 0.328,
+        "min_ms": 0.322,
+        "max_ms": 0.329,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.028,
+        "retained_traced_mib": 0.005
+      }
+    },
+    {
+      "entries": 10000,
+      "xml_utf8_bytes": 1816943,
+      "status_counts": {
+        "normal": 8000,
+        "modified": 1200,
+        "added": 300,
+        "deleted": 200,
+        "missing": 100,
+        "conflicted": 100,
+        "unversioned": 100
+      },
+      "parse": {
+        "samples_ms": [
+          122.938,
+          125.635,
+          137.412
+        ],
+        "median_ms": 125.635,
+        "min_ms": 122.938,
+        "max_ms": 137.412,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 6.38,
+        "retained_traced_mib": 5.608
+      },
+      "group_unfiltered": {
+        "samples_ms": [
+          2.151,
+          1.954,
+          2.115
+        ],
+        "median_ms": 2.115,
+        "min_ms": 1.954,
+        "max_ms": 2.151,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.264,
+        "retained_traced_mib": 0.06
+      },
+      "group_filtered": {
+        "samples_ms": [
+          3.475,
+          3.715,
+          5.502
+        ],
+        "median_ms": 3.715,
+        "min_ms": 3.475,
+        "max_ms": 5.502,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.264,
+        "retained_traced_mib": 0.031
+      }
+    },
+    {
+      "entries": 100000,
+      "xml_utf8_bytes": 18167071,
+      "status_counts": {
+        "normal": 80000,
+        "modified": 12000,
+        "added": 3000,
+        "deleted": 2000,
+        "missing": 1000,
+        "conflicted": 1000,
+        "unversioned": 1000
+      },
+      "parse": {
+        "samples_ms": [
+          1471.473,
+          1647.692,
+          1333.562
+        ],
+        "median_ms": 1471.473,
+        "min_ms": 1333.562,
+        "max_ms": 1647.692,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 47.433,
+        "retained_traced_mib": 46.667
+      },
+      "group_unfiltered": {
+        "samples_ms": [
+          30.673,
+          27.023,
+          31.764
+        ],
+        "median_ms": 30.673,
+        "min_ms": 27.023,
+        "max_ms": 31.764,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.641,
+        "retained_traced_mib": 0.595
+      },
+      "group_filtered": {
+        "samples_ms": [
+          47.325,
+          49.775,
+          51.536
+        ],
+        "median_ms": 49.775,
+        "min_ms": 47.325,
+        "max_ms": 51.536,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.641,
+        "retained_traced_mib": 0.29
+      }
+    }
+  ],
+  "scan": {
+    "files": 10000,
+    "file_bytes": 24,
+    "files_per_directory": 1000,
+    "excluded_sentinels_verified": true,
+    "full_local_files": {
+      "samples_ms": [
+        310.111,
+        290.857,
+        280.994
+      ],
+      "median_ms": 290.857,
+      "min_ms": 280.994,
+      "max_ms": 310.111,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 1.728,
+      "retained_traced_mib": 1.65
+    },
+    "capped_local_files": {
+      "samples_ms": [
+        81.257,
+        85.321,
+        109.674
+      ],
+      "median_ms": 85.321,
+      "min_ms": 81.257,
+      "max_ms": 109.674,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 0.578,
+      "retained_traced_mib": 0.499
+    },
+    "one_directory": {
+      "samples_ms": [
+        25.137,
+        26.685,
+        26.331
+      ],
+      "median_ms": 26.331,
+      "min_ms": 25.137,
+      "max_ms": 26.685,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 0.307,
+      "retained_traced_mib": 0.23
+    },
+    "capped_returned": 3000,
+    "capped_truncated": true,
+    "refresh_status_and_candidates": {
+      "samples_ms": [
+        174.391,
+        171.989,
+        171.217
+      ],
+      "median_ms": 171.989,
+      "min_ms": 171.217,
+      "max_ms": 174.391,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 4.962,
+      "retained_traced_mib": 4.879
+    },
+    "refresh_pending": 2000,
+    "refresh_candidates": 10000
+  },
+  "shelves": [
+    {
+      "name": "small-modified",
+      "files": 100,
+      "bytes_per_file": 4096,
+      "input_bytes": 409600,
+      "stored_blob_bytes": 6040,
+      "blob_encodings": {
+        "zlib": 100
+      },
+      "versioned": true,
+      "compressible": true,
+      "restore_hashes_verified": true,
+      "create_preflight": {
+        "samples_ms": [
+          61.75,
+          63.669,
+          58.172
+        ],
+        "median_ms": 61.75,
+        "min_ms": 58.172,
+        "max_ms": 63.669,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.278,
+        "retained_traced_mib": 0.165
+      },
+      "create": {
+        "samples_ms": [
+          87.22,
+          82.268,
+          77.694
+        ],
+        "median_ms": 82.268,
+        "min_ms": 77.694,
+        "max_ms": 87.22,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.548,
+        "retained_traced_mib": 0.042
+      },
+      "list_one_shelf": {
+        "samples_ms": [
+          0.995,
+          0.884,
+          1.117
+        ],
+        "median_ms": 0.995,
+        "min_ms": 0.884,
+        "max_ms": 1.117,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.216,
+        "retained_traced_mib": 0.014
+      },
+      "restore_preflight": {
+        "samples_ms": [
+          75.189,
+          76.901,
+          71.511
+        ],
+        "median_ms": 75.189,
+        "min_ms": 71.511,
+        "max_ms": 76.901,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.288,
+        "retained_traced_mib": 0.18
+      },
+      "restore": {
+        "samples_ms": [
+          101.578,
+          96.084,
+          97.583
+        ],
+        "median_ms": 97.583,
+        "min_ms": 96.084,
+        "max_ms": 101.578,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.206,
+        "retained_traced_mib": 0.964
+      },
+      "simulated_svn_calls": {
+        "create_preflight": {
+          "info": 2,
+          "status": 2,
+          "proplist": 3,
+          "cat": 100,
+          "export": 100
+        },
+        "create": {
+          "info": 2,
+          "status": 2,
+          "proplist": 3,
+          "cat": 100,
+          "export": 100
+        },
+        "restore_preflight": {
+          "info": 101,
+          "status": 1,
+          "proplist": 200,
+          "cat": 100,
+          "export": 100
+        },
+        "restore": {
+          "info": 101,
+          "status": 1,
+          "proplist": 300,
+          "cat": 100,
+          "export": 100
+        }
+      }
+    },
+    {
+      "name": "large-compressible",
+      "files": 1,
+      "bytes_per_file": 16777216,
+      "input_bytes": 16777216,
+      "stored_blob_bytes": 40786,
+      "blob_encodings": {
+        "zlib": 1
+      },
+      "versioned": false,
+      "compressible": true,
+      "restore_hashes_verified": true,
+      "create_preflight": {
+        "samples_ms": [
+          27.279,
+          26.298,
+          25.482
+        ],
+        "median_ms": 26.298,
+        "min_ms": 25.482,
+        "max_ms": 27.279,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.016,
+        "retained_traced_mib": 0.009
+      },
+      "create": {
+        "samples_ms": [
+          90.023,
+          90.789,
+          89.909
+        ],
+        "median_ms": 90.023,
+        "min_ms": 89.909,
+        "max_ms": 90.789,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.174,
+        "retained_traced_mib": 0.013
+      },
+      "list_one_shelf": {
+        "samples_ms": [
+          0.147,
+          0.107,
+          0.102
+        ],
+        "median_ms": 0.107,
+        "min_ms": 0.102,
+        "max_ms": 0.147,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.012,
+        "retained_traced_mib": 0.003
+      },
+      "restore_preflight": {
+        "samples_ms": [
+          20.955,
+          21.571,
+          20.95
+        ],
+        "median_ms": 20.955,
+        "min_ms": 20.95,
+        "max_ms": 21.571,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.162,
+        "retained_traced_mib": 0.008
+      },
+      "restore": {
+        "samples_ms": [
+          45.405,
+          60.264,
+          62.562
+        ],
+        "median_ms": 60.264,
+        "min_ms": 45.405,
+        "max_ms": 62.562,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.171,
+        "retained_traced_mib": 0.008
+      },
+      "simulated_svn_calls": {
+        "create_preflight": {
+          "info": 1,
+          "status": 2
+        },
+        "create": {
+          "info": 1,
+          "status": 2
+        },
+        "restore_preflight": {
+          "info": 1,
+          "status": 1
+        },
+        "restore": {
+          "info": 1,
+          "status": 1
+        }
+      }
+    },
+    {
+      "name": "large-high-entropy",
+      "files": 1,
+      "bytes_per_file": 16777216,
+      "input_bytes": 16777216,
+      "stored_blob_bytes": 16777216,
+      "blob_encodings": {
+        "raw": 1
+      },
+      "versioned": false,
+      "compressible": false,
+      "restore_hashes_verified": true,
+      "create_preflight": {
+        "samples_ms": [
+          23.841,
+          23.82,
+          23.978
+        ],
+        "median_ms": 23.841,
+        "min_ms": 23.82,
+        "max_ms": 23.978,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.017,
+        "retained_traced_mib": 0.009
+      },
+      "create": {
+        "samples_ms": [
+          384.337,
+          384.841,
+          389.343
+        ],
+        "median_ms": 384.841,
+        "min_ms": 384.337,
+        "max_ms": 389.343,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.63,
+        "retained_traced_mib": 0.013
+      },
+      "list_one_shelf": {
+        "samples_ms": [
+          0.193,
+          0.203,
+          0.132
+        ],
+        "median_ms": 0.193,
+        "min_ms": 0.132,
+        "max_ms": 0.203,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.012,
+        "retained_traced_mib": 0.003
+      },
+      "restore_preflight": {
+        "samples_ms": [
+          13.35,
+          13.828,
+          14.635
+        ],
+        "median_ms": 13.828,
+        "min_ms": 13.35,
+        "max_ms": 14.635,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.015,
+        "retained_traced_mib": 0.008
+      },
+      "restore": {
+        "samples_ms": [
+          31.364,
+          31.006,
+          28.283
+        ],
+        "median_ms": 31.006,
+        "min_ms": 28.283,
+        "max_ms": 31.364,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.023,
+        "retained_traced_mib": 0.007
+      },
+      "simulated_svn_calls": {
+        "create_preflight": {
+          "info": 1,
+          "status": 2
+        },
+        "create": {
+          "info": 1,
+          "status": 2
+        },
+        "restore_preflight": {
+          "info": 1,
+          "status": 1
+        },
+        "restore": {
+          "info": 1,
+          "status": 1
+        }
+      }
+    }
+  ],
+  "source_changed_during_run": false,
+  "finished_utc": "2026-11-03T10:48:26.921954+00:00"
+}

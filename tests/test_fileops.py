@@ -34,6 +34,7 @@ class FakeClient:
         self.fail_command = False
 
     def add(self, path, contents=b"original\n", *, item="normal", props=None):
+        path = str(Path(path))
         target = self.working_copy / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(contents)
@@ -44,7 +45,7 @@ class FakeClient:
         self.bases[path] = contents
 
     def info(self, path=None):
-        path = path or "."
+        path = str(Path(path or "."))
         info = {"path": path, "kind": "dir" if (self.working_copy / path).is_dir() else "file",
                 "revision": 7, "url": "file:///repo/trunk" + ("/" + quote(Path(path).as_posix(), safe="/") if path != "." else ""),
                 "wc_root": str(self.working_copy), "repository_uuid": "uuid-1", "schedule": "normal"}
@@ -53,7 +54,7 @@ class FakeClient:
 
     @staticmethod
     def target(value):
-        return value[:-1] if "@" in value and value.endswith("@") else value
+        return str(Path(value[:-1] if "@" in value and value.endswith("@") else value))
 
     def _xml(self, args):
         self.calls.append(tuple(args))
@@ -226,6 +227,18 @@ class FileOperationTests(unittest.TestCase):
 
     def test_absolute_in_root_source_supported(self):
         self.assertEqual(self.manager.preflight_copy(self.root / "a.txt", self.root / "b.txt").paths, ("a.txt",))
+
+    def test_nonportable_components_rejected_before_abspath_normalization(self):
+        for path in ("trailing.", "trailing ", "folder./a", ".svn/../a.txt"):
+            with self.subTest(path=path), patch("svn_client.fileops.os.path.abspath") as normalize:
+                with self.assertRaises(FileOperationError):
+                    self.manager._path(path)
+                normalize.assert_not_called()
+
+    def test_nested_fake_source_uses_platform_path_keys(self):
+        self.client.add("folder/a.txt")
+        plan = self.manager.preflight_copy("folder/a.txt", "b.txt")
+        self.assertEqual(plan.paths, (str(Path("folder/a.txt")),))
 
     def test_symlink_source_destination_and_ancestor_refused(self):
         try:
@@ -512,7 +525,7 @@ class FileOperationIntegrationTests(unittest.TestCase):
 
     def svn(self, *args):
         return subprocess.run(["svn", args[0], "--non-interactive", "--no-auth-cache", *args[1:]], cwd=self.wc,
-                              check=True, capture_output=True, text=True)
+                              check=True, capture_output=True, text=True, encoding="utf-8")
 
     def test_clean_delete_is_pending_only(self):
         plan = self.manager.preflight_delete(["a.txt"])

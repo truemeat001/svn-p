@@ -120,6 +120,42 @@ Do not edit, update, commit, or run another SVN client concurrently with restora
 The UI serializes its jobs, and managers constructed with the same `SvnClient`
 reuse its lock, but another process or editor cannot be locked out reliably.
 
+## Bounded metadata batches
+
+Creation and creation preflight read selected targets' `svn info`, working
+properties and BASE properties in bounded batches instead of launching one
+metadata command per file. Each command uses **explicit targets and `--depth
+empty`**, at most 128 targets and a conservative 12,000-byte target-argument
+budget. Longer selections are split without dropping entries or broadening to a
+recursive query. Paths are checked for traversal, redirected ancestors and nested
+working copies before the command. Every target still has an individual trailing
+`@` peg-escape, after `--`.
+
+XML entries are associated by normalized local path, never by response order.
+Info must return every requested target exactly once. Property output rejects
+unexpected targets and duplicate entries/names. SVN deliberately omits targets
+with no properties, so missing property entries mean an empty map **only after
+the complete command exits successfully**. Even well-formed partial XML from a
+nonzero exit is rejected. These semantics were checked against the
+[Apache SVN 1.14 proplist CLI](https://github.com/apache/subversion/blob/1.14.x/subversion/svn/proplist-cmd.c#L236-L306)
+and [local BASE-property implementation](https://github.com/apache/subversion/blob/1.14.x/subversion/libsvn_client/prop_commands.c#L1257-L1411).
+
+No metadata persists across operations. A fresh working-property batch is read
+after source hashing and compared with the capture snapshot, even if SVN status
+still says `modified`. Existing repeated status, source-byte, mode, unversioned
+tree, per-file pristine `cat`, and translated `export -r BASE` checks remain. The
+restoration algorithm still performs its own per-path checks; it does not trust a
+creation snapshot or preflight result.
+
+The deterministic 100-file regression compares the previous one-target-per-command
+strategy with batching while checking identical manifests and restored bytes and
+binary properties. Creation uses **207 simulated SVN calls instead of 603**:
+info 101 → 2, properties 300 → 3, status 2 → 2, pristine cat 100 → 100, translated
+export 100 → 100. This is 65.7% fewer command invocations, **not a measured 65.7%
+runtime improvement**. Long paths or more than 128 targets require more batches.
+Preflight and actual creation both reread everything; doing both still incurs two
+complete checks. Native SVN/Windows timings remain unverified in this environment.
+
 ## Python API
 
 ```python

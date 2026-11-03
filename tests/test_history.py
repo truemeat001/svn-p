@@ -42,7 +42,7 @@ class HistoryTests(unittest.TestCase):
         root = ET.Element("info")
         entry = ET.SubElement(root, "entry", kind="dir" if target == "." else "file")
         relative = target[:-1] if "@" in target else target
-        ET.SubElement(entry, "url").text = "https://example.test/repo" + ("/" + quote(relative) if relative != "." else "")
+        ET.SubElement(entry, "url").text = "https://example.test/repo" + ("/" + quote(Path(relative).as_posix()) if relative != "." else "")
         repository = ET.SubElement(entry, "repository")
         ET.SubElement(repository, "uuid").text = "test-uuid"
         info = ET.SubElement(entry, "wc-info")
@@ -102,7 +102,7 @@ class HistoryTests(unittest.TestCase):
                         result = self.manager.compare("中文 @.txt", from_revision=left, to_revision=right)
                     expected = left if right == "WORKING" else left + ":" + right
                     self.assertEqual(run.call_args.args,
-                                     (["diff", "--revision", expected, "--", "中文 @.txt@"], MAX_DIFF_BYTES))
+                                     (["diff", "--old=中文 @.txt@", "--new=中文 @.txt@", "--revision", expected], MAX_DIFF_BYTES))
                     self.assertEqual(result.path, "中文 @.txt")
                     self.assertFalse(result.binary_payloads_included)
 
@@ -110,7 +110,7 @@ class HistoryTests(unittest.TestCase):
         for target, escaped in (("--password", "--password"), ("ends@", "ends@@"), ("name@4", "name@4@")):
             with self.responses(INFO, b"") as run:
                 self.manager.compare(target)
-            self.assertEqual(run.call_args.args[0][-2:], ["--", escaped])
+            self.assertEqual(run.call_args.args[0][1:3], ["--old=" + target + "@", "--new=" + target + "@"])
 
     def test_path_and_revision_validation_precedes_subprocess(self):
         with patch.object(self.manager, "_run") as run:
@@ -341,6 +341,27 @@ class HistoryCliTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("svn") and shutil.which("svnadmin"), "svn and svnadmin unavailable")
 class RealHistoryTests(unittest.TestCase):
+    def test_comparison_keeps_current_path_peg_across_a_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, workspace = root / "repo", root / "wc"
+            subprocess.run(["svnadmin", "create", str(repository)], check=True, capture_output=True)
+            subprocess.run(["svn", "checkout", repository.as_uri(), str(workspace)], check=True, capture_output=True)
+            def svn(*args):
+                return subprocess.run(["svn", *args], cwd=workspace, check=True, capture_output=True).stdout
+            (workspace / "old.txt").write_bytes(b"before\n")
+            svn("add", "old.txt")
+            svn("commit", "-m", "initial")
+            svn("move", "old.txt", "new.txt")
+            (workspace / "new.txt").write_bytes(b"after\n")
+            svn("commit", "-m", "rename")
+            manager = HistoryManager(SvnClient(workspace))
+            comparison = manager.compare("new.txt", from_revision="1", to_revision="HEAD")
+            self.assertIn("-before", comparison.diff.text)
+            self.assertIn("+after", comparison.diff.text)
+            self.assertEqual(comparison.diff.text,
+                             SvnClient._decode(svn("diff", "--internal-diff", "-r", "1:HEAD", "--", "new.txt")))
+
     def test_path_scope_revisions_working_and_no_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -370,7 +391,8 @@ class RealHistoryTests(unittest.TestCase):
             self.assertIn("+two", manager.compare(target.name, from_revision="1", to_revision="HEAD").diff.text)
             self.assertIn("+one", manager.compare(target.name, from_revision="HEAD", to_revision="1").diff.text)
             self.assertEqual(manager.compare(target.name, from_revision="BASE", to_revision="HEAD").diff.text, "")
-            self.assertEqual(svn("status", "--xml"), before_status)
+            self.assertEqual(ET.canonicalize(svn("status", "--xml").decode("utf-8")),
+                             ET.canonicalize(before_status.decode("utf-8")))
             self.assertEqual(target.read_bytes(), before_content)
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -122,7 +123,8 @@ class CheckoutOperationTests(unittest.TestCase):
         with patch("svn_client.backend.subprocess.run", side_effect=self.runner) as run:
             result = checkout_working_copy("https://example.test/repo@17", self.target, timeout=301)
         args, kwargs = run.call_args_list[0]
-        self.assertEqual(args[0], ["/trusted/svn", "checkout", "--non-interactive", "--no-auth-cache", "--ignore-externals", "--", "https://example.test/repo@17", str(self.target)])
+        self.assertEqual(args[0], ["/trusted/svn", "checkout", "--non-interactive", "--no-auth-cache", "--ignore-externals", "--", "https://example.test/repo@17", "."])
+        self.assertEqual(kwargs["cwd"], self.target)
         self.assertNotIn("--force", args[0])
         self.assertIs(kwargs["shell"], False)
         self.assertEqual(kwargs["timeout"], 301)
@@ -138,7 +140,7 @@ class CheckoutOperationTests(unittest.TestCase):
 
     def test_timeout_retains_partial_destination_and_never_retries(self):
         def timeout(args, **kwargs):
-            self.target.mkdir()
+            self.target.mkdir(exist_ok=True)
             (self.target / "partial.txt").write_text("partial")
             raise subprocess.TimeoutExpired(args, 1)
         with patch("svn_client.backend.subprocess.run", side_effect=timeout) as run:
@@ -149,7 +151,7 @@ class CheckoutOperationTests(unittest.TestCase):
 
     def test_error_retains_files_and_redacts_credentials(self):
         def failure(args, **kwargs):
-            self.target.mkdir()
+            self.target.mkdir(exist_ok=True)
             (self.target / "partial.txt").write_text("partial")
             return subprocess.CompletedProcess(args, 1, b"", b"https://u:SECRET@host failed")
         with patch("svn_client.backend.subprocess.run", side_effect=failure) as run:
@@ -170,6 +172,22 @@ class CheckoutOperationTests(unittest.TestCase):
                 checkout_working_copy("https://example.test/repo", self.target)
         self.assertTrue((self.target / "retained.txt").exists())
 
+    def test_replaced_destination_is_uncertain_and_both_directories_are_retained(self):
+        original = self.root / "original-destination"
+        def runner(args, **kwargs):
+            result = self.runner(args, **kwargs)
+            if args[1] == "checkout":
+                self.target.rename(original)
+                self.target.mkdir()
+                (self.target / "unrelated.txt").write_text("keep")
+            return result
+        with patch("svn_client.backend.subprocess.run", side_effect=runner) as run:
+            with self.assertRaisesRegex(SvnError, "replaced"):
+                checkout_working_copy("https://example.test/repo", self.target)
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue((original / "retained.txt").exists())
+        self.assertEqual((self.target / "unrelated.txt").read_text(), "keep")
+
     def test_validation_failures_never_run_a_process(self):
         with patch("svn_client.backend.subprocess.run") as run:
             for timeout in (0, -1, float("inf"), float("nan"), True, "10", 10 ** 400):
@@ -181,6 +199,21 @@ class CheckoutOperationTests(unittest.TestCase):
                 checkout_working_copy("svn+ssh://user@host/repo", self.target)
             run.assert_not_called()
         self.assertFalse(self.target.exists())
+
+    def test_unavailable_destination_identity_refuses_before_checkout(self):
+        original = Path.lstat
+        def unavailable(path, *args, **kwargs):
+            node = original(path, *args, **kwargs)
+            if path == self.target:
+                return SimpleNamespace(st_mode=node.st_mode, st_dev=node.st_dev,
+                                       st_ino=0, st_file_attributes=getattr(node, "st_file_attributes", 0))
+            return node
+        with patch.object(Path, "lstat", unavailable), patch("svn_client.backend.subprocess.run") as run:
+            with self.assertRaisesRegex(SvnError, "stable file identity"):
+                checkout_working_copy("https://example.test/repo", self.target)
+        run.assert_not_called()
+        self.assertTrue(self.target.is_dir())
+        self.assertEqual(list(self.target.iterdir()), [])
 
     def test_recheck_prevents_destination_changed_before_execution(self):
         original = validate_checkout_destination

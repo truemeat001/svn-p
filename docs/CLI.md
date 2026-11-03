@@ -14,7 +14,7 @@ Windows 可使用：
 py -3 -m svn_client.cli --workspace "C:\Work\Project" status
 ```
 
-请在 SVN Desk 项目目录运行，或自行将其加入 Python 模块搜索路径。`--workspace` 必须明确提供并指向已有本地目录；建议始终选择相同的工作副本根目录。相对目标路径相对于工作副本，而非终端当前目录。全局参数放在命令之前，命令参数放在对应子命令之后。
+请在 SVN Desk 项目目录运行，或自行将其加入 Python 模块搜索路径。除 `diagnostics` 外，`--workspace` 必须明确提供并指向已有本地目录；建议始终选择相同的工作副本根目录。`diagnostics` 可不带工作副本，仅检查 SVN 安装，也可报告无效工作副本。相对目标路径相对于工作副本，而非终端当前目录。全局参数放在命令之前，命令参数放在对应子命令之后。
 
 ## 设计边界
 
@@ -27,6 +27,31 @@ py -3 -m svn_client.cli --workspace "C:\Work\Project" status
 - 无自动重试、无限循环或后台监控。外部编辑器仍可并发改变文件；CLI 不是隔离沙箱或跨所有进程的事务系统。
 
 ## 可用命令
+
+### 只读连接诊断：默认不访问仓库
+
+```console
+python -m svn_client.cli diagnostics
+python -m svn_client.cli --workspace /wc diagnostics
+python -m svn_client.cli diagnostics --check-remote --url https://svn.example/repo/trunk
+python -m svn_client.cli --workspace /wc --timeout 10 diagnostics --check-remote --url https://svn.example/repo/trunk
+```
+
+- 不带 `--workspace`：默认只检查已安装 SVN 的版本。提供工作副本后，再读取该目录的本地身份；**不会跟随其中保存的仓库 URL**。这里的“本地检查”指不发起仓库请求；用户明确选择的工作副本或程序若位于 SMB/挂载存储，路径解析和读取仍可能访问该文件系统。
+- 远程检查必须同时提供 `--check-remote` 和明确的 `--url`。只给其一会在程序检查前拒绝，不从工作副本、历史或其他参数推测目标。显式远程检查也不要求已有工作副本；若提供的本地目录无效，可继续检查用户明确给出的独立 URL。
+- 仅支持无 userinfo 的 `http`、`https`、`svn` 和本地 `file` URL。拒绝密码、仅用户名、SSH、远程 file 主机/UNC URL、查询串、片段、控制字符和不安全转义。URL 路径中的 `@123` 当作名称字面内容，不当作修订；实际检查使用 HEAD。
+- 命令始终只读，不接受 `--yes`、`--dry-run`、`--force`、密码、信任证书或自动重试选项。不修复认证、不更新或检出、不试提交、不增加凭据缓存。现有 SVN 认证配置可能用于用户明确请求的远程检查，该请求可能出现在服务器日志中。
+- 诊断默认每个 SVN 子进程 **15 秒**，可用全局 `--timeout` 指定大于 0、不超过 120 秒的值；其他命令仍默认 120 秒。一次报告最多包含版本、本地 info、远程 info 三步，不是整个报告的总时限，不覆盖所有进程创建或认证设施行为。
+
+未触发整体输出上限时，报告保留在 `data.report`，包括 `steps`、已识别版本/可执行程序、可选本地和远程仓库身份，以及三个关键字段：
+
+- `remote_requested`：是否明确要求远程检查。
+- `remote_attempted`：是否开始远程检查阶段，不证明服务器实际收到请求。
+- `repository_identity_matches`：两边身份均可用时比较 UUID；相同不证明分支 URL、本地内容或修订一致，不同不会自动 switch/relocate。
+
+每个步骤有 `stage`、`status`（ok/failed/skipped）、`category`、固定说明、数字 SVN 错误码和可用时的退出码。诊断失败返回 **退出码 10、顶层 `ok: false`、`error.code: diagnostics_failed`**，但仍保留完整 `data.report`；例如缺少 SVN、TLS/认证失败、超时或 UUID 不一致。参数拒绝仍使用既有退出码 2/4；整体 JSON 超限时改为退出码 9 / `output_limit`，报告可能省略，原失败码保留在 `error.details.original_error_code`。不要把未请求远程检查时的 `ok: true` 解释为“服务器已连接”。
+
+`category` 是排查线索，不是确定根因。公开结果不包含原始 stdout/stderr、密码、锁令牌、证书内容或任意服务端文本；XML 有 2 MiB 捕获后解析上限，并不等同于全程流式内存限制。成功 info 仅证明当时可读取这个目标，不能证明提交、锁、检出、钩子或全部子目录权限。详细接口、认证边界和验证限制见 [CONNECTION.md](CONNECTION.md)。
 
 ### 读取状态、元数据、历史和差异
 
@@ -203,7 +228,7 @@ python -m svn_client.cli --workspace /wc shelf create --name backup --paths-json
 - `ok` 表示这次请求的结果可用。`command` 为 `status` 或 `changelist.commit` 等名称；帮助和尚未完成解析的请求可能为 `null`。
 - `workspace` 是解析后的绝对路径，解析/确认阶段尚未求值或输出缩减时可为 `null`。
 - `outcome`：`read`（只读结果）、`planned`（预检通过）、`completed`（修改调用成功返回）、`needs_review`（合并结果待审核）、`conflicted`（合并后观察到冲突，需人工处理）、`refused`（执行前拒绝）、`failed`（已知只读/预检错误）或 `uncertain`（修改已调用但未成功返回）。
-- `data` 为具体命令结果，错误通常为 `null`。
+- `data` 为具体命令结果，错误通常为 `null`。`diagnostics_failed` 例外：保留 `data.report` 的完整安全诊断步骤。
 - `error` 非空时包含稳定 `code`、面向人的 `message`、`message_truncated` 和可为空的 `details`。脚本应分支判断 `code`，不要解析英文错误句子。
 - `warnings` 为字符串数组。Shelf 预检对象内也可能有更具体的 `warnings`。
 - Unicode 与控制字符在 JSON 中转义，因此即使 Windows 控制台不是 UTF-8，管道输出仍为 ASCII 安全的合法 UTF-8 JSON。客户端通过 JSON 解析即可还原 Unicode。
@@ -262,13 +287,14 @@ python -m svn_client.cli --workspace /wc shelf create --name backup --paths-json
 | 7 | `shelf_failed` | Shelf 读取、完整性或预检失败 |
 | 8 | `operation_uncertain` | 修改调用未成功返回，不能认定回滚 |
 | 9 | `output_limit` | 完整 JSON 超出配置大小；检查原操作结果 |
+| 10 | `diagnostics_failed` | 一个或多个请求的诊断步骤失败/跳过；完整安全报告仍在 `data.report` |
 | 70 | `internal_error` | 未预期内部错误，未回显堆栈或内部数据 |
 | 74 | `io_error` | 输入/输出 I/O 错误；管道断开时无法返回 JSON |
 | 130 | `interrupted` | 修改调用前收到中断 |
 
 除分支后端明确保证尚未发送 apply 命令的 `BranchError` 外，一旦进入修改方法，后续错误会保守报告 `operation_uncertain`，即使后端实际在内部验证阶段拒绝。这避免把已部分完成的操作误判为可安全重试。中断修改同样为 `8`。外部强杀、进程崩溃或输出接收方关闭时可能没有 JSON；调用方必须按未知结果处理，不得以“没收到结果”为“没发生修改”。
 
-`--timeout` 默认为 120 秒，是**每个 SVN 子进程**的时限，不是整个 CLI 的时限。一次预检可能调用多个 SVN 子进程。调用方若设置总时限并终止 CLI，同样不能假定已发出的提交或局部恢复自动回滚。
+`--timeout` 普通命令默认为 120 秒，`diagnostics` 默认为 15 秒（最大 120 秒），是**每个 SVN 子进程**的时限，不是整个 CLI 的时限。一次预检可能调用多个 SVN 子进程。调用方若设置总时限并终止 CLI，同样不能假定已发出的提交或局部恢复自动回滚。
 
 ## AI 调用示例
 
@@ -304,6 +330,6 @@ review_hash = response["data"]["preflight"]["members_sha256"]
 
 ## 验证状态
 
-测试命令：`python -m unittest discover -s tests -v`。CLI 测试覆盖 JSON 格式、非交互输入、路径边界、参数注入边界、确认门槛、真正的预检调用、完整成员哈希、分支必填审核哈希与只读复制计划、合并待审核/冲突结果、提交与恢复的不确定结果、二进制/Unicode 输出边界以及进程入口。
+测试命令：`python -m unittest discover -s tests -v`。CLI 测试覆盖 JSON 格式、默认本地诊断/双参数远程选择/失败报告、非交互输入、路径边界、参数注入边界、确认门槛、真正的预检调用、完整成员哈希、分支必填审核哈希与只读复制计划、合并待审核/冲突结果、提交与恢复的不确定结果、二进制/Unicode 输出边界以及进程入口。
 
 真实 SVN 集成测试仅使用一次性本地测试仓库，要求 `svn` 与 `svnadmin`。当前开发环境中两者不可用，因此这部分测试跳过；**没有据此声称真实仓库、Windows 原生运行、认证流程或 GUI 已通过验证**。首次使用请先在可丢弃工作副本中测试，并独立备份重要内容。

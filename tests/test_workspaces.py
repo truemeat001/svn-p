@@ -11,6 +11,11 @@ from svn_client.workspaces import (load_settings, normalize_settings, path_key,
 from svn_client.ui import SvnDesk
 
 
+def workspace_path(name):
+    """A native absolute fixture path, without creating or reading a workspace."""
+    return str(Path(tempfile.gettempdir()) / "workspace-fixtures" / name)
+
+
 class WorkspaceRegistryTests(unittest.TestCase):
     def test_legacy_last_directory_is_migrated(self):
         settings = normalize_settings({"last_workspace": "C:\\Projects\\Game"})
@@ -22,7 +27,7 @@ class WorkspaceRegistryTests(unittest.TestCase):
     def test_only_allowlisted_noncredential_fields_survive(self):
         settings = normalize_settings({"password": "secret", "token": "token", "repository_url": "https://x:y@host/repo",
             "last_workspace": "https://user:pass@host/repo", "svn_executable": "svn",
-            "workspaces": [{"id": "one", "name": "Project", "path": "/tmp/project", "password": "hidden", "url": "https://x:y@h"}]})
+            "workspaces": [{"id": "one", "name": "Project", "path": workspace_path('project'), "password": "hidden", "url": "https://x:y@h"}]})
         payload = json.dumps(settings)
         for text in ("secret", "token", "password", "repository_url", "https://", "hidden"):
             self.assertNotIn(text, payload)
@@ -35,8 +40,8 @@ class WorkspaceRegistryTests(unittest.TestCase):
         self.assertEqual(path_key("C:\\Repo"), path_key("c:/repo/"))
 
     def test_missing_path_is_retained_for_repair(self):
-        settings = normalize_settings({"last_workspace": "/missing/not-created/project"})
-        self.assertEqual(startup_workspace(settings)["path"], "/missing/not-created/project")
+        settings = normalize_settings({"last_workspace": workspace_path('missing/not-created/project')})
+        self.assertEqual(startup_workspace(settings)["path"], workspace_path('missing/not-created/project'))
 
     def test_invalid_relative_registry_paths_are_discarded(self):
         settings = normalize_settings({"last_workspace": "relative", "workspaces": [{"path": "../other"}]})
@@ -44,33 +49,33 @@ class WorkspaceRegistryTests(unittest.TestCase):
 
     def test_register_reuses_identity_and_name(self):
         settings = normalize_settings({})
-        first = remember_workspace(settings, "/tmp/project", name="我的项目")
-        second = remember_workspace(settings, "/tmp/project")
+        first = remember_workspace(settings, workspace_path('project'), name="我的项目")
+        second = remember_workspace(settings, workspace_path('project'))
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(second["name"], "我的项目")
         self.assertEqual(len(settings["workspaces"]), 1)
 
     def test_relink_changes_record_not_identity(self):
         settings = normalize_settings({})
-        first = remember_workspace(settings, "/tmp/old", name="Project")
+        first = remember_workspace(settings, workspace_path('old'), name="Project")
         identifier = first["id"]
-        record = remember_workspace(settings, "/tmp/new", record_id=identifier)
-        self.assertEqual(record, {"id": identifier, "name": "Project", "path": "/tmp/new"})
+        record = remember_workspace(settings, workspace_path('new'), record_id=identifier)
+        self.assertEqual(record, {"id": identifier, "name": "Project", "path": workspace_path('new')})
 
     def test_relink_to_other_registered_root_rejects_without_mutation(self):
         settings = normalize_settings({})
-        first = remember_workspace(settings, "/tmp/one")
-        remember_workspace(settings, "/tmp/two")
+        first = remember_workspace(settings, workspace_path('one'))
+        remember_workspace(settings, workspace_path('two'))
         before = copy.deepcopy(settings)
         with self.assertRaises(ValueError):
-            remember_workspace(settings, "/tmp/two", record_id=first["id"])
+            remember_workspace(settings, workspace_path('two'), record_id=first["id"])
         self.assertEqual(settings, before)
 
     def test_rename_does_not_move_or_change_path(self):
         settings = normalize_settings({})
-        record = remember_workspace(settings, "/tmp/one")
+        record = remember_workspace(settings, workspace_path('one'))
         rename_workspace(settings, record["id"], "新名称")
-        self.assertEqual(record["path"], "/tmp/one")
+        self.assertEqual(record["path"], workspace_path('one'))
         self.assertEqual(record["name"], "新名称")
 
     def test_remove_deletes_only_registry_entry(self):
@@ -89,19 +94,19 @@ class WorkspaceRegistryTests(unittest.TestCase):
 
     def test_registration_without_open_does_not_change_last_workspace(self):
         settings = normalize_settings({})
-        first = remember_workspace(settings, "/tmp/open")
-        remember_workspace(settings, "/tmp/discovered", set_last=False)
+        first = remember_workspace(settings, workspace_path('open'))
+        remember_workspace(settings, workspace_path('discovered'), set_last=False)
         self.assertEqual(startup_workspace(settings)["id"], first["id"])
 
     def test_restore_preference_is_respected(self):
-        settings = normalize_settings({"last_workspace": "/tmp/project", "restore_last_workspace": False})
+        settings = normalize_settings({"last_workspace": workspace_path('project'), "restore_last_workspace": False})
         self.assertIsNone(startup_workspace(settings))
 
     def test_atomic_roundtrip_with_chinese_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             settings = normalize_settings({})
-            remember_workspace(settings, "/tmp/project", name="游戏工程")
+            remember_workspace(settings, workspace_path('project'), name="游戏工程")
             save_settings(path, settings)
             self.assertEqual(load_settings(path), settings)
             self.assertEqual(list(Path(tmp).glob(".settings-*.tmp")), [])
@@ -132,14 +137,14 @@ class WorkspaceRegistryTests(unittest.TestCase):
 
 class WorkspaceFlowTests(unittest.TestCase):
     def test_startup_restores_named_last_workspace(self):
-        settings = normalize_settings({"last_workspace": "/tmp/game"})
+        settings = normalize_settings({"last_workspace": workspace_path('game')})
         app = Mock(demo=False, _busy=False, client=None, _manual_open_requested=False, settings=settings)
         SvnDesk._restore_saved_workspace(app)
-        app.open_workspace.assert_called_once_with("/tmp/game", record_id=settings["last_workspace_id"], auto_restore=True)
+        app.open_workspace.assert_called_once_with(workspace_path('game'), record_id=settings["last_workspace_id"], auto_restore=True)
 
     def test_explicit_open_wins_startup_race(self):
         app = Mock(demo=False, _busy=False, client=None, _manual_open_requested=True,
-                   settings=normalize_settings({"last_workspace": "/tmp/old"}))
+                   settings=normalize_settings({"last_workspace": workspace_path('old')}))
         SvnDesk._restore_saved_workspace(app)
         app.open_workspace.assert_not_called()
 
@@ -167,13 +172,13 @@ class WorkspaceFlowTests(unittest.TestCase):
     @patch("svn_client.ui.messagebox.showwarning")
     def test_open_failure_keeps_active_workspace_and_record(self, warning):
         settings = normalize_settings({})
-        active = remember_workspace(settings, "/tmp/active")
-        missing = remember_workspace(settings, "/tmp/missing", set_last=False)
+        active = remember_workspace(settings, workspace_path('active'))
+        missing = remember_workspace(settings, workspace_path('missing'), set_last=False)
         before = copy.deepcopy(settings)
         old_client = Mock()
-        app = Mock(_busy=False, demo=False, client=old_client, root_path=Path("/tmp/active"),
+        app = Mock(_busy=False, demo=False, client=old_client, root_path=Path(workspace_path('active')),
                    settings=settings, _active_workspace_id=active["id"], _workspace_errors={})
-        SvnDesk.open_workspace(app, "/tmp/missing", record_id=missing["id"])
+        SvnDesk.open_workspace(app, workspace_path('missing'), record_id=missing["id"])
         app._run.call_args.kwargs["on_error"](FileNotFoundError("Missing folder"))
         self.assertIs(app.client, old_client)
         self.assertEqual(app.settings, before)
@@ -190,7 +195,7 @@ class WorkspaceFlowTests(unittest.TestCase):
     @patch("svn_client.ui.filedialog.askdirectory")
     def test_open_dialog_cancels_restore_before_nested_event_loop(self, choose):
         app = Mock(demo=False, _busy=False, client=None, _manual_open_requested=False, root_path=None,
-                   settings=normalize_settings({"last_workspace": "/tmp/old"}))
+                   settings=normalize_settings({"last_workspace": workspace_path('old')}))
         def modal(**kwargs):
             SvnDesk._restore_saved_workspace(app)
             return ""
@@ -202,7 +207,7 @@ class WorkspaceFlowTests(unittest.TestCase):
     @patch("svn_client.ui.WorkspaceManagerDialog")
     def test_manager_cancels_restore_before_nested_event_loop(self, manager):
         app = Mock(demo=False, _busy=False, client=None, _manual_open_requested=False,
-                   settings=normalize_settings({"last_workspace": "/tmp/old"}))
+                   settings=normalize_settings({"last_workspace": workspace_path('old')}))
         def modal(parent):
             SvnDesk._restore_saved_workspace(parent)
             return Mock(result=("close", None, True))
@@ -268,7 +273,7 @@ class WorkspaceFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "new"
             dialog.return_value.result = ("New", "https://host/repo", str(destination))
-            settings = normalize_settings({"last_workspace": "/tmp/current"})
+            settings = normalize_settings({"last_workspace": workspace_path('current')})
             before = copy.deepcopy(settings)
             app = Mock(_busy=False, demo=False, settings=settings)
             SvnDesk.create_workspace(app)
@@ -290,10 +295,10 @@ class WorkspaceFlowTests(unittest.TestCase):
             partial = destination / "partial.txt"
             partial.write_text("retained")
             dialog.return_value.result = ("New", "https://host/repo", str(destination))
-            settings = normalize_settings({"last_workspace": "/tmp/current"})
+            settings = normalize_settings({"last_workspace": workspace_path('current')})
             before = copy.deepcopy(settings)
             old_client = Mock()
-            app = Mock(_busy=False, demo=False, settings=settings, root_path=Path("/tmp/current"), client=old_client)
+            app = Mock(_busy=False, demo=False, settings=settings, root_path=Path(workspace_path('current')), client=old_client)
             SvnDesk.create_workspace(app)
             app._run.call_args.args[2](("https://host/repo", destination))
             self.assertEqual(app._run.call_count, 2)
@@ -308,20 +313,20 @@ class WorkspaceFlowTests(unittest.TestCase):
     @patch("svn_client.ui.SvnClient")
     def test_discovery_registers_valid_roots_independently_without_changing_last(self, client, program):
         settings = normalize_settings({})
-        current = remember_workspace(settings, "/tmp/current", name="Current")
+        current = remember_workspace(settings, workspace_path('current'), name="Current")
         previous_id = current["id"]
         good = Mock()
-        good.info.return_value = {"wc_root": "/tmp/good"}
+        good.info.return_value = {"wc_root": workspace_path('good')}
         bad = Mock()
         bad.info.side_effect = ValueError("Not a working copy")
         client.side_effect = [good, bad]
         old_client = Mock()
         app = Mock(settings=settings, client=old_client)
         app._save_settings.return_value = True
-        SvnDesk._register_discovered_paths(app, ["/tmp/good", "/tmp/bad"])
+        SvnDesk._register_discovered_paths(app, [workspace_path('good'), workspace_path('bad')])
         work, complete = app._run.call_args.args[1:3]
         complete(work())
-        self.assertEqual({r["path"] for r in app.settings["workspaces"]}, {"/tmp/current", "/tmp/good"})
+        self.assertEqual({r["path"] for r in app.settings["workspaces"]}, {workspace_path('current'), workspace_path('good')})
         self.assertEqual(app.settings["last_workspace_id"], previous_id)
         self.assertIs(app.client, old_client)
         old_client.update.assert_not_called()
