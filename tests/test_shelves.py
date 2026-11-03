@@ -65,12 +65,17 @@ class FakeManager(ShelfManager):
     def _properties_many(self, paths, base=False):
         return {path: self._properties(path, base=base) for path in paths}
 
-    def _status(self, paths=None, *, depth=None):
+    def _status(self, paths=None, *, depth=None, include_paths=None):
         result = []
         for path, node in sorted(self.states.items()):
             if paths and not any(p == "." or path == p or path.startswith(p + "/") for p in paths):
                 continue
             if paths and depth == "empty" and path not in paths:
+                continue
+            if paths and depth == "immediates" and not any(
+                    path == p or str(Path(path).parent).replace("\\", "/") == p for p in paths):
+                continue
+            if include_paths is not None and path not in include_paths:
                 continue
             props = "modified" if self.current_props.get(path, {}) != self.base_props.get(path, {}) else "none"
             result.append({"path": path, "item": node["item"], "props": props,
@@ -150,13 +155,16 @@ class XmlManager(FakeManager):
             return ET.tostring(root)
         if command == "status":
             root = ET.Element("status")
-            target = ET.SubElement(root, "target", path=".")
             depth = args[args.index("--depth") + 1] if "--depth" in args else None
-            for state in FakeManager._status(self, targets, depth=depth):
-                entry = ET.SubElement(target, "entry", path=state["path"])
-                attrs = {key: value for key, value in state.items() if key != "path" and value is not None}
-                attrs["revision"] = self.revision
-                ET.SubElement(entry, "wc-status", attrs)
+            for path in targets:
+                target = ET.SubElement(root, "target", path=path)
+                for state in FakeManager._status(self, [path], depth=depth):
+                    entry = ET.SubElement(target, "entry", path=state["path"])
+                    attrs = {key: value for key, value in state.items() if key != "path" and value is not None}
+                    if state["path"] == path:
+                        attrs.pop("switched", None)  # Real SVN needs parent context.
+                    attrs["revision"] = self.revision
+                    ET.SubElement(entry, "wc-status", attrs)
             return ET.tostring(root)
         if command == "proplist":
             root = ET.Element("properties")
@@ -852,6 +860,72 @@ class ShelvesTests(unittest.TestCase):
                     self.manager.create("unsafe ancestor", ["parent/nested/child"])
                 self.manager.states[ancestor].pop("switched")
 
+    def test_xml_switched_parent_requires_parent_context_for_explicit_selections(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("parent", "normal", kind="dir", switched="true")
+        manager.node("parent/child", "modified", content=b"local work")
+        self.assertIsNone(manager._status(["parent"], depth="empty")[0]["switched"])
+        contextual = {entry["path"]: entry for entry in manager._status(["."], depth="immediates")}
+        self.assertEqual(contextual["parent"]["switched"], "true")
+        for paths in (["parent/child"], ["parent"], ["parent", "parent/child"],
+                      ["parent/child", "parent"]):
+            for operation in ("preflight_create", "create"):
+                with self.subTest(paths=paths, operation=operation):
+                    with self.assertRaisesRegex(ShelfError, "switched"):
+                        if operation == "create":
+                            manager.create("unsupported switch", paths)
+                        else:
+                            manager.preflight_create(paths)
+                    self.assertEqual(manager.list(), [])
+                    self.assertEqual((self.wc / "parent/child").read_bytes(), b"local work")
+        self.assertFalse(any(args[0] in ("add", "delete", "propset", "propdel") for args in manager.commands))
+
+    def test_xml_directly_switched_selected_file_is_rejected(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("parent", "normal", kind="dir")
+        manager.node("parent/child", "modified", content=b"local work", switched="true")
+        self.assertIsNone(manager._status(["parent/child"])[0]["switched"])
+        with self.assertRaisesRegex(ShelfError, "switched"):
+            manager.preflight_create(["parent/child"])
+        with self.assertRaisesRegex(ShelfError, "switched"):
+            manager.create("switched file", ["parent/child"])
+        self.assertEqual(manager.list(), [])
+
+    def test_xml_switch_evidence_survives_overlapping_targets_and_batches(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("parent", "normal", kind="dir", switched="true")
+        manager.node("parent/nested", "normal", kind="dir")
+        manager.node("parent/nested/child", "modified", content=b"local work")
+        for targets in ([".", "parent"], ["parent", "."]):
+            with self.subTest(targets=targets):
+                entries = {entry["path"]: entry for entry in manager._status(targets, depth="immediates")}
+                self.assertEqual(entries["parent"]["switched"], "true")
+        with patch("svn_client.shelves._SVN_BATCH_TARGETS", 1):
+            with self.assertRaisesRegex(ShelfError, "switched"):
+                manager.create("switched distant ancestor", ["parent/nested/child"])
+        self.assertEqual(manager.list(), [])
+
+    def test_parent_context_ignores_unselected_unsafe_sibling_names(self):
+        manager = XmlManager(self.wc, self.store)
+        manager.node("parent", "normal", kind="dir")
+        manager.node("parent/child", "modified", content=b"local work")
+        # XML metadata only: these names cannot be created on Windows, but a
+        # status response about an unrelated sibling must not become a target.
+        manager.states["parent/bad:name"] = {"item": "conflicted", "kind": "file"}
+        manager.states["NUL"] = {"item": "missing", "kind": "file"}
+        plan = manager.preflight_create(["parent/child"])
+        shelf = manager.create("selected child only", ["parent/child"])
+        self.assertEqual(plan["paths"], ["parent/child"])
+        self.assertEqual(shelf["paths"], ["parent/child"])
+        self.assertEqual(manager.details(shelf["id"])["entries"][0]["path"], "parent/child")
+
+    def test_status_rejects_inconsistent_overlapping_target_snapshots(self):
+        manager = ShelfManager(self.wc, self.store)
+        xml = b'<status><target path="."><entry path="parent"><wc-status item="normal" props="none" revision="1" switched="true" /></entry></target><target path="parent"><entry path="parent"><wc-status item="deleted" props="none" revision="1" /></entry></target></status>'
+        with patch.object(manager, "_svn", return_value=xml):
+            with self.assertRaisesRegex(ShelfError, "status changed between overlapping targets"):
+                manager._status([".", "parent"], depth="immediates")
+
     def test_explicit_child_does_not_select_dirty_parent_or_unsafe_siblings(self):
         manager = XmlManager(self.wc, self.store)
         manager.node("parent", "normal", kind="dir", props={"unrelated": enc(b"edit")})
@@ -862,7 +936,7 @@ class ShelvesTests(unittest.TestCase):
         ancestor_calls = [args for args in manager.commands if args[0] == "status" and "--depth" in args]
         self.assertEqual(len(ancestor_calls), 2)
         for args in ancestor_calls:
-            self.assertEqual(args[args.index("--depth") + 1], "empty")
+            self.assertEqual(args[args.index("--depth") + 1], "immediates")
             self.assertEqual(set(args[args.index("--") + 1:]), {".@", "parent@"})
         manager.states["parent/child"]["item"] = "normal"
         (self.wc / "parent/child").write_bytes(b"base")
@@ -1204,14 +1278,28 @@ class RealSvnShelfTests(unittest.TestCase):
         self.svn("copy", self.repo.as_uri() + "/dir", self.repo.as_uri() + "/other", "-m", "branch directory")
         self.svn("switch", self.repo.as_uri() + "/other", "dir")
         (self.wc / "dir/child.txt").write_bytes(b"local edit")
+        for paths in (["dir/child.txt"], ["dir"], ["dir", "dir/child.txt"]):
+            for operation in ("preflight_create", "create"):
+                with self.subTest(paths=paths, operation=operation), self.assertRaisesRegex(ShelfError, "switched"):
+                    if operation == "create":
+                        self.manager.create("switched parent", paths)
+                    else:
+                        self.manager.preflight_create(paths)
+        self.assertEqual(self.manager.list(), [])
+        self.assertEqual((self.wc / "dir/child.txt").read_bytes(), b"local edit")
+
+    def test_real_directly_switched_selected_file_is_refused(self):
+        self.svn("copy", self.repo.as_uri() + "/file.bin", self.repo.as_uri() + "/other.bin", "-m", "branch file")
+        self.svn("switch", self.repo.as_uri() + "/other.bin", "file.bin")
+        (self.wc / "file.bin").write_bytes(b"local edit")
         for operation in ("preflight_create", "create"):
             with self.subTest(operation=operation), self.assertRaisesRegex(ShelfError, "switched"):
                 if operation == "create":
-                    self.manager.create("switched parent", ["dir/child.txt"])
+                    self.manager.create("switched file", ["file.bin"])
                 else:
-                    self.manager.preflight_create(["dir/child.txt"])
+                    self.manager.preflight_create(["file.bin"])
         self.assertEqual(self.manager.list(), [])
-        self.assertEqual((self.wc / "dir/child.txt").read_bytes(), b"local edit")
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"local edit")
 
     def test_real_explicit_child_with_dirty_parent_roundtrip(self):
         (self.wc / "dir/child.txt").write_bytes(b"base")

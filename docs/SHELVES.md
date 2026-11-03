@@ -139,11 +139,17 @@ recursive query. Paths are checked for traversal, redirected ancestors and neste
 working copies before the command. Every target still has an individual trailing
 `@` peg-escape, after `--`.
 
-Explicit child selections additionally read any omitted ancestors with bounded
-`svn status --depth empty` batches. These reads do not select parent property
-edits or scan unrelated siblings. Both creation and its final snapshot check
-perform these reads; whole-working-copy selections already include the ancestors
-and need no extra status commands.
+Explicit selections additionally read missing ancestors and selection boundaries
+from their parents with bounded `svn status --depth immediates` batches. SVN can
+omit a node's `switched` flag when that node itself is an explicit status target,
+even with `--depth empty`; parent context supplies that evidence. Switch/unsafe
+flags are preserved across overlapping targets and batches. Immediate sibling
+metadata is ignored unless it belongs to the selection or its ancestors, so these
+reads never select parent property edits or unrelated files and never recursively
+scan sibling directories. Both creation and its final snapshot check perform
+these reads; whole-working-copy selections already include the relevant context
+and need no extra status commands. The configured working-copy root remains the
+boundary; no parent outside it is queried.
 
 XML entries are associated by normalized local path, never by response order.
 Info must return every requested target exactly once. Property output rejects

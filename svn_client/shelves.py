@@ -352,20 +352,38 @@ class ShelfManager:
         path = self._relative(path)
         return self._properties_many([path], base=base)[path]
 
-    def _status(self, paths=None, *, depth=None) -> list[dict]:
+    def _status(self, paths=None, *, depth=None, include_paths=None) -> list[dict]:
         targets = [self._target(self._relative(p)) for p in (paths or ["."])]
         options = ["--depth", depth] if depth is not None else []
         root = self._xml("status", "--xml", "--verbose", "--no-ignore", "--ignore-externals", *options, "--", *targets)
         entries = {}
         for node in root.findall(".//entry"):
-            path = self._relative(node.get("path", ""))
+            try:
+                path = self._relative(node.get("path", ""))
+            except ShelfError:
+                if include_paths is not None:
+                    continue  # An unrelated sibling is not a shelf target.
+                raise
+            if include_paths is not None and path not in include_paths:
+                continue
             status = node.find("wc-status")
             if status is None:
                 continue
             item = status.get("item", "none")
             props = status.get("props", "none")
             flags = {key: status.get(key) for key in ("copied", "switched", "tree-conflicted", "moved-from", "moved-to", "file-external", "wc-locked")}
-            entries[path] = {"path": path, "item": item, "props": props, "revision": status.get("revision"), **flags}
+            entry = {"path": path, "item": item, "props": props, "revision": status.get("revision"), **flags}
+            previous = entries.get(path)
+            if previous is not None:
+                if any(previous[key] != entry[key] for key in ("item", "props", "revision")):
+                    raise ShelfError(f"SVN status changed between overlapping targets: {path}")
+                # SVN omits switched on an explicit status target, but reports
+                # it when visiting that node from its parent. Never erase that
+                # evidence when overlapping target outputs repeat the node.
+                for key in flags:
+                    if previous.get(key) not in (None, "false", ""):
+                        entry[key] = previous[key]
+            entries[path] = entry
         return list(entries.values())
 
     @staticmethod
@@ -380,20 +398,26 @@ class ShelfManager:
     def _ancestor_paths(paths):
         return {str(parent) for path in paths for parent in PurePosixPath(path).parents}
 
-    def _create_ancestor_status(self, selected, status_entries):
-        # Explicit child selections omit their parents from svn status. Query
-        # only missing ancestors, not their unrelated siblings or descendants.
-        ancestors = self._ancestor_paths(selected)
+    def _create_context_status(self, selected, status_entries):
+        # Explicit status targets can omit their own switched flag. Observe
+        # missing ancestors and selection boundaries from their parents, not
+        # with depth=empty on the nodes themselves. Only relevant rows survive;
+        # immediate siblings never expand the selection or block its backup.
+        required = self._ancestor_paths(selected) | selected.keys()
         known = {entry["path"]: entry for entry in status_entries}
-        known.update(selected)  # Includes recursively expanded unversioned dirs.
-        for batch in self._target_batches(sorted(ancestors - known.keys())):
-            for entry in self._status(batch, depth="empty"):
-                if entry["path"] not in batch:
-                    raise ShelfError("SVN ancestor status returned an unexpected target")
-                if entry["path"] in known:
-                    raise ShelfError("SVN ancestor status returned a duplicate target")
+        for path, entry in selected.items():
+            known.setdefault(path, entry)  # Recursively expanded unversioned dirs.
+        parents = {str(PurePosixPath(path).parent) for path in required
+                   if path not in known or str(PurePosixPath(path).parent) not in known}
+        for batch in self._target_batches(sorted(parents)):
+            for entry in self._status(batch, depth="immediates", include_paths=required):
+                previous = known.get(entry["path"])
+                if previous is not None:
+                    for key in ("copied", "switched", "tree-conflicted", "moved-from", "moved-to", "file-external", "wc-locked"):
+                        if previous.get(key) not in (None, "false", ""):
+                            entry[key] = previous[key]
                 known[entry["path"]] = entry
-        return {path: known.get(path) for path in ancestors}
+        return {path: known.get(path) for path in required}
 
     def _check_ancestors(self, paths, by_path, planned_dirs):
         for parent in sorted(self._ancestor_paths(paths)):
@@ -523,9 +547,11 @@ class ShelfManager:
                 raise ShelfError(f"Unsupported status: {status_entry['item']}")
         if not selected:
             raise ShelfError("No supported changes selected for backup")
-        ancestors = self._create_ancestor_status(selected, status_entries)
-        self._check_ancestors(selected, ancestors, selected)
-        return repository, status_entries, selected, ancestors
+        context = self._create_context_status(selected, status_entries)
+        for path in selected:
+            self._check_status(context[path])
+        self._check_ancestors(selected, context, selected)
+        return repository, status_entries, selected, context
 
     @staticmethod
     def _capture_file(path, blobs=None):
@@ -675,13 +701,13 @@ class ShelfManager:
             entries.append(entry)
         return entries
 
-    def _verify_create_snapshot(self, paths, status_entries, selected, entries, ancestors):
+    def _verify_create_snapshot(self, paths, status_entries, selected, entries, context):
         # Status changes during the snapshot invalidate it. Byte checks above
         # additionally detect in-place edits that SVN status cannot distinguish.
         latest_status = self._status(paths)
         if latest_status != status_entries:
             raise ShelfError("Working-copy status changed while backing up; retry")
-        if self._create_ancestor_status(selected, latest_status) != ancestors:
+        if self._create_context_status(selected, latest_status) != context:
             raise ShelfError("Working-copy ancestor status changed while backing up; retry")
         for entry in entries:
             relative, item = entry["path"], entry["state"]
@@ -730,9 +756,9 @@ class ShelfManager:
             self._check_storage()
             if (self.storage_dir / ".operation.lock").exists():
                 raise ShelfError("Another shelf operation is running; retry preflight when it finishes")
-            repository, status_entries, selected, ancestors = self._select_create(paths)
+            repository, status_entries, selected, context = self._select_create(paths)
             entries = self._capture_create_entries(selected)
-            self._verify_create_snapshot(paths, status_entries, selected, entries, ancestors)
+            self._verify_create_snapshot(paths, status_entries, selected, entries, context)
             # The normal manifest validator enforces portable path collisions and
             # property/base schemas even though no manifest or blobs are written.
             manifest = {"format": _FORMAT, "id": "0" * 32, "name": "Preflight",
@@ -752,14 +778,14 @@ class ShelfManager:
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
             raise ShelfError("Shelf name must contain 1–200 characters")
         with self._locked():
-            repository, status_entries, selected, ancestors = self._select_create(paths)
+            repository, status_entries, selected, context = self._select_create(paths)
             shelf_id = uuid.uuid4().hex
             temporary = Path(tempfile.mkdtemp(prefix=".creating-", dir=self.storage_dir))
             try:
                 blobs = temporary / "blobs"
                 blobs.mkdir(mode=0o700)
                 entries = self._capture_create_entries(selected, blobs)
-                self._verify_create_snapshot(paths, status_entries, selected, entries, ancestors)
+                self._verify_create_snapshot(paths, status_entries, selected, entries, context)
                 manifest = {"format": _FORMAT, "id": shelf_id, "name": name.strip(),
                             "created_at": datetime.now(timezone.utc).isoformat(),
                             "repository": {"uuid": repository["uuid"], "url": repository["url"]},
