@@ -279,10 +279,20 @@ class ShelfManager:
         visit(relative)
         return result
 
-    def _ensure_storage(self):
+    def _check_storage(self):
+        """Validate existing storage paths without creating or modifying anything."""
         for ancestor in (self.storage_dir, *self.storage_dir.parents):
-            if ancestor.exists() and _special(ancestor.lstat()):
+            try:
+                existing = ancestor.lstat()
+            except FileNotFoundError:
+                continue
+            if _special(existing):
                 raise ShelfError("Shelf storage cannot contain symlink/reparse-point ancestors")
+            if not stat.S_ISDIR(existing.st_mode):
+                raise ShelfError("Shelf storage or an ancestor is not a directory")
+
+    def _ensure_storage(self):
+        self._check_storage()
         self.storage_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Refuse symlink/junction ancestors, rather than trusting manifest paths
         # in a directory redirected by a different process.
@@ -318,7 +328,10 @@ class ShelfManager:
         # same-size edit with a restored timestamp. Export BASE uses the pristine
         # bytes with SVN's native EOL and keyword translation, unlike a raw
         # repository-content comparison that would reject valid CRLF/keywords.
-        with tempfile.TemporaryDirectory(prefix=".base-", dir=self.storage_dir) as temporary:
+        temporary_root = Path(tempfile.gettempdir()).resolve()
+        if _is_within(temporary_root, self.working_copy) or _is_within(temporary_root, self.storage_dir.resolve()):
+            raise ShelfError("System temporary storage must be outside the working copy and shelf storage")
+        with tempfile.TemporaryDirectory(prefix="svn-shelf-base-", dir=temporary_root) as temporary:
             destination = Path(temporary) / "base-file"
             self._svn("export", "--quiet", "--ignore-externals", "-r", "BASE", "--",
                       self._target(path), str(destination))
@@ -344,107 +357,157 @@ class ShelfManager:
                 "entry_count": len(paths), "backup_only": True,
                 "repository_url": manifest["repository"]["url"]}
 
+    def _select_create(self, paths):
+        if isinstance(paths, (str, bytes)) or (paths is not None and not paths):
+            raise ShelfError("Select at least one path using a sequence of paths")
+        repository = self._info()
+        status_entries = self._status(paths)
+        selected = {}
+        for status_entry in status_entries:
+            self._check_status(status_entry)
+            if status_entry["item"] == "unversioned":
+                for expanded in self._walk_unversioned(status_entry["path"]):
+                    selected[expanded["path"]] = expanded
+            elif status_entry["item"] in ("modified", "added", "deleted") or status_entry["props"] == "modified":
+                selected[status_entry["path"]] = status_entry
+            elif status_entry["item"] not in ("normal", "none", "ignored"):
+                raise ShelfError(f"Unsupported status: {status_entry['item']}")
+        if not selected:
+            raise ShelfError("No supported changes selected for backup")
+        for relative, entry in selected.items():
+            if entry["item"] not in ("added", "unversioned"):
+                continue
+            parent = str(PurePosixPath(relative).parent)
+            while parent != ".":
+                if parent not in selected:
+                    # An added or unversioned ancestor would disappear when
+                    # cleaned. Refuse an incomplete selection rather than
+                    # creating a shelf that cannot reconstruct its hierarchy.
+                    parent_status = next((s for s in self._status([parent]) if s["path"] == parent), None)
+                    if parent_status and parent_status["item"] in ("added", "unversioned"):
+                        raise ShelfError(f"Select the added/unversioned parent directory as well: {parent}")
+                parent = str(PurePosixPath(parent).parent)
+        return repository, status_entries, selected
+
+    def _capture_create_entries(self, selected, blobs=None):
+        entries = []
+        for relative, status_entry in sorted(selected.items(), key=lambda item: (item[0].count("/"), item[0])):
+            path = self._path(relative)
+            item = status_entry["item"]
+            info = None if item == "unversioned" else self._info(relative)
+            if info and info["kind"] == "dir" and info["depth"] != "infinity":
+                raise ShelfError(f"Sparse directories are unsupported: {relative}")
+            kind = info["kind"] if info else ("dir" if path.is_dir() else "file")
+            if item == "deleted" and path.exists():
+                raise ShelfError(f"Deleted path still contains local data; back it up separately first: {relative}")
+            if item == "deleted" and kind == "dir":
+                raise ShelfError(f"Deleted directories are not yet supported; back up before deleting: {relative}")
+            entry = {"path": relative, "state": item, "kind": kind,
+                     "properties": {} if info is None or item == "deleted" else self._properties(relative)}
+            if item not in ("added", "unversioned"):
+                entry["base"] = self._base(relative, info)
+            if item != "deleted":
+                st = path.lstat()
+                if _special(st) or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+                    raise ShelfError(f"Unsupported filesystem object: {relative}")
+                if kind == "dir" and relative != "." and (path / ".svn").exists():
+                    raise ShelfError(f"Nested working copy is unsupported: {relative}")
+                entry["mode"] = stat.S_IMODE(st.st_mode) & 0o777
+                if kind == "file":
+                    data = path.read_bytes()
+                    after = path.stat()
+                    if (st.st_size, st.st_mtime_ns, st.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                        raise ShelfError(f"File changed while being backed up; retry: {relative}")
+                    checksum = _digest(data)
+                    entry.update(blob=checksum, size=len(data))
+                    if blobs is not None:
+                        blob_path = blobs / checksum
+                        if not blob_path.exists():
+                            with open(blob_path, "xb") as stream:
+                                stream.write(data)
+                                stream.flush()
+                                os.fsync(stream.fileno())
+                        if _digest(blob_path.read_bytes()) != checksum:
+                            raise ShelfError(f"Backup verification failed: {relative}")
+            entries.append(entry)
+        return entries
+
+    def _verify_create_snapshot(self, paths, status_entries, selected, entries):
+        # Status changes during the snapshot invalidate it. Byte checks above
+        # additionally detect in-place edits that SVN status cannot distinguish.
+        if self._status(paths) != status_entries:
+            raise ShelfError("Working-copy status changed while backing up; retry")
+        for entry in entries:
+            relative, item = entry["path"], entry["state"]
+            source = self._path(relative)
+            if item == "deleted":
+                if source.exists():
+                    raise ShelfError(f"Deleted path appeared during backup: {relative}")
+                continue
+            if entry["kind"] == "file" and _digest(source.read_bytes()) != entry["blob"]:
+                raise ShelfError(f"File changed while being backed up; retry: {relative}")
+            if stat.S_IMODE(source.stat().st_mode) & 0o777 != entry["mode"]:
+                raise ShelfError(f"Permissions changed during backup; retry: {relative}")
+            if item != "unversioned" and self._properties(relative) != entry["properties"]:
+                raise ShelfError(f"Properties changed during backup; retry: {relative}")
+        for status_entry in status_entries:
+            if status_entry["item"] == "unversioned":
+                initial = {p for p, item in selected.items() if item["item"] == "unversioned" and (p == status_entry["path"] or p.startswith(status_entry["path"] + "/"))}
+                final = {e["path"] for e in self._walk_unversioned(status_entry["path"])}
+                if initial != final:
+                    raise ShelfError("Unversioned directory changed during backup; retry")
+
+    @staticmethod
+    def _preflight_warnings():
+        return [
+            "Preflight is an advisory snapshot, not a reservation or authorization. Execution reruns all checks.",
+            "Other processes and editors may change files, properties, BASE revisions, or shelf data after this check.",
+            "Disk space, write permissions, and later OS/SVN failures are not guaranteed by a successful preflight.",
+            "Translated BASE verification may use temporary files outside the working copy; these are cleaned up.",
+        ]
+
+    def preflight_create(self, paths=None) -> dict:
+        """Inspect a backup plan without creating a shelf, storage directory, or lock.
+
+        No working-copy data or SVN scheduling/properties is changed. Local SVN
+        reads may use cache metadata internally. Pristine exports use cleaned-up
+        system temporary files. The result is advisory; create() repeats checks.
+        Shelf-name validation remains create()'s responsibility.
+        """
+        with self._client_lock:
+            self._check_storage()
+            if (self.storage_dir / ".operation.lock").exists():
+                raise ShelfError("Another shelf operation is running; retry preflight when it finishes")
+            repository, status_entries, selected = self._select_create(paths)
+            entries = self._capture_create_entries(selected)
+            self._verify_create_snapshot(paths, status_entries, selected, entries)
+            # The normal manifest validator enforces portable path collisions and
+            # property/base schemas even though no manifest or blobs are written.
+            manifest = {"format": _FORMAT, "id": "0" * 32, "name": "Preflight",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "repository": {"uuid": repository["uuid"], "url": repository["url"]},
+                        "entries": entries}
+            self._validate_manifest(manifest, self.storage_dir, verify_blobs=False)
+            planned_paths = [entry["path"] for entry in entries]
+            return {"operation": "create", "dry_run": True, "can_create": True,
+                    "backup_only": True, "paths": planned_paths, "files": planned_paths,
+                    "entry_count": len(entries), "repository": manifest["repository"],
+                    "repository_url": repository["url"], "entries": entries,
+                    "warnings": self._preflight_warnings()}
+
     def create(self, name: str, paths=None) -> dict:
         """Back up selected changes (all changes if paths is None), without revert."""
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
             raise ShelfError("Shelf name must contain 1–200 characters")
-        if paths is not None and not paths:
-            raise ShelfError("Select at least one path")
         with self._locked():
-            repository = self._info()
-            status_entries = self._status(paths)
-            selected = {}
-            for status_entry in status_entries:
-                self._check_status(status_entry)
-                if status_entry["item"] == "unversioned":
-                    for expanded in self._walk_unversioned(status_entry["path"]):
-                        selected[expanded["path"]] = expanded
-                elif status_entry["item"] in ("modified", "added", "deleted") or status_entry["props"] == "modified":
-                    selected[status_entry["path"]] = status_entry
-                elif status_entry["item"] not in ("normal", "none", "ignored"):
-                    raise ShelfError(f"Unsupported status: {status_entry['item']}")
-            if not selected:
-                raise ShelfError("No supported changes selected for backup")
-            for relative, entry in selected.items():
-                if entry["item"] not in ("added", "unversioned"):
-                    continue
-                parent = str(PurePosixPath(relative).parent)
-                while parent != ".":
-                    if parent not in selected:
-                        # An added or unversioned ancestor would disappear when
-                        # cleaned. Refuse an incomplete selection rather than
-                        # creating a shelf that cannot reconstruct its hierarchy.
-                        parent_status = next((s for s in self._status([parent]) if s["path"] == parent), None)
-                        if parent_status and parent_status["item"] in ("added", "unversioned"):
-                            raise ShelfError(f"Select the added/unversioned parent directory as well: {parent}")
-                    parent = str(PurePosixPath(parent).parent)
+            repository, status_entries, selected = self._select_create(paths)
             shelf_id = uuid.uuid4().hex
             temporary = Path(tempfile.mkdtemp(prefix=".creating-", dir=self.storage_dir))
             try:
                 blobs = temporary / "blobs"
                 blobs.mkdir(mode=0o700)
-                entries = []
-                for relative, status_entry in sorted(selected.items(), key=lambda item: (item[0].count("/"), item[0])):
-                    path = self._path(relative)
-                    item = status_entry["item"]
-                    info = None if item == "unversioned" else self._info(relative)
-                    if info and info["kind"] == "dir" and info["depth"] != "infinity":
-                        raise ShelfError(f"Sparse directories are unsupported: {relative}")
-                    kind = info["kind"] if info else ("dir" if path.is_dir() else "file")
-                    if item == "deleted" and path.exists():
-                        raise ShelfError(f"Deleted path still contains local data; back it up separately first: {relative}")
-                    if item == "deleted" and kind == "dir":
-                        raise ShelfError(f"Deleted directories are not yet supported; back up before deleting: {relative}")
-                    entry = {"path": relative, "state": item, "kind": kind,
-                             "properties": {} if info is None or item == "deleted" else self._properties(relative)}
-                    if item not in ("added", "unversioned"):
-                        entry["base"] = self._base(relative, info)
-                    if item != "deleted":
-                        st = path.lstat()
-                        if _special(st) or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
-                            raise ShelfError(f"Unsupported filesystem object: {relative}")
-                        if kind == "dir" and relative != "." and (path / ".svn").exists():
-                            raise ShelfError(f"Nested working copy is unsupported: {relative}")
-                        entry["mode"] = stat.S_IMODE(st.st_mode) & 0o777
-                        if kind == "file":
-                            data = path.read_bytes()
-                            after = path.stat()
-                            if (st.st_size, st.st_mtime_ns, st.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
-                                raise ShelfError(f"File changed while being backed up; retry: {relative}")
-                            checksum = _digest(data)
-                            entry.update(blob=checksum, size=len(data))
-                            blob_path = blobs / checksum
-                            if not blob_path.exists():
-                                with open(blob_path, "xb") as stream:
-                                    stream.write(data)
-                                    stream.flush()
-                                    os.fsync(stream.fileno())
-                            if _digest(blob_path.read_bytes()) != checksum:
-                                raise ShelfError(f"Backup verification failed: {relative}")
-                    entries.append(entry)
-                # Status changes during the snapshot invalidate it. Byte checks above
-                # additionally detect in-place edits that SVN status cannot distinguish.
-                if self._status(paths) != status_entries:
-                    raise ShelfError("Working-copy status changed while backing up; retry")
-                for entry in entries:
-                    relative, item = entry["path"], entry["state"]
-                    source = self._path(relative)
-                    if item == "deleted":
-                        if source.exists():
-                            raise ShelfError(f"Deleted path appeared during backup: {relative}")
-                        continue
-                    if entry["kind"] == "file" and _digest(source.read_bytes()) != entry["blob"]:
-                        raise ShelfError(f"File changed while being backed up; retry: {relative}")
-                    if stat.S_IMODE(source.stat().st_mode) & 0o777 != entry["mode"]:
-                        raise ShelfError(f"Permissions changed during backup; retry: {relative}")
-                    if item != "unversioned" and self._properties(relative) != entry["properties"]:
-                        raise ShelfError(f"Properties changed during backup; retry: {relative}")
-                for status_entry in status_entries:
-                    if status_entry["item"] == "unversioned":
-                        initial = {p for p, item in selected.items() if item["item"] == "unversioned" and (p == status_entry["path"] or p.startswith(status_entry["path"] + "/"))}
-                        final = {e["path"] for e in self._walk_unversioned(status_entry["path"])}
-                        if initial != final:
-                            raise ShelfError("Unversioned directory changed during backup; retry")
+                entries = self._capture_create_entries(selected, blobs)
+                self._verify_create_snapshot(paths, status_entries, selected, entries)
                 manifest = {"format": _FORMAT, "id": shelf_id, "name": name.strip(),
                             "created_at": datetime.now(timezone.utc).isoformat(),
                             "repository": {"uuid": repository["uuid"], "url": repository["url"]},
@@ -545,9 +608,9 @@ class ShelfManager:
             raise ShelfError(f"Cannot read shelf {shelf_id}: {exc}") from exc
 
     def list(self) -> list[dict]:
+        self._check_storage()
         if not self.storage_dir.exists():
             return []
-        self._ensure_storage()
         results = []
         for path in self.storage_dir.iterdir():
             if _ID.fullmatch(path.name):
@@ -559,9 +622,31 @@ class ShelfManager:
         return sorted(results, key=lambda shelf: shelf["created_at"], reverse=True)
 
     def details(self, shelf_id) -> dict:
-        self._ensure_storage()
-        manifest = self._load(shelf_id, verify_blobs=True)
-        return {**self._summary(manifest), "entries": manifest["entries"]}
+        """Read and verify a shelf without creating storage directories or locks."""
+        with self._client_lock:
+            self._check_storage()
+            manifest = self._load(shelf_id, verify_blobs=True)
+            return {**self._summary(manifest), "entries": manifest["entries"]}
+
+    def preflight_restore(self, shelf_id) -> dict:
+        """Verify current restore eligibility without changing the working copy.
+
+        The shelf and storage are read-only. BASE verification uses temporary
+        local files, not persistent shelf files. No lock file is created, so a
+        successful result cannot reserve the observed state for a later restore.
+        """
+        with self._client_lock:
+            self._check_storage()
+            if (self.storage_dir / ".operation.lock").exists():
+                raise ShelfError("Another shelf operation is running; retry preflight when it finishes")
+            manifest = self._load(shelf_id, verify_blobs=True)
+            observations = self._preflight(manifest)
+            for entry in manifest["entries"]:
+                self._check_observation(entry, observations[entry["path"]])
+            return {**self._summary(manifest), "operation": "restore", "dry_run": True,
+                    "can_restore": True, "shelf_retained": True,
+                    "repository": manifest["repository"], "entries": manifest["entries"],
+                    "warnings": self._preflight_warnings()}
 
     def _preflight(self, manifest):
         repository = self._info()

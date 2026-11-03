@@ -193,6 +193,115 @@ class ShelvesTests(unittest.TestCase):
         self.assertEqual(calls[0][:-1], ("export", "--quiet", "--ignore-externals", "-r", "BASE", "--", "a@b.txt@"))
         self.assertFalse(Path(calls[0][-1]).exists())
 
+    def test_preflight_create_is_read_only_and_returns_complete_plan(self):
+        self.manager.node("file.bin", "modified", content=b"changed\x00\xff")
+        self.manager.node("new", "unversioned", kind="dir")
+        (self.wc / "new/empty").mkdir()
+        before = self.manager._status()
+        result = self.manager.preflight_create(["file.bin", "new"])
+        self.assertTrue(result["dry_run"])
+        self.assertTrue(result["can_create"])
+        self.assertEqual(result["paths"], ["file.bin", "new", "new/empty"])
+        self.assertEqual(result["entry_count"], 3)
+        self.assertEqual(result["repository"]["uuid"], "test-uuid")
+        self.assertTrue(result["warnings"])
+        self.assertFalse(self.store.exists())
+        self.assertEqual(before, self.manager._status())
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"changed\x00\xff")
+        self.assertEqual(self.manager.commands, [])
+
+    def test_preflight_create_unsupported_does_not_create_storage(self):
+        self.manager.node("deleted", "deleted", kind="dir")
+        with self.assertRaisesRegex(ShelfError, "Deleted directories"):
+            self.manager.preflight_create(["deleted"])
+        self.assertFalse(self.store.exists())
+        self.assertEqual(self.manager.commands, [])
+
+    def test_preflight_create_rejects_unsafe_case_collision(self):
+        self.manager.node("UPPER", "unversioned", content=b"a")
+        self.manager.node("upper", "unversioned", content=b"b")
+        with self.assertRaisesRegex(ShelfError, "case-colliding"):
+            self.manager.preflight_create(["UPPER", "upper"])
+        self.assertFalse(self.store.exists())
+
+    def test_preflight_restore_does_not_mutate_shelf_or_worktree(self):
+        shelf = self.simple()
+        self.manager.clean()
+        before = {str(p.relative_to(self.store)): p.read_bytes()
+                  for p in self.store.rglob("*") if p.is_file()}
+        result = self.manager.preflight_restore(shelf["id"])
+        after = {str(p.relative_to(self.store)): p.read_bytes()
+                 for p in self.store.rglob("*") if p.is_file()}
+        self.assertTrue(result["dry_run"])
+        self.assertTrue(result["can_restore"])
+        self.assertTrue(result["shelf_retained"])
+        self.assertEqual(result["paths"], ["file.bin"])
+        self.assertEqual(before, after)
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"base")
+        self.assertEqual(self.manager.commands, [])
+        self.assertFalse((self.store / ".operation.lock").exists())
+
+    def test_preflight_restore_then_edit_does_not_authorize_stale_restore(self):
+        shelf = self.simple()
+        self.manager.clean()
+        self.manager.preflight_restore(shelf["id"])
+        (self.wc / "file.bin").write_bytes(b"later edit")
+        with self.assertRaises(ShelfConflict):
+            self.manager.restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"later edit")
+
+    def test_preflight_restore_conflict_and_corruption_fail_without_writes(self):
+        shelf = self.simple()
+        with self.assertRaises(ShelfConflict):
+            self.manager.preflight_restore(shelf["id"])
+        self.manager.clean()
+        blob = next((self.store / shelf["id"] / "blobs").iterdir())
+        blob.write_bytes(b"corruption")
+        with self.assertRaisesRegex(ShelfError, "damaged"):
+            self.manager.preflight_restore(shelf["id"])
+        self.assertEqual((self.wc / "file.bin").read_bytes(), b"base")
+        self.assertEqual(self.manager.commands, [])
+        self.assertFalse((self.store / ".operation.lock").exists())
+
+    def test_readonly_methods_never_create_missing_storage(self):
+        self.assertEqual(self.manager.list(), [])
+        with self.assertRaises(ShelfError):
+            self.manager.details("0" * 32)
+        with self.assertRaises(ShelfError):
+            self.manager.preflight_restore("0" * 32)
+        self.assertFalse(self.store.exists())
+
+    def test_readonly_methods_do_not_call_storage_mutation_helpers(self):
+        shelf = self.simple()
+        self.manager.clean()
+        with patch.object(self.manager, "_ensure_storage", side_effect=AssertionError("unexpected storage creation")), patch.object(self.manager, "_storage_lock", side_effect=AssertionError("unexpected lock creation")):
+            self.assertTrue(self.manager.list())
+            self.assertEqual(self.manager.details(shelf["id"])["id"], shelf["id"])
+            self.assertTrue(self.manager.preflight_restore(shelf["id"])["can_restore"])
+            self.manager.states["file.bin"]["item"] = "modified"
+            (self.wc / "file.bin").write_bytes(b"new edit")
+            self.assertTrue(self.manager.preflight_create(["file.bin"])["can_create"])
+
+    def test_preflights_refuse_active_operation_without_deleting_lock(self):
+        self.manager.node("file.txt", "modified", content=b"edit")
+        self.store.mkdir()
+        lock = self.store / ".operation.lock"
+        lock.write_text("12345")
+        for action in (lambda: self.manager.preflight_create(["file.txt"]),
+                       lambda: self.manager.preflight_restore("0" * 32)):
+            with self.assertRaisesRegex(ShelfError, "Another shelf operation"):
+                action()
+        self.assertEqual(lock.read_text(), "12345")
+
+    def test_base_export_refuses_temp_inside_working_copy(self):
+        manager = ShelfManager(self.wc, self.store)
+        with patch("svn_client.shelves.tempfile.gettempdir", return_value=str(self.wc)), patch.object(manager, "_svn") as svn:
+            with self.assertRaisesRegex(ShelfError, "temporary storage must be outside"):
+                manager._exported_base_hash("file.txt")
+        svn.assert_not_called()
+        self.assertEqual(list(self.wc.iterdir()), [])
+        self.assertFalse(self.store.exists())
+
     def test_all_paths_preflight_before_any_write(self):
         self.manager.node("a.txt", "modified", content=b"A")
         self.manager.node("z.txt", "modified", content=b"Z")

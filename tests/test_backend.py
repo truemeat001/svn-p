@@ -207,7 +207,7 @@ class BackendUnitTests(unittest.TestCase):
             self.client.command(["status"], timeout=-1)
 
     def test_native_encoding_fallback(self):
-        with patch("svn_client.backend.locale.getencoding", return_value="cp1252"):
+        with patch("svn_client.backend.locale.getencoding", return_value="cp1252", create=True):
             self.assertEqual(self.client._decode(b"caf\xe9"), "café")
 
 

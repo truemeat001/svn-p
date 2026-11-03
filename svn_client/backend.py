@@ -14,7 +14,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
+import tempfile
 import threading
 from typing import Sequence
 from urllib.parse import urlsplit
@@ -87,6 +89,7 @@ _BLOCKED_OPTIONS = {
     "--editor-cmd", "--diff-cmd", "--diff3-cmd",
 }
 _BLOCKED_COMMANDS = {"propedit", "pedit", "pe"}
+_DIRECT_TARGET_LIMIT = 24_000  # Leave headroom below Windows' 32,767 UTF-16 units.
 
 
 def _redact_credentials(text: str) -> str:
@@ -336,10 +339,12 @@ class SvnClient:
         }
 
     def status(self, paths: Sequence[str | os.PathLike[str]] | None = None,
-               *, include_ignored: bool = False) -> list[StatusEntry]:
+               *, include_ignored: bool = False, verbose: bool = False) -> list[StatusEntry]:
         args = ["status", "--xml", "--ignore-externals"]
         if include_ignored:
             args.append("--no-ignore")
+        if verbose:
+            args.append("--verbose")
         root = self._xml([*args, "--", *self._local_targets(paths)])
         changelists = {id(entry): group.get("name") for group in root.findall(".//changelist")
                       for entry in group.findall("entry")}
@@ -406,6 +411,233 @@ class SvnClient:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("A nonempty commit message is required.")
         return self.command(["commit", "--message", message, "--encoding", "UTF-8", "--", *self._local_targets(paths)])
+
+    @staticmethod
+    def _changelist_name(name: str) -> str:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("A nonempty changelist name is required.")
+        if any(ord(character) < 32 or ord(character) == 127 for character in name):
+            raise ValueError("Changelist names cannot contain control characters.")
+        return name
+
+    def changelists(self) -> dict[str, list[StatusEntry]]:
+        """List native, local SVN file assignments, including clean members.
+
+        A native changelist has no independent persisted identity: after its last
+        file is removed, it no longer exists. Directories cannot be members.
+        """
+        result: dict[str, list[StatusEntry]] = {}
+        for entry in self.status(verbose=True):
+            if entry.changelist and not entry.file_external and entry.item != "external":
+                # Never turn an unexpected absolute/outside status entry into a
+                # target for a later changelist commit.
+                self._local_targets([entry.path])
+                result.setdefault(entry.changelist, []).append(entry)
+        for entries in result.values():
+            entries.sort(key=lambda entry: entry.path)
+        return dict(sorted(result.items()))
+
+    def _changelist_file_targets(self, paths: Sequence[str | os.PathLike[str]]) -> list[str]:
+        if paths is None:
+            raise ValueError("Select individual versioned files for the changelist.")
+        targets = self._local_targets(paths)
+        root_info = self.info()
+        wc_root = str(root_info.get("wc_root") or "")
+        if not wc_root:
+            raise SvnError("SVN did not identify a working-copy root for changelist operations.")
+        expected_root = Path(wc_root).resolve()
+        for original in paths:
+            # Reject symlinks and Windows reparse points, even when their
+            # destination happens to remain within the selected working copy.
+            absolute = Path(os.path.abspath(self.working_copy / os.fspath(original)))
+            cursor = self.working_copy
+            for part in absolute.relative_to(self.working_copy).parts:
+                cursor /= part
+                try:
+                    metadata = cursor.lstat()
+                except FileNotFoundError:
+                    # Scheduled deletions need not exist on disk; SVN info is
+                    # still authoritative for their kind and WC membership.
+                    continue
+                if stat.S_ISLNK(metadata.st_mode) or (
+                    getattr(metadata, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                ):
+                    raise ValueError("Changelist operations do not support symbolic links or junctions.")
+            info = self.info(original)
+            if info.get("kind") != "file":
+                raise ValueError("SVN changelists support individual versioned files only, not directories.")
+            file_root = str(info.get("wc_root") or "")
+            if not file_root or Path(file_root).resolve() != expected_root:
+                raise ValueError("Files in externals or nested working copies cannot join this changelist.")
+        selected = set(targets)
+        # Status does not support --targets on all supported SVN versions. Scan
+        # the selected WC once instead of producing a huge status argument list.
+        for entry in self.status(verbose=True):
+            if entry.file_external or entry.item == "external":
+                if self._local_targets([entry.path])[0] in selected:
+                    raise ValueError("External files cannot join a changelist in this working copy.")
+        return list(dict.fromkeys(targets))
+
+    def _command_size(self, args: Sequence[str]) -> int:
+        text = subprocess.list2cmdline([self.executable, "--non-interactive", "--no-auth-cache", *args])
+        return len(text.encode("utf-16-le")) // 2
+
+    def _command_with_targets(self, options: Sequence[str], targets: Sequence[str],
+                              positionals: Sequence[str] = ()) -> CommandResult:
+        """Keep large exact selections below the Windows argument limit.
+
+        SVN reads --targets using the native locale and trims line whitespace.
+        Encoding is strict, with a read-only XML roundtrip before any mutation.
+        Names that cannot be represented as target-file lines stay on argv.
+        No passwords, commit messages, or file contents are written to disk.
+        """
+        targets = list(dict.fromkeys(targets))
+        direct = [*options, "--", *positionals, *targets]
+        if self._command_size(direct) <= _DIRECT_TARGET_LIMIT:
+            return self.command(direct)
+        encoding = locale.getencoding() if hasattr(locale, "getencoding") else locale.getpreferredencoding(False)
+        buffered: list[str] = []
+        lines: list[str] = []
+        inline: list[str] = []
+        for target in targets:
+            if "://" in target and urlsplit(target).password is not None:
+                raise ValueError("Passwords in target filenames or URLs cannot be written to a targets file.")
+            # Prefix protects leading whitespace; an empty peg suffix protects
+            # trailing whitespace from SVN's line trimming. Existing targets
+            # containing '@' already have the suffix from _local_targets().
+            line = "./" + target + ("@" if "@" not in target else "")
+            try:
+                encoded = line.encode(encoding, errors="strict")
+                if encoded.decode(encoding, errors="strict") != line:
+                    raise UnicodeError("Target does not roundtrip through the native encoding")
+            except (UnicodeError, LookupError):
+                inline.append(target)
+                continue
+            if "\n" in line or "\r" in line:
+                inline.append(target)
+            else:
+                buffered.append(target)
+                lines.append(line)
+        if not buffered:
+            raise ValueError("This selection is too large for one command and its filenames cannot safely use an SVN targets file. Select fewer files.")
+        with tempfile.TemporaryDirectory(prefix="svn-client-targets-") as directory:
+            filename = Path(directory) / "targets.txt"
+            # Use a private temporary directory and restrictive POSIX mode where
+            # supported. Close the handle before SVN opens it on Windows.
+            descriptor = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(("\n".join(lines) + "\n").encode(encoding, errors="strict"))
+            args = [*options, "--targets", str(filename), "--", *positionals, *inline]
+            if self._command_size(args) > _DIRECT_TARGET_LIMIT:
+                raise ValueError("The commit message, changelist name, or exceptional filenames are too long for one command. Select fewer files or shorten the message.")
+            # A misdetected legacy Windows codepage must never redirect a write
+            # to a different existing (mojibake) filename. Verify the exact set
+            # through the same SVN executable before using this targets file.
+            try:
+                root = self._xml(["info", "--xml", "--depth", "empty", "--targets", str(filename)])
+                observed = [self._local_targets([entry.get("path", "")])[0] for entry in root.findall("entry")]
+            except (SvnError, ValueError) as error:
+                raise SvnError("SVN could not safely read the exact target filenames. No changelist operation was started; select fewer files or check the SVN locale.") from error
+            if sorted(observed) != sorted(buffered):
+                raise SvnError("SVN target-file decoding changed the filename selection. No changelist operation was started.")
+            return self.command(args)
+
+    def assign_changelist(self, name: str, paths: Sequence[str | os.PathLike[str]]) -> CommandResult:
+        """Move selected versioned files into one native SVN changelist.
+
+        Every target is checked before changing any assignment. This does not add
+        files to version control and does not create empty placeholder lists.
+        """
+        name = self._changelist_name(name)
+        with self._lock:
+            targets = self._changelist_file_targets(paths)
+            return self._command_with_targets(["changelist", "--depth", "empty"], targets, [name])
+
+    def validate_changelist_paths(self, paths: Sequence[str | os.PathLike[str]]) -> list[str]:
+        """Read-only validation; return unique raw relative file paths.
+
+        The result is for display or later high-level calls, not literal CLI
+        arguments. It excludes the empty peg suffix needed only on SVN argv.
+        Validation does not reserve files against changes by other processes.
+        """
+        with self._lock:
+            targets = self._changelist_file_targets(paths)
+            return [target[:-1] if "@" in target else target for target in targets]
+
+    def remove_changelist(self, paths: Sequence[str | os.PathLike[str]]) -> CommandResult:
+        """Remove only the selected files' labels; keep their content and edits."""
+        with self._lock:
+            targets = self._changelist_file_targets(paths)
+            return self._command_with_targets(["changelist", "--remove", "--depth", "empty"], targets)
+
+    def preflight_changelist_commit(self, name: str,
+                                   expected_paths: Sequence[str | os.PathLike[str]] | None = None) -> list[StatusEntry]:
+        """Validate local commit eligibility without modifying the repository.
+
+        Returns all members, including clean ones, and checks known local
+        dependencies. This is not an SVN server dry-run: remote out-of-date
+        checks, authorization, locks, and hook acceptance are not established.
+        Another application can still change files or assignments afterward.
+        """
+        name = self._changelist_name(name)
+        with self._lock:
+            members = self.changelists().get(name, [])
+            if not members:
+                raise ValueError("The changelist has no members in this working copy. Refresh before committing.")
+            paths = [entry.path for entry in members]
+            targets = set(self._local_targets(paths))
+            if expected_paths is not None and set(self._local_targets(expected_paths)) != targets:
+                raise ValueError("Changelist membership changed after review. Refresh and review it again before committing.")
+            if not any(entry.item not in {"normal", "none"} or entry.props in {"modified", "conflicted"} for entry in members):
+                raise ValueError("The changelist has no modified files to commit.")
+            if any(entry.conflicted or entry.item in {"missing", "obstructed", "incomplete", "unversioned", "ignored", "external"} for entry in members):
+                raise ValueError("Resolve conflicting, missing, obstructed, or unversioned changelist members before committing.")
+            self._changelist_file_targets(paths)
+            # Build lexical keys only. An unrelated symlink elsewhere in the
+            # working copy must not fail validation of the reviewed members.
+            statuses = {os.path.normcase(os.path.abspath(self.working_copy / entry.path)): entry
+                        for entry in self.status(verbose=True)}
+            for entry in members:
+                for counterpart in (entry.moved_from, entry.moved_to):
+                    if counterpart and self._local_targets([counterpart])[0] not in targets:
+                        raise ValueError("A moved file requires both source and destination in the reviewed changelist.")
+                parent = Path(os.path.abspath(self.working_copy / entry.path)).parent
+                while parent == self.working_copy or self.working_copy in parent.parents:
+                    parent_status = statuses.get(os.path.normcase(str(parent)))
+                    if parent_status and (parent_status.conflicted or parent_status.item in {"added", "deleted", "replaced", "missing", "obstructed", "incomplete"}):
+                        raise ValueError("A changelist member depends on an added, deleted, replaced, or conflicted directory. Commit or resolve the directory change separately; this operation will not expand its scope.")
+                    if parent == self.working_copy:
+                        break
+                    parent = parent.parent
+            return members
+
+    def commit_changelist(self, name: str, message: str, *, keep_changelist: bool = False,
+                         expected_paths: Sequence[str | os.PathLike[str]] | None = None) -> CommandResult:
+        """Commit one native changelist without broadening its file scope.
+
+        ``expected_paths`` is the full membership displayed during confirmation,
+        including clean members. A changed membership aborts before the commit.
+        Explicit file targets plus SVN's changelist filter exclude unrelated
+        paths even if another process adds a member after this preflight.
+        File contents can still be changed by an external editor during commit.
+        SVN removes committed assignments unless ``keep_changelist`` is true.
+        Added/deleted directory dependencies are never automatically included.
+        """
+        name = self._changelist_name(name)
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("A nonempty commit message is required.")
+        if not isinstance(keep_changelist, bool):
+            raise ValueError("keep_changelist must be a boolean.")
+        with self._lock:
+            members = self.preflight_changelist_commit(name, expected_paths)
+            paths = [entry.path for entry in members]
+            targets = self._local_targets(paths)
+            args = ["commit", "--changelist=" + name, "--message=" + message,
+                    "--encoding", "UTF-8", "--depth", "empty"]
+            if keep_changelist:
+                args.append("--keep-changelists")
+            return self._command_with_targets(args, targets)
 
     def add(self, paths: Sequence[str | os.PathLike[str]]) -> CommandResult:
         return self.command(["add", "--parents", "--", *self._local_targets(paths)])

@@ -81,6 +81,37 @@ SVN executable lazily. A manager cannot store shelves inside its working copy.
 Returned summaries have `id`, `name`, `created_at`, `paths`, `files`, `entry_count`,
 `backup_only`, and `repository_url`. `ShelfConflict` is a `ShelfError` subclass.
 
+## Read-only planning API
+
+`preflight_create(paths=None)` performs the same selection, unsupported-state,
+BASE/property, file-integrity, hierarchy, and source-stability checks as creation,
+but does not create a shelf. It returns `operation: "create"`, `dry_run: true`,
+`can_create: true`, `paths`, `files`, `entry_count`, `entries`, repository identity,
+and `warnings`. A shelf name is not an argument to this method; clients should
+validate their requested name separately (nonblank, at most 200 characters).
+
+`preflight_restore(shelf_id)` verifies the shelf hashes and performs the same
+repository, BASE, clean-content, collision, and path checks as restoration. It
+returns the shelf summary, `operation: "restore"`, `dry_run: true`,
+`can_restore: true`, `shelf_retained: true`, entries, repository identity, and
+warnings. Unsupported states raise `ShelfError`; conflicts raise `ShelfConflict`.
+
+`list()`, `details(shelf_id)`, and both preflight methods never create a shelf
+storage directory or an operation lock. `details()` verifies the stored hashes,
+so it is also suitable for inspecting a proposed shelf deletion. BASE verification
+may create short-lived files in the system temporary directory, which must be
+outside both the working copy and shelf storage. These files are cleaned up. SVN
+read commands may use their own local cache metadata internally; the methods do
+not change working-copy content, scheduling, or properties.
+
+Preflight is an advisory snapshot, **not a reservation or authorization**. It holds
+an in-process client lock only, and refuses an already-running shelf operation.
+Another process can change the working copy or shelf after checking. `create()`
+and `restore()` always repeat validation rather than trusting an earlier plan.
+Successful preflight does not guarantee available disk space, write permissions,
+or freedom from later I/O/SVN failures. Execute only with the caller's separately
+obtained permission.
+
 ## Verification status
 
 The test suite contains deterministic filesystem/command tests plus real local-SVN
