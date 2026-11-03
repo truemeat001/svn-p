@@ -1,14 +1,16 @@
 # Workspace checkpoint · 2026-11-03
 
+Subsequent interactive browser verification with synthetic status is documented in [WORKSPACE_BROWSER_VALIDATION.md](WORKSPACE_BROWSER_VALIDATION.md).
+
 This section supersedes earlier checkpoint counts below. It is a source/API checkpoint, not a real-SVN or Windows release.
 
-- Node model tests: **11 passed**.
+- Node model tests: **12 passed**.
 - Python: **49 run, 48 passed, 1 explicitly skipped**. Tests use the unchanged original discovery/settings modules with temporary `.svn` candidate markers and synthetic status adapters. The skipped test requires both installed SVN and an explicitly provided working copy.
 - `node --check web/app.js`, Python compilation and the offline rebuild passed.
 - The original backend, discovery, workspaces and status_stream sources were reused without edits. New code is contained in the web prototype.
 - New coverage: authorized discovery, nested candidates, ID-only selection, selection generation, persistence/restore, tampered and corrupt preferences, save failures, stale IDs, symlink/root/ancestor replacement, change during read, concurrent operation rejection, partial scan disclosure, settings path exclusions, missing SVN, HTTP origin/token/schema/body-size/recursion checks, and selection invalidation after rescan.
 - One initial combined run encountered a loopback HTTP timeout. A targeted rerun passed (26 passed, 1 skipped), and the subsequent final combined Python run passed (48 passed, 1 skipped). The earlier timeout is not represented as a pass.
-- Source review found and corrected stale picker “current” markers, removed-selection inconsistency, nonatomic config metadata and nested-JSON error handling. Original safety modules were not changed.
+- Source review found and corrected stale picker “current” markers, removed-selection inconsistency, nonatomic config metadata and nested-JSON error handling. A final source review also found that delayed discovery could overwrite a newer selection generation; older catalogs are now rejected and a model regression covers the version rule. Original safety modules were not changed.
 - **Automated Chromium tests did not run successfully:** launching installed Chromium was blocked at its local Unix socket setup. `tests/workspaces.browser.test.cjs` and its synthetic fixture server are supplied but remain unverified. They do not constitute real SVN tests.
 - New workspace UI browser interaction is not yet claimed verified in this frozen checkpoint. Older manual browser observations below apply to the preceding demo checkpoint only.
 - No SVN or svnadmin installed. No real working-copy, repository/network, native Windows or Tauri verification. No SVN write operation was executed.

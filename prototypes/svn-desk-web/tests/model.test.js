@@ -14,3 +14,12 @@ test('HTML-sensitive filenames are escaped',()=>assert.equal(safeText('<img src=
 test('file names handle Windows display separators',()=>assert.equal(fileName('C:\\Work\\a.cs'),'a.cs'));
 
 test('modified filter includes property-only changes in normal/none states',()=>{const rows=[{path:'a',item:'normal',props:'modified'},{path:'b',item:'none',props:'modified'},{path:'c',item:'normal',props:'none'}];assert.equal(filteredRows(rows,{filter:'modified'}).length,2);});
+
+
+import {isStaleWorkspaceCatalog} from '../web/model.js';
+test('older workspace catalogs cannot roll back a newer selected generation',()=>{
+ assert.equal(isStaleWorkspaceCatalog({current:{selectionVersion:2}},3),true);
+ assert.equal(isStaleWorkspaceCatalog({current:{selectionVersion:3}},3),false);
+ assert.equal(isStaleWorkspaceCatalog({current:{selectionVersion:4}},3),false);
+ assert.equal(isStaleWorkspaceCatalog({enabled:false},3),false);
+});

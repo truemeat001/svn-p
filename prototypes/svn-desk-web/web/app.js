@@ -1,4 +1,4 @@
-import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath} from './model.js';
+import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog} from './model.js';
 import {demoRows,demoDiff,demoHistory} from './demo-data.js';
 const $=id=>document.getElementById(id);
 const paths={
@@ -154,7 +154,8 @@ async function loadWorkspaceCatalog(){
  const request=++workspaceRequest;
  $('modal-content').innerHTML='<p role="status">正在扫描已授权目录… 不读取文件内容，不运行 SVN。</p>';
  try{const data=await api('/api/workspaces');if(request===workspaceRequest&&$('modal').open&&modalView==='workspaces'){
-  if(data.current&&data.current.selectionVersion!==state.selectionVersion){
+  if(isStaleWorkspaceCatalog(data,state.selectionVersion))throw Error('工作区状态已更新，请重新扫描候选。');
+  if(data.current&&data.current.selectionVersion>state.selectionVersion){
    if(data.current.mode==='select')applySnapshot({...data.current,rows:[]});
    else{state.workspace=data.current.workspace;state.root=data.current.root;resetWorkspaceScope();failSnapshot('当前工作区已改变，请刷新状态后继续。');}
   }

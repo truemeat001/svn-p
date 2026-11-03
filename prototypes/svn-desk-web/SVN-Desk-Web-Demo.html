@@ -106,6 +106,11 @@ function safeText(value) { return String(value ?? '').replace(/[&<>"']/g, c=>({'
 function fileName(path) { return path.replace(/\\/g,'/').split('/').at(-1); }
 function parentPath(path) { return path.split('/').slice(0,-1).join('/') || '工作副本根目录'; }
 
+// Catalog scans and status reads can finish out of order across tabs/refreshes.
+function isStaleWorkspaceCatalog(catalog,currentVersion){
+ return Number.isSafeInteger(catalog?.current?.selectionVersion)&&catalog.current.selectionVersion<currentVersion;
+}
+
 // Entire fixture is fictional. No repository connection, history or real file reads.
 const r=(path,item,changelist='',extra={})=>({id:path,path,item,changelist,props:'none',revision:2841,last_changed_author:'chen',kind:'file',...extra});
 const demoRows=[
@@ -298,7 +303,8 @@ async function loadWorkspaceCatalog(){
  const request=++workspaceRequest;
  $('modal-content').innerHTML='<p role="status">正在扫描已授权目录… 不读取文件内容，不运行 SVN。</p>';
  try{const data=await api('/api/workspaces');if(request===workspaceRequest&&$('modal').open&&modalView==='workspaces'){
-  if(data.current&&data.current.selectionVersion!==state.selectionVersion){
+  if(isStaleWorkspaceCatalog(data,state.selectionVersion))throw Error('工作区状态已更新，请重新扫描候选。');
+  if(data.current&&data.current.selectionVersion>state.selectionVersion){
    if(data.current.mode==='select')applySnapshot({...data.current,rows:[]});
    else{state.workspace=data.current.workspace;state.root=data.current.root;resetWorkspaceScope();failSnapshot('当前工作区已改变，请刷新状态后继续。');}
   }

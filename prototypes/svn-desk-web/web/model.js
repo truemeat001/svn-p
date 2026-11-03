@@ -34,3 +34,8 @@ export function reviewSelection(rows, selectedIds) {
 export function safeText(value) { return String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 export function fileName(path) { return path.replace(/\\/g,'/').split('/').at(-1); }
 export function parentPath(path) { return path.split('/').slice(0,-1).join('/') || '工作副本根目录'; }
+
+// Catalog scans and status reads can finish out of order across tabs/refreshes.
+export function isStaleWorkspaceCatalog(catalog,currentVersion){
+ return Number.isSafeInteger(catalog?.current?.selectionVersion)&&catalog.current.selectionVersion<currentVersion;
+}
