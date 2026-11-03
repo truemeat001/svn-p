@@ -19,6 +19,12 @@ import sys
 from typing import Any, Sequence, TextIO
 
 from .backend import CommandResult, SvnClient, SvnError, redact_credentials
+from .branches import (BranchError, BranchManager, BranchOperationError,
+                       validate_branch_revision, validate_branch_url)
+from .conflicts import ACCEPT_CHOICES, ConflictManager
+from .fileops import FileOperationManager
+from .history import HistoryManager
+from .locks import LockError, LockManager, LockOperationError, MAX_LOCK_FILES
 from .shelves import ShelfConflict, ShelfError, ShelfManager
 
 SCHEMA_VERSION = 1
@@ -117,6 +123,78 @@ def build_parser() -> JsonParser:
     diff = commands.add_parser("diff", allow_abbrev=False, help="Read SVN text diff; binary payloads are not included")
     _paths(diff)
     diff.add_argument("--revision", help="SVN revision or range: numbers, HEAD, BASE, COMMITTED, PREV")
+    history = commands.add_parser("history", allow_abbrev=False,
+                                  help="Bounded path history with older-page cursor (read-only)")
+    history.add_argument("--path", default=".", help="One local file or directory; never a repository URL")
+    history.add_argument("--limit", type=_positive_int, default=100, help="Entries per page, at most 1000")
+    history.add_argument("--start-revision", default="HEAD", help="HEAD, BASE, or numeric older-page cursor")
+    compare = commands.add_parser("compare", allow_abbrev=False,
+                                  help="Bounded comparison of explicit revisions for one local path")
+    compare.add_argument("--path", required=True)
+    compare.add_argument("--from", dest="from_revision", default="BASE", help="BASE, HEAD, or a revision number")
+    compare.add_argument("--to", dest="to_revision", default="WORKING", help="WORKING, BASE, HEAD, or a revision number")
+    branches = commands.add_parser("branch", allow_abbrev=False,
+                                    help="Guarded whole-workspace switch/merge; branch/tag copies are plan-only")
+    branch_actions = branches.add_subparsers(dest="action", required=True, parser_class=JsonParser)
+    switch = branch_actions.add_parser("switch", allow_abbrev=False,
+                                       help="Switch a clean whole working-copy root to a fixed revision")
+    switch.add_argument("--url", required=True, help="Credential-free same-repository directory URL")
+    switch.add_argument("--revision", dest="branch_revision", type=validate_branch_revision, required=True,
+                        help="Explicit nonnegative numeric revision; no HEAD or peg suffix")
+    switch.add_argument("--expect-state-sha256", help="Required with --yes: exact hash from reviewed --dry-run")
+    _mutation(switch)
+    merge = branch_actions.add_parser("merge", allow_abbrev=False,
+                                      help="Preview/apply a forward range locally; never commits")
+    merge.add_argument("--source-url", required=True, help="Credential-free same-repository source directory URL")
+    merge.add_argument("--start-revision", type=validate_branch_revision, required=True)
+    merge.add_argument("--end-revision", type=validate_branch_revision, required=True)
+    merge.add_argument("--expect-state-sha256", help="Required with --yes: exact hash from reviewed --dry-run")
+    _mutation(merge)
+    copy = branch_actions.add_parser("plan-copy", allow_abbrev=False,
+                                     help="Read-only branch/tag creation plan. There is no execute mode")
+    copy.add_argument("--kind", choices=("branch", "tag"), required=True)
+    copy.add_argument("--source-url", required=True)
+    copy.add_argument("--destination-url", required=True)
+    copy.add_argument("--revision", dest="branch_revision", type=validate_branch_revision, required=True)
+    copy_message = copy.add_mutually_exclusive_group(required=True)
+    copy_message.add_argument("--message")
+    copy_message.add_argument("--message-file", metavar="FILE|-", help="Planned message, UTF-8, at most 8192 bytes")
+    copy.set_defaults(dry_run=True)
+    locks = commands.add_parser("lock", allow_abbrev=False,
+                                help="Inspect/acquire/release repository file locks; never force or steal")
+    lock_actions = locks.add_subparsers(dest="action", required=True, parser_class=JsonParser)
+    for operation in ("inspect", "acquire", "release"):
+        action = lock_actions.add_parser(operation, allow_abbrev=False)
+        _paths(action, required=True)
+        if operation != "inspect":
+            if operation == "acquire":
+                action.add_argument("--comment", default="", help="Optional server-visible lock reason; at most 4096 UTF-8 bytes")
+            action.add_argument("--expect-state-sha256", help="Bind the exact files, comment, and lock state from reviewed preflight")
+            _mutation(action)
+    files = commands.add_parser("file", allow_abbrev=False,
+                                help="Explicit local file delete, move/rename and history-preserving copy")
+    file_actions = files.add_subparsers(dest="action", required=True, parser_class=JsonParser)
+    for operation in ("delete", "move", "copy"):
+        action = file_actions.add_parser(operation, allow_abbrev=False)
+        if operation == "delete":
+            _paths(action, required=True)
+        else:
+            action.add_argument("--source", required=True)
+            action.add_argument("--destination", required=True, help="Exact new local file path; never an existing directory")
+        action.add_argument("--expect-state-sha256", help="Refuse if state differs from reviewed preflight")
+        _mutation(action)
+    conflicts = commands.add_parser("conflict", allow_abbrev=False,
+                                    help="Inspect conflicts and explicitly resolve supported exact nodes")
+    conflict_actions = conflicts.add_subparsers(dest="action", required=True, parser_class=JsonParser)
+    conflict_list = conflict_actions.add_parser("list", allow_abbrev=False)
+    _paths(conflict_list)
+    conflict_inspect = conflict_actions.add_parser("inspect", allow_abbrev=False)
+    conflict_inspect.add_argument("--path", required=True)
+    conflict_resolve = conflict_actions.add_parser("resolve", allow_abbrev=False)
+    _paths(conflict_resolve, required=True)
+    conflict_resolve.add_argument("--accept", required=True, choices=ACCEPT_CHOICES)
+    conflict_resolve.add_argument("--expect-state-sha256", help="Bind reviewed working-file bytes and checked metadata, not conflict sidecars")
+    _mutation(conflict_resolve)
     lists = commands.add_parser("changelist", allow_abbrev=False, help="Native local SVN file labels")
     actions = lists.add_subparsers(dest="action", required=True, parser_class=JsonParser)
     listing = actions.add_parser("list", allow_abbrev=False)
@@ -269,6 +347,7 @@ class RunContext:
         self.command: str | None = None
         self.workspace: str | None = None
         self.dry_run = False
+        self.success_outcome: str | None = None
         self.warnings: list[str] = []
 
     def mutate(self, callback, *args, **kwargs):
@@ -283,6 +362,19 @@ def _execute(args: argparse.Namespace, stdin: TextIO, context: RunContext) -> An
         raise CliError("usage_error", "--max-text-bytes must not exceed 67108864.")
     if args.mutating and not (args.yes or args.dry_run):
         raise CliError("confirmation_required", "Mutation requires --yes. Use --dry-run to inspect and validate first.")
+    if args.command == "branch":
+        if args.action in {"switch", "merge"}:
+            expected = args.expect_state_sha256
+            if not args.dry_run and expected is None:
+                raise CliError("confirmation_required", "Branch mutations require --expect-state-sha256 from a reviewed --dry-run, as well as --yes.")
+            if expected is not None and not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise CliError("validation_failed", "--expect-state-sha256 must be a lowercase SHA-256 hex string.")
+        if args.action == "switch":
+            args.url = validate_branch_url(args.url)
+        else:
+            args.source_url = validate_branch_url(args.source_url)
+            if args.action == "plan-copy":
+                args.destination_url = validate_branch_url(args.destination_url)
     if not args.workspace or "\0" in args.workspace:
         raise CliError("validation_failed", "--workspace must identify an existing local directory.")
     workspace = Path(args.workspace).expanduser().resolve()
@@ -326,6 +418,126 @@ def _execute(args: argparse.Namespace, stdin: TextIO, context: RunContext) -> An
         context.warnings.append("SVN text diff does not contain binary file payloads. Text uses the backend's decoded output; it is not a byte-for-byte file export.")
         return {"diff": _text(client.diff(paths, revision=revision), args.max_text_bytes),
                 "binary_payloads_included": False}
+    if args.command in {"history", "compare"}:
+        target = _normalized_paths(workspace, [args.path])[0]
+        manager = HistoryManager(client)
+        if args.command == "history":
+            context.warnings.append("History is scoped to this path; changed_paths lists every affected path in each matching commit. Copy history follows SVN semantics. No working-copy update is performed.")
+            return _plain(manager.history(target, limit=args.limit, start_revision=args.start_revision))
+        context.warnings.append("Comparison is read-only. Binary payloads are not included; decoded/redacted text is not a byte-for-byte export. A truncated result is not a complete patch. HEAD or numeric revisions can contact the repository.")
+        return _plain(manager.compare(target, from_revision=args.from_revision,
+                                      to_revision=args.to_revision, max_text_bytes=args.max_text_bytes))
+    if args.command == "branch":
+        branches = BranchManager(client)
+        context.warnings.append("Branch workflows contact the repository and inspect the whole clean working-copy root. A state hash is a stale-review guard, not authorization or a cross-process lock.")
+        if args.action == "plan-copy":
+            message = args.message if args.message is not None else _read_input(args.message_file, stdin, 8192)
+            plan = branches.preflight_copy(args.source_url, args.destination_url,
+                                           revision=args.branch_revision, kind=args.kind, message=message)
+            context.warnings.extend(plan.warnings)
+            data = _plain(plan)
+            # As with commits, do not echo the user's message into tool logs.
+            data.pop("message", None)
+            data["message_utf8_bytes"] = len(message.encode("utf-8"))
+            return {"preflight": data, "execution_supported": False,
+                    "repository_unchanged": True, "working_copy_unchanged": True,
+                    "commit_performed": False}
+        url = args.url if args.action == "switch" else args.source_url
+        options = ({"revision": args.branch_revision} if args.action == "switch" else
+                   {"start_revision": args.start_revision, "end_revision": args.end_revision})
+        if args.dry_run:
+            plan = getattr(branches, "preflight_" + args.action)(url, **options)
+            if args.expect_state_sha256 is not None and args.expect_state_sha256 != plan.state_sha256:
+                raise CliError("validation_failed", "Branch state differs from the reviewed preflight.",
+                               details={"current_state_sha256": plan.state_sha256})
+            context.warnings.extend(plan.warnings)
+            data = _plain(plan)
+            data["preview"] = _text(data.pop("preview_text"), args.max_text_bytes)
+            return {"preflight": data, "working_copy_unchanged": True,
+                    "repository_unchanged": True, "commit_performed": False}
+        # The manager repeats preflight and compares this caller-supplied hash
+        # immediately before mutation. Never substitute a fresh, unreviewed hash.
+        result = context.mutate(getattr(branches, args.action), url, **options,
+                                confirmed=True, expected_state_sha256=args.expect_state_sha256)
+        if result.operation != args.action or result.commit_performed:
+            raise BranchOperationError("Branch postconditions returned an unexpected operation or commit state. Inspect the working copy and repository before continuing.")
+        if args.action == "switch":
+            if result.outcome != "switched":
+                raise BranchOperationError("The switch result was not verified. Inspect the actual working-copy URL and revision.")
+        else:
+            if result.outcome not in {"needs_review", "conflicted"}:
+                raise BranchOperationError("The merge result could not be classified. Inspect local status, diff and mergeinfo before continuing.")
+            context.success_outcome = result.outcome
+            context.warnings.append("Merge results are local edits requiring review. Inspect status, diff and mergeinfo, resolve any conflicts and run project tests before separately authorizing a commit.")
+        data = _plain(result)
+        data["output"] = _text(result.output, args.max_text_bytes)
+        return {"result": data, "commit_performed": False,
+                "requires_review": args.action == "merge",
+                "automatic_retry_safe": False}
+    if args.command == "lock":
+        if len(paths) > MAX_LOCK_FILES:
+            raise CliError("validation_failed", f"Select at most {MAX_LOCK_FILES} files per lock request.")
+        locks = LockManager(client)
+        context.warnings.append("Lock inspection and preflight contact the repository. Queries run one file at a time; the timeout applies to each SVN process, not the whole batch.")
+        if args.action == "inspect":
+            return {"files": _plain(locks.inspect(paths)), "server_checked": True,
+                    "raw_tokens_included": False}
+        if args.expect_state_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", args.expect_state_sha256):
+            raise CliError("validation_failed", "--expect-state-sha256 must be a lowercase SHA-256 hex string.")
+        plan = locks.preflight_lock(paths, args.comment) if args.action == "acquire" else locks.preflight_unlock(paths)
+        if args.expect_state_sha256 is not None and args.expect_state_sha256 != plan.state_sha256:
+            raise CliError("validation_failed", "Lock state differs from the reviewed preflight.",
+                           details={"current_state_sha256": plan.state_sha256})
+        context.warnings.extend(plan.warnings)
+        if args.dry_run:
+            return {"preflight": _plain(plan), "server_checked": True,
+                    "repository_unchanged": True, "raw_tokens_included": False}
+        if args.action == "acquire":
+            result = context.mutate(locks.lock, plan.paths, plan.comment, confirmed=True,
+                                    expected_state=plan.state_sha256)
+        else:
+            result = context.mutate(locks.unlock, plan.paths, confirmed=True,
+                                    expected_state=plan.state_sha256)
+        return {"result": _plain(result), "server_checked": True, "raw_tokens_included": False,
+                "verification": "Server lock state was re-read after the operation. Refresh locks before any later decision; no automatic retry or rollback was performed."}
+    if args.command == "file":
+        files = FileOperationManager(client)
+        selected = (paths,) if args.action == "delete" else (args.source, args.destination)
+        plan = getattr(files, "preflight_" + args.action)(*selected)
+        if args.expect_state_sha256 is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", args.expect_state_sha256):
+                raise CliError("validation_failed", "--expect-state-sha256 must be a lowercase SHA-256 hex string.")
+            if args.expect_state_sha256 != plan.state_sha256:
+                raise CliError("validation_failed", "File state differs from the reviewed preflight.",
+                               details={"current_state_sha256": plan.state_sha256})
+        context.warnings.extend(plan.warnings)
+        if args.dry_run:
+            return {"preflight": _plain(plan), "working_copy_unchanged": True}
+        result = context.mutate(getattr(files, args.action), *selected, confirmed=True,
+                                expected_state_sha256=plan.state_sha256)
+        return {"preflight": _plain(plan), "svn": _result(result, args.max_text_bytes),
+                "verification": "Exact local postconditions were checked. Inspect status and diff before an explicit commit; no repository commit was performed."}
+    if args.command == "conflict":
+        conflicts = ConflictManager(client)
+        if args.action == "list":
+            return {"conflicts": _plain(conflicts.list(paths))}
+        if args.action == "inspect":
+            target = _normalized_paths(workspace, [args.path])[0]
+            return {"conflict": _plain(conflicts.inspect(target))}
+        plan = conflicts.preflight_resolve(paths, args.accept)
+        if args.expect_state_sha256 is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", args.expect_state_sha256):
+                raise CliError("validation_failed", "--expect-state-sha256 must be a lowercase SHA-256 hex string.")
+            if args.expect_state_sha256 != plan.state_sha256:
+                raise CliError("validation_failed", "Working-file bytes or checked metadata differ from the reviewed preflight.",
+                               details={"current_state_sha256": plan.state_sha256})
+        context.warnings.extend(plan.warnings)
+        if args.dry_run:
+            return {"preflight": _plain(plan)}
+        result = context.mutate(conflicts.resolve, paths, args.accept, confirmed=True,
+                                expected_state_sha256=plan.state_sha256)
+        return {"preflight": _plain(plan), "svn": _result(result, args.max_text_bytes),
+                "verification": "Exact target conflict flags were checked after resolution. Cleared flags do not prove that the current file content is correct."}
     if args.command == "changelist":
         if args.action == "list":
             lists = client.changelists()
@@ -413,18 +625,33 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None,
         limit = args.max_output_bytes if 2048 <= args.max_output_bytes <= 67_108_864 else DEFAULT_OUTPUT_BYTES
         text_limit = min(args.max_text_bytes, 67_108_864)
         data = _execute(args, stdin, context)
-        payload = _envelope(context, ok=True, outcome="planned" if args.dry_run else "completed" if args.mutating else "read", data=data)
+        payload = _envelope(context, ok=True, outcome=context.success_outcome or ("planned" if args.dry_run else "completed" if args.mutating else "read"), data=data)
         code = 0
     except HelpRequested as exc:
         payload = _envelope(context, ok=True, outcome="read", data={"help": exc.text, "exit_codes": EXIT_CODES})
         code = 0
-    except (CliError, ValueError, ShelfError, SvnError, OSError, UnicodeError, KeyboardInterrupt) as exc:
-        if context.attempted:
+    except (CliError, ValueError, ShelfError, SvnError, LockError, BranchOperationError, OSError, UnicodeError, KeyboardInterrupt) as exc:
+        if isinstance(exc, BranchOperationError):
+            context.attempted = True
+            fault = CliError("operation_uncertain", str(exc), outcome="uncertain",
+                             details={"automatic_retry_safe": False})
+        elif isinstance(exc, BranchError):
+            # BranchManager guarantees this class is raised before an apply
+            # command; post-command failures are wrapped as BranchOperationError.
+            context.attempted = False
+            fault = CliError("validation_failed", str(exc))
+        elif isinstance(exc, LockOperationError):
+            fault = CliError("operation_uncertain", str(exc), outcome="uncertain",
+                             details={"observed_locks": _plain(exc.observed), "raw_tokens_included": False,
+                                      "automatic_retry_safe": False})
+        elif context.attempted:
             fault = CliError("operation_uncertain", "A mutation was started and did not finish successfully. Changes may be partial or already complete; inspect status, history, and shelves before retrying.",
                              outcome="uncertain", details={"cause": _text(str(exc) or "Interrupted", text_limit),
                                                            "automatic_retry_safe": False})
         elif isinstance(exc, CliError):
             fault = exc
+        elif isinstance(exc, LockError):
+            fault = CliError("validation_failed", str(exc))
         elif isinstance(exc, ShelfConflict):
             fault = CliError("validation_failed", str(exc))
         elif isinstance(exc, ShelfError):

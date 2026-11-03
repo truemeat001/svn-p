@@ -1,242 +1,238 @@
 # SVN Desk（预览版）
 
-参考 P4V 操作结构的独立 SVN 桌面客户端，配套供脚本和 AI 调用的 JSON CLI。使用系统安装的 Subversion 命令行程序，支持本地工作区登记与恢复、受限的检出、多工作副本候选发现、状态检查、变更列表、基础提交和本地 Shelf 备份。
+一个参考 P4V 操作布局与工作流的独立 SVN 桌面客户端，使用 Python 标准库、Tk/ttk 原生控件和系统安装的 Subversion 命令行程序。提供桌面操作及面向脚本、AI 的 JSON CLI。
 
-**当前为源码预览版，尚未完成真实 SVN 仓库和原生 Windows GUI 验证。请先在可丢弃的测试工作副本中试用，并独立备份重要内容。** 本项目不隶属于 Perforce 或 Apache Subversion，不是 P4V 的完整替代品。
+**当前是源码预览版。** 不包含 Python、SVN、安装器或打包好的 `.exe`。本次开发环境没有 `svn`/`svnadmin`，也未运行原生 Windows 图形界面；模拟测试通过不代表真实 SVN、认证、服务器钩子或 Windows 交互已验收。请先使用一次性测试仓库，独立备份重要工作。
 
-## 当前功能与边界
+本项目不隶属于 Perforce 或 Apache Subversion，也不复制 P4V 的服务器语义或全部功能。
 
-### 桌面界面
-
-- 左侧为可调整宽度的工作副本/仓库导航，右侧为待提交更改、文件、历史、仓库、本地 Shelves 页签，下方显示详情、差异和操作记录。
-- 本地目录在展开时后台读取，树和文件列表按 200 项分批展示。目录选择仅改变浏览范围，不会自动把整个目录加入提交范围。
-- 支持状态刷新、添加未版本化路径、更新整个工作副本到 HEAD、提交选中路径、还原选中路径。
-- 支持 SVN 原生变更列表的创建归组、文件移动、取消归组和整个命名列表提交。
-- 支持选中文件的 BASE ↔ WORKING 文本差异、本地文本预览、最近 100 条当前工作副本范围的提交历史和单次修订差异。
-- 支持仓库目录只读浏览，显示名称、类型、修订、作者和大小；当前不读取远程文件内容。
-- 工具栏可换行，文件和列表使用不同右键菜单。选择对象立即更新详情，双击或差异按钮加载内容，过期读取结果不会覆盖新选择。
-- 支持命名工作区登记、启动时恢复上次成功打开的副本、下拉切换、重命名、重新定位和仅移除记录。移除登记不会删除或还原工作副本文件。
-- 支持确认后从 `http`、`https`、`svn` 或 `file` URL 检出到空目录或新目录；不支持内置 `svn+ssh` 检出，不下载 externals，不自动清理失败后留下的文件。
-- 支持有范围限制的父目录扫描，发现独立或嵌套的 `.svn` 候选根，再逐个验证和登记。父目录不成为统一提交范围，各副本始终分别操作。
-
-### 脚本与 AI 接口
-
-CLI 不依赖 tkinter，返回结构化 JSON。支持 `status`、`info`、`log`、`diff`、变更列表与 Shelf 操作，提供显式确认、本地预检、成员范围校验和不确定结果说明。GUI 与 CLI 的功能范围并不完全一致，完整接口见 [CLI 文档](docs/CLI.md)。
-
-### 本版未提供
-
-- 服务器登录向导、P4V 式服务器工作区规范、多仓库汇总或跨工作副本提交，以及外部引用定义与固定修订的自动导入。
-- JSON CLI checkout、内置 `svn+ssh` checkout；当前检出入口位于 GUI，CLI 仍要求已有工作副本。
-- 冲突解决/合并编辑器、工作副本 cleanup、分支/标签、switch、merge、服务器文件锁管理。
-- 正式的文件删除、移动/重命名、带历史复制、属性/忽略规则编辑流程。
-- 远程文件内容预览、任意两版本 GUI 比较、图片比较、blame 或分支历史图。
-- 拖放归组、独立提交单编辑器、持续后台监控或通用 SVN 命令输入框。
-- Python、SVN、安装器或可直接运行的 `.exe`。
-
-未覆盖的功能请使用外部可信 SVN 客户端。本地标签和 Shelf 的含义见下文，不能套用 P4V 的服务器提交单或服务器 shelf 语义。
-
-## 安装与运行
-
-### 环境要求
-
-- Python 3.10 或以上版本。
-- 桌面界面需要 tkinter 和可用图形环境；CLI 不需要 tkinter。
-- 从可信来源安装的 `svn` 命令行程序。运行真实 SVN 集成测试还需要 `svnadmin`。
-- 已有 SVN 工作副本，或供 GUI 检出的受支持仓库 URL 和空/新本地目录。JSON CLI 仍要求已有工作副本。
-
-项目仅使用 Python 标准库，不需要安装第三方 Python 包。GUI 会尝试从 PATH 和常见 Windows 安装位置查找 SVN，也可以通过“文件 → 设置 SVN 程序…”选择原生 `svn.exe`。CLI 使用自己的默认发现流程，不读取 GUI 中手动选择的程序路径，建议让 `svn` 在 PATH 中可用。
-
-网络仓库认证须事先在可信 SVN 客户端中配置。本工具不请求或存储密码，不支持交互式登录提示，也不会绕过证书错误。
+## 快速开始
 
 ### Windows
 
-将整个项目解压到同一目录，在该目录打开终端：
+1. 安装可信来源的 **Python 3.10 或以上版本**，包含 tkinter；安装可信来源的 **Subversion 命令行客户端**，确保 `svn.exe` 可用。仅安装图形客户端不一定包含命令行组件。
+2. 解压完整项目目录，不要只复制 `main.py`。不需要安装第三方 Python 包。
+3. 双击 `启动.bat`，或在项目目录运行：
 
-```console
+```powershell
+py -3 main.py
+```
+
+指定已有工作副本，或先看不运行 SVN 的只读示例界面：
+
+```powershell
+py -3 main.py "C:\Work\Project"
+py -3 main.py --demo
+```
+
+依赖自检：
+
+```powershell
 py -3 --version
 py -3 -m tkinter
 svn --version --quiet
 ```
 
-`tkinter` 检查会打开测试窗口，检查后关闭即可。启动方式：
+没有 `py` 启动器时，可使用对应的 `python` 命令。界面可选择已安装的 SVN 可执行文件；本程序不会下载或安装 SVN。真实仓库需要事先通过可信 SVN 客户端配置认证和证书。本工具不接收密码参数、不新增认证缓存、不绕过证书错误。
 
-```console
-py -3 main.py
-```
+### Linux / macOS
 
-也可双击 `启动.bat`。打开指定的已有工作副本：
+可在已安装 Python、tkinter 与 Subversion 的环境中使用 `python3 main.py`。部分系统需要单独安装 tkinter；这不是已完成各平台打包和原生交互验证的承诺。
 
-```console
-py -3 main.py "C:\Work\Project"
-```
+## 已实现的工作流
 
-不读取实际工作区设置、不连接仓库、不会保存设置或修改工作副本的示例模式：
+| 功能 | 桌面界面 | JSON CLI | 主要边界 |
+| --- | --- | --- | --- |
+| 工作副本管理 | 打开、命名登记、切换、启动恢复、扫描父目录、受限检出 | 每次显式指定已有 `--workspace` | 不是服务器连接档案或 P4V workspace 映射 |
+| 浏览与检查 | 工作副本/仓库导航、状态、文件、记录 | `status`、`info`、旧 `log/diff` | 默认状态采用有界管道与增量 XML 解析；仍返回完整结果列表 |
+| 历史与版本比较 | 单一路径历史、分页、明确版本端点比较 | `history`、`compare` | 新接口有输出上限；二进制不返回载荷，无三方编辑器 |
+| 常用 SVN 操作 | 添加、更新、选中项提交、还原 | 没有对应的通用命令入口 | CLI 提交入口仅为命名 changelist 提交 |
+| 原生变更列表 | 新建并归组、移动成员、移回未分组、按列表提交 | `changelist list/assign/remove/commit` | 本地文件标签，不是服务器编号提交单 |
+| 本地 Shelf | 创建、检查、恢复、删除 | `shelf create/list/inspect/restore/delete` | 备份后不清空工作区，不上传服务器，不自动合并 |
+| 冲突处理 | 筛选、检查、预检、明确确认保留已手工修复的内容 | `conflict list/inspect/resolve` | 仅受限普通文件的内容冲突，唯一方案为 `working` |
+| 文件操作 | 右键或“文件与锁”菜单 | `file delete/move/copy` | 同一根内普通已版本化文件，不支持目录或覆盖 |
+| 仓库文件锁 | 检查、明确选择加锁/解锁、预检和确认 | `lock inspect/acquire/release` | 不抢锁、不破锁，只释放当前副本真正持有的锁 |
+| 切换与合并 | “分支与合并”菜单，完整根范围和双重确认 | `branch switch/merge` | 严格完整干净副本、固定数字修订；合并只产生本地待审查更改 |
+| 分支 / 标签计划 | 只读计划窗口，没有创建按钮 | `branch plan-copy` | **只有预检，没有创建执行，不发送仓库 copy/commit** |
 
-```console
-py -3 main.py --demo
-```
+桌面和 CLI 使用共同后端，但可用入口不完全相同。两者均没有通用 SVN 命令输入器；未覆盖的命令请使用可信外部 SVN 客户端。
 
-### 其他平台
+## 工作区与多个仓库
 
-在具备 Python、Tk 和 SVN 的环境中可尝试以下源码入口；这不是对 macOS/Linux 原生 GUI 兼容性的验收声明：
+- “打开…”验证已有工作副本后登记名称和路径；下次正常启动恢复上次成功打开的工作区。启动参数明确指定的路径优先。
+- 工作区下拉框切换已登记副本；“管理…”可重命名、重新定位、移除记录、关闭自动恢复。**移除记录不删除、移动或还原工作副本文件。**
+- “新建 / 检出…”仅接受空目录或父目录已存在的新目录。支持 `http`、`https`、`svn`、`file` URL；不支持内置 `svn+ssh` 检出，不覆盖、不嵌套到现有工作副本，不自动检出 externals。
+- URL 保留 SVN 的 `@修订` 语法，不强制改成 HEAD。检出失败或超时可能留下部分副本，不自动清理或重试；先检查目标，再决定如何继续。
+- “扫描父目录…”有深度、条目数、候选数和时间边界。候选逐个通过 SVN 验证，可独立登记和选择；嵌套副本不自动等同于 externals。
+- 多仓库指**多个独立工作副本之间切换**。父目录不是联合工作副本，不跨根组合更新、归组、提交、恢复或冲突解决。
 
-```console
-python3 main.py --demo
-python3 main.py /absolute/path/to/working-copy
-```
+登记保存在当前用户的 `.svn-desk/settings.json`，Windows 通常为 `%USERPROFILE%\.svn-desk\settings.json`。保存名称、本地路径、SVN 程序路径和启动偏好，不自动保存仓库 URL 或认证秘密。损坏设置不会静默覆盖；多实例同时修改登记不保证合并。
 
-## 基本使用流程
+详见 [工作区与多个 SVN 副本](docs/WORKSPACES.md)、[检出安全边界](docs/CHECKOUT.md)。
 
-1. **打开或新建工作区**：点击“打开…”或按 `Ctrl+O` 选择已有 SVN 工作副本，或点击“新建 / 检出…”检查并确认下载新的副本。已有副本选择其子目录时，界面会识别工作副本根目录。验证成功后登记名称和路径，下次启动自动恢复上次成功打开的工作区。
-2. **检查状态**：按 `F5` 刷新。在“待提交更改”查看内容、属性及冲突状态；未版本化文件需要先明确“添加”才能参与 SVN 归组或提交。
-3. **核对修改**：选中文件后双击，或按 `Ctrl+D` 查看差异。左侧工作副本树用于文件导航，文件页双击用于本地内容预览。
-4. **按任务归组**：创建或选择变更列表，整理要一起提交的文件。
-5. **执行前检查**：需要备份时创建本地 Shelf；提交前核对文件范围和说明。更新、提交、还原与恢复均有确认提示。
-6. **核查结果**：完成后查看刷新后的状态、提交历史或操作记录。出错或超时时不要立即重复修改操作。
+## 界面与性能边界
 
-工作副本内的符号链接、重解析点和独立嵌套工作副本不会由目录树继续展开。需要操作另一个独立工作副本时，请单独打开。
+- 可调整宽度的左侧工作副本/仓库导航，右侧对象页签，下方详情、文本差异与操作记录。
+- 原生蓝灰深色主题、可用中文字体回退、独立的正文/等宽预览字体和 Windows DPI 初始化；状态同时使用文字，不只依赖颜色。
+- 工具栏随宽度换行；文件、分组与目录使用不同操作入口，无适当对象时禁用相关动作。
+- 工作副本目录展开时后台读取；宽目录分页，每页最多 200 项。文件页提供上一页/下一页，不再只显示全树前 3,000 个文件。
+- 选择目录只改变浏览范围，不自动把目录及子树作为修改选区。文件操作和冲突流程显示完整精确范围，确认期间切换工作区或选区会取消旧计划。
+- 选择对象立即显示详情；显式差异操作读取内容，过期异步结果不会覆盖新选择。
 
-### 工作区管理与多个副本
+**尚无大工作区性能保证。** SVN 状态查询仍可能扫描整个工作副本，结果列表仍随条目数增长，待提交树没有行虚拟化；大型列表插入与逐文件 SVN 查询仍可能较慢。没有持续自动监控、拖放归组、GUI 取消按钮或跨进程事务隔离。
 
-上方“工作区”下拉框用于切换，“管理…”提供重命名、重新定位、移除记录、启动恢复选项和父目录扫描。旧版保存的 `last_workspace` 会迁移为登记记录。设置保存在用户目录的 `.svn-desk/settings.json`，不自动保存仓库 URL、密码或认证令牌。失效路径保留供修复；设置损坏时不会静默覆盖。
+默认 `SvnClient.status()` 已改为有界 stdout 队列和增量 XML 解析，不再积累整份原始输出及完整 XML 树。只有 XML 完整、进程结束且退出成功才交付完整列表；超时、取消、解析错误或超限均失败，不用部分状态假装干净。后端可接收 `cancel_event`，本轮没有增加 GUI 取消入口。
 
-父目录扫描默认有深度、目录数、条目数、候选数和协作式时间限制，截断与访问问题会显示。`.svn` 标记只是候选，须通过 SVN info 验证后才登记。嵌套目录不等于已确认的 `svn:externals`，文件 externals 也不是独立工作副本根。登记多个根不会更新它们、切换当前副本或改变上次成功打开的记录。
+状态 stdout 块为 64 KiB、最多排队 4 块，XML 总量上限 512 MiB，条目间数据上限 4 MiB；这些不是整个调用的内存上限。stderr 持续排空但只保留前 64 KiB，截断有标记。其他 SVN 命令仍可能整体缓冲输出，不能把状态路径的改进扩展为全应用内存保证。
 
-GUI 检出保留 URL 中的 SVN `@修订` 语法：未指定时使用 HEAD，指定时按该 URL 的版本语义执行。目标必须为空或尚不存在，且不能位于其他工作副本内。失败或超时可能留下部分文件，不会自动删除或重试。详细步骤、认证和安全边界见 [工作区与多个 SVN 副本](docs/WORKSPACES.md) 及 [检出说明](docs/CHECKOUT.md)。
+主题与 DPI 逻辑有无显示自动测试，但未完成 Windows 100%–200% 缩放、跨显示器和原生窗口验收。系统标题栏、文件选择器或消息框可能保持系统样式；Tk 不保证控件动态跨屏缩放，必要时在目标显示器重启。
+
+详见 [界面设计](docs/UI_DESIGN.md)、[字体与 DPI](docs/DISPLAY.md)、[流式状态与对比测量](docs/STREAMING_STATUS.md)、[其他合成性能基准](docs/PERFORMANCE.md)。已记录的 Linux 10 万条合成状态样本中，Python 峰值追踪分配从约 167.7 MiB 降至 47.6 MiB（约 71.6%）；较小样本并非都提速。该结果不含真实 SVN、GUI、RSS、输入数据或子进程，不是 Windows/真实工程性能承诺，也不证明语言迁移会更快。
+
+## 单一路径历史与版本比较
+
+- 选择一个已版本化文件，点击“文件历史”或右键入口。历史页显示明确相对路径，也可显式输入目录；只有 `.` 或“工作副本根历史”表示根范围。目录历史包含后代，不转化为提交范围。
+- 默认从 HEAD 查询相关历史，不更新工作副本。GUI 每页可选 25、50、100、250 项，只保留当前页及有限回退游标；CLI 默认 100 项、每页最多 1000 项，用 `next_start_revision` 继续向前翻页。
+- 日志中每次提交的 `changed_paths` 是该次提交全部改动，可能包含查询范围以外路径。GUI 详情有 64 KiB 显示上限并标明截断，不会据此自动扩展比较范围。
+- 双击历史修订打开当前路径的 `r(N−1) → rN` 比较；“比较版本…”允许明确左右端点。默认 `BASE → WORKING`，左侧支持 BASE、HEAD、数字，右侧另支持 WORKING。不提供 WORKING 在左侧、日期或任意 peg/URL 编辑器。
+- GUI 新比较流程默认显示最多 256 KiB，可选 64/256/1024 KiB；CLI `compare` 可用 `--max-text-bytes` 调整，最多 8 MiB。新接口底层 info/history/diff 也有独立硬上限，超限失败，不把不完整 XML 当作结果。
+- 比较只返回内部文本/属性 diff，无二进制载荷、图片比较、可编辑合并或应用补丁。空文本不证明二进制相同，截断文本不是完整补丁。
+- 改变路径、页大小、修订或工作区会使旧请求失效；只读结果不自动写文件、update、merge 或重试。新接口拒绝跨根、switched/external、链接及 svn+ssh；旧 `log/diff` 保留既有语义和边界。
+
+详见 [历史、比较及 GUI/CLI 参数](docs/HISTORY.md)。此处的有界读取与显示上限**不代表旧批量“查看差异”或全部后端命令都已改造**。
 
 ## 创建与提交变更列表
 
-1. 在“待提交更改”上方点击“+ 新建变更列表…”。
-2. 填写名称，选择一个或多个已版本化文件，点击“创建并归组”。可先用 `Ctrl` / `Shift` 多选，再创建列表。
-3. 选中文件后，使用“移动到列表…”选择已有列表或输入新名称。右键文件也提供入口。
-4. “移回未分组…”只清除标签，不还原或删除文件内容。
-5. 提交整个列表时，选中命名列表标题并点击“提交所选列表…”。确认窗口列出全部成员，包括被筛选隐藏的文件；填写说明后才提交。如果成员在确认后发生变化，会拒绝提交并要求重新检查。
+1. 打开工作副本，在“待提交更改”中点击“新建变更列表…”。
+2. 填写名称，明确选择已版本化文件后归组。未版本化文件先添加；目录不能加入原生 SVN changelist。
+3. 选择文件行后用“移动到列表…”加入其他列表，或用“移回未分组…”清除标签。归组不改变文件内容。
+4. 选中命名列表标题，再点击“提交所选变更列表…”。确认页列出全部成员，包括筛选隐藏和正常未修改的已归组文件。
+5. 核对范围、填写提交说明并明确确认。成员变化会拒绝；已知父目录或移动配对依赖不满足时，不自动扩大提交范围。
 
-### SVN 标签规则
+SVN changelist 是**工作副本本地标签**：一个文件只能属于一个列表，不能保存持久空列表，不保存文件内容、不锁文件、不跨电脑同步。最后一个成员移走后列表消失；成功提交文件的标签默认按 SVN 行为移除。CLI 可用 `--keep-changelist` 保留标签。
 
-- 变更列表是当前工作副本的**本地文件标签**，不上传服务器、不锁定文件，也不保存文件内容。
-- 一个文件只能属于一个列表；目录不能归组。没有成员的列表不能持久存在，最后一个文件移走后列表自动消失。
-- 干净但已归组的文件仍显示为成员，不计入待提交修改数。
-- 默认提交后，SVN 会移除成功提交文件的标签；CLI 可使用 `--keep-changelist` 保留标签。
-- 列表提交会检查已知目录依赖和移动配对，不会为了提交成功自动扩大文件范围。涉及新增目录等依赖时，需要单独核查处理。
-- “提交选中项”与“提交整个列表”范围不同。明确选择目录作为普通提交目标时，目录可能包含子项修改，确认前必须核对。
-- 成员校验不是文件内容冻结；外部编辑器仍可能在操作期间改动文件。不要同时运行会修改同一工作副本的工具。
+完整成员哈希只绑定列表名称、工作副本和成员路径，不冻结文件内容；提交时不要并行编辑。预检不证明服务器权限、钩子或最新版本检查一定通过。
 
-## 本地 Shelf 备份
+## 本地 Shelf：备份，不是服务器搁置
 
-Shelf 用于保存选中修改的本地副本。**创建后原修改仍留在工作区，不会自动还原、清空、上传或提交。** 当前格式不是 SVN 实验性原生 `svn shelve`，也不是 P4V 的服务器 shelf。
+创建 Shelf 保存选中受支持改动的内容和属性，**不还原、不删除、不提交、不上传工作副本**。支持普通文件修改（含二进制）、受限新增/删除、未版本化文件和目录以及 SVN 属性。恢复前验证仓库身份、BASE、实际文件内容/属性、备份校验和及目标不存在等条件，存在预测冲突则拒绝。
 
-### 格式、压缩与兼容
+- 当前写入格式为 2：按实际节省选择 zlib 压缩或原始字节，单个 Shelf 内相同内容复用 blob。格式 1 仍可读取/恢复，不自动迁移；旧版程序可能无法读取格式 2。
+- 文件数据分块捕获、校验和恢复。新格式限制每文件 16 GiB、每 Shelf 总文件内容 64 GiB；临时空间可能需要当前文件约两份数据，不能把压缩当作空间保证。
+- 不保存/恢复 changelist 标签；ACL、所有者、完整时间戳等也不保证保存。
+- 带历史复制/移动、替换、删除目录、冲突、switched、externals、链接、稀疏选择等不支持。文件操作产生的 copy/move 状态不能因此假定可被 Shelf 完整保存。
+- 不保存冲突辅助文件集合；遇到冲突时先自行独立备份，不能依赖 Shelf 替代冲突备份。
+- 恢复不合并，不覆盖已有新增目标。成功后保留 Shelf；意外 I/O 或 SVN 失败仍可能部分恢复，不自动破坏性回滚。
+- 删除 Shelf 永久删除本机该份备份，不删除工作文件。备份整个 Shelf 目录，而不是只保存 manifest。
 
-- 新建备份使用 Shelf 格式 2，逐文件尝试 zlib 压缩；只有同时节省至少 5% 和 256 字节时才保留压缩结果，否则保存原始字节。最终 blob 不会因压缩而膨胀。
-- 同一 Shelf 内完全相同的文件内容共用一个 blob；没有跨 Shelf 共享池或自动垃圾回收。属性仍按原有二进制安全格式保存。
-- 格式 1 的旧备份仍可读取、校验、恢复和删除，不会自动迁移；只支持格式 1 的旧程序无法读取新格式 2 备份。
-- 文件采集、哈希和解码按 1 MiB 分块处理。新格式限制单文件 16 GiB、每份 Shelf 总文件内容 64 GiB；临时处理仍需额外磁盘空间，通常约为当前文件两份数据加已暂存内容。SVN 输出及清单/属性仍可能完整缓冲，不能据此宣称所有操作的内存都已受限。
+详见 [Shelf 格式、范围与恢复](docs/SHELVES.md)。它不是 P4V 的服务器 shelf，也不是 SVN 实验性 `svn shelve` 格式。
 
-压缩收益依赖实际内容；文本和可压缩数据可能节省空间，已压缩或高熵资源通常保存为原始字节。合成测试结果、大小边界和校验规则见 [Shelf 文档](docs/SHELVES.md#storage-and-compression)，不是实际项目或 Windows 性能保证。
+## 冲突：先手工修复，再标记 working
 
-### 支持的内容
+通过“冲突”菜单或文件右键检查确切冲突节点。先用可信编辑器或 SVN 工具修复、保存并核对当前文件，再明确选择 `working`，经过后台预检和风险确认后标记已解决。
 
-- 普通文件修改，包括二进制内容和原始换行。
-- SVN 文件及目录属性，包括二进制属性值。
-- 简单的已计划新增文件/目录、已计划删除的普通文件。
-- 未版本化文件和目录，包括空目录。
-- 普通权限位；不保证保存 ACL、所有者、完整时间戳、扩展属性、备用数据流或硬链接关系。
+仅支持实际工作副本根内普通文件的纯内容冲突，可以是文本或二进制；单次最多 128 个节点，每个内容指纹文件最多 32 MiB。**没有三方编辑器、自动合并、属性/混合/树冲突处理，也不提供 `base`、`mine-full`、`theirs-full`。**
 
-### 明确拒绝的情况
+SVN 解决命令可能移除冲突记录及辅助文件；状态摘要包含当前工作文件内容，但不保护辅助文件内容。请提前独立保存重要工作文件和辅助文件。成功只说明冲突状态检查通过，不证明合并内容正确，也不会提交。
 
-带历史复制/移动、替换、删除目录、缺失、冲突、阻塞、switched 节点、externals、工作副本管理锁、选中的稀疏目录、符号链接/重解析点、特殊文件和嵌套工作副本等。新增父子层级不完整、不安全路径和大小写冲突也会拒绝。
+详见 [冲突后端与 CLI](docs/CONFLICTS.md)、[冲突 GUI](docs/CONFLICT_GUI.md)。
 
-Shelf 不保存或恢复变更列表标签。忽略项不会自动选入；显式选择未版本化目录时，会完整备份该目录，包括其中原本被忽略规则匹配的文件，请核对内容。
+## 文件删除、移动与带历史复制
 
-### 恢复条件与风险
+在“工作副本文件”或“待提交更改”中选择具体文件，使用右键或“文件与锁”菜单。
 
-- 恢复前核对仓库 UUID、URL、记录的 BASE 修订、文件内容、属性及校验和。
-- 受影响的已版本化目标必须干净，且与记录的 BASE 匹配；新增/未版本化目标必须不存在。
-- 恢复不会自动合并。发现可预测冲突时，在写入前拒绝。
-- 恢复成功后保留 Shelf。突发磁盘或 SVN 错误可能留下部分恢复结果，不会自动做破坏性回滚。
-- 不要为了通过恢复检查而盲目递归还原或删除目录。请先保护现有工作，检查失败原因及已执行路径。
-- 删除 Shelf 是永久删除这份本机备份，不删除工作副本内容。
+- 删除：一次最多 128 个普通已版本化文件，内容/属性必须干净；与工作副本外临时导出的 BASE 比较，防止仅依赖缓存时间戳。
+- 移动/重命名、复制：一次一个源文件，允许受支持的本地内容/属性修改；目标必须是不存在的精确文件路径，父目录已经版本化。
+- 不支持目录、URL、跨根、覆盖、大小写改名、externals、switched、冲突或已有结构变更，不自动创建父目录。
+- 确认页显示全部源、目标、受影响路径、风险和状态摘要；默认取消，人工确认后再复检。执行后检查精确本地结果。
 
-默认备份位于工作副本之外的用户应用数据目录，并按工作副本路径区分。它不会自动同步到另一台电脑，请另行保存在可靠存储中。详细支持范围、存储规则和 Python API 见 [Shelf 文档](docs/SHELVES.md)。
+这些操作只登记待提交变化。删除会移除本地文件；移动须一起审查两端并另行提交，changelist 标签不保证转移。最后检查之后仍存在外部进程竞态，预检不是事务；失败后先核查，不自动重试或回滚。
 
-## CLI：脚本与 AI 调用
+详见 [文件操作后端与 CLI](docs/FILEOPS.md)、[文件与锁 GUI](docs/FILE_OPERATIONS_GUI.md)。
 
-在项目目录运行。下列命令使用 Windows 示例路径，请替换成实际工作副本；其他平台将 `py -3` 换为可用的 `python3` 或 `python`。
+## 仓库文件锁
 
-### 读取信息
+明确选择已提交的普通文件，使用“仓库锁…”检查服务器所有者、备注及当前工作副本是否真正持有锁；随后可选择加锁或解锁，经预检、范围/备注确认后执行。
 
-```console
-py -3 -m svn_client.cli --workspace "C:\Work\Project" status
-py -3 -m svn_client.cli --workspace "C:\Work\Project" status --all --path src
-py -3 -m svn_client.cli --workspace "C:\Work\Project" info --path src/file.txt
-py -3 -m svn_client.cli --workspace "C:\Work\Project" log --path src/file.txt --limit 20 --revision HEAD:1
-py -3 -m svn_client.cli --workspace "C:\Work\Project" diff --path src/file.txt
-py -3 -m svn_client.cli --workspace "C:\Work\Project" changelist list
-```
+- 每次最多 128 个文件，查询逐文件访问服务器；加锁前检查是否落后于服务器。
+- 不抢锁、不破锁、不使用 `--force`。同一个用户名在其他副本取得的锁，也不能冒充当前副本持有。
+- 锁影响他人提交，但不禁止本地编辑；`svn:needs-lock` 可能改变文件写权限，正常提交通常释放已收集到的锁。
+- 加锁备注会发送到服务器，可能被团队看到，不要填写凭据或秘密。界面/JSON 不输出原始锁令牌，SVN 自身仍维护原生令牌。
+- 不支持目录、待新增/删除/复制/移动、冲突、外部引用、switched、链接或硬链接。内置锁流程不支持 `svn+ssh`。
+- 多文件锁不是原子操作，退出码零也不能单独证明全部成功；后端重新读取服务器验证，部分失败按不确定结果处理。
 
-目标路径相对于 `--workspace`。全局参数放在命令之前，子命令参数放在子命令之后。支持多路径的命令可重复使用 `--path`，或使用 `--paths-json FILE|-`；详见 [CLI 文档](docs/CLI.md)。
+详见 [锁语义与 CLI](docs/LOCKS.md)。仓库文件锁不是 SVN 工作副本管理锁，本功能不执行 `cleanup`。
 
-### 预检与执行
+## 分支与合并：实验性的完整工作副本流程
 
-先预检归组或提交范围：
+顶部“分支与合并”菜单提供以下三个入口。**切换和合并针对当前打开的整个实际工作副本根，不是当前文件选区或 changelist。** 请首先只在一次性测试仓库验证。
 
-```console
-py -3 -m svn_client.cli --workspace "C:\Work\Project" changelist assign --name fixes --path src/file.txt --dry-run
-py -3 -m svn_client.cli --workspace "C:\Work\Project" changelist commit --name fixes --message "Fix parser" --dry-run
-```
+1. **切换整个工作副本**：填写同一仓库目录 URL 和明确非负数字修订；先只读预检，再核对完整根、映射、修订、风险和摘要，人工完成两项确认后执行。`svn switch` 没有原生 dry-run，预检不是切换模拟，不保证祖先关系或最终成功。完成后复核 URL、修订和状态，不提交仓库。
+2. **合并明确向前范围**：填写源目录 URL 与 `0 ≤ start < end`，最多 64 个修订。范围为 **(start, end]**，来源固定为 `URL@end`；预检实际运行 `svn merge --dry-run`，并检查中间源修订状态。识别到预演冲突即拒绝应用；没有预演冲突也不证明最终无冲突或所有修订均需应用，原生 mergeinfo 可能跳过已合并部分。
+3. **分支 / 标签计划**：检查已提交源目录、数字修订、目标和拟提交说明，只展示计划。没有创建按钮、执行 API 或 CLI 开关，**不会发送 `svn copy` 或 `commit`**。URL → URL copy 会立即提交仓库，且目标目录竞争存在精确路径风险，所以当前刻意不执行。标签不可修改仍需服务器策略，不由计划保证。
 
-确认权限和实际范围后，才执行修改。例如：
+三个入口均要求严格完整干净副本：统一 BASE 修订、完整深度、最多 10,000 个版本化条目和 256 MiB 工作文件；没有本地修改、未版本化/忽略文件、稀疏目录、externals、switched 子树、链接、硬链接、嵌套副本等不支持情况。源树同样有属性/大小/路径检查。**这些是本实现首版限制，不是 SVN 本身限制。** 不会自动删除、update、cleanup 或 revert 来让预检通过。
 
-```console
-py -3 -m svn_client.cli --workspace "C:\Work\Project" changelist assign --name fixes --path src/file.txt --yes
-```
+URL 拒绝凭据、查询串、片段、svn+ssh 和路径穿越；`@` 视为字面名称，数字修订单独填写。这里的 URL 规则与检出页保留 `@修订` 的规则不同。预检可能全树读取及逐修订联网，不能把每进程超时当作整个操作总时限。
 
-提交建议把预检返回的 `members_sha256` 传入 `--expect-members-sha256`，与 `--yes` 一起执行。该哈希绑定工作副本路径、列表名和全部成员路径，不绑定文件内容、状态或提交说明。完整的“预检 → 核对 → 提交”示例见 [CLI 文档](docs/CLI.md#本地原生变更列表)。
+切换/合并执行必须绑定已审查的同一状态摘要；CLI 的 `--yes` 还必须同时提供 `--expect-state-sha256`，不会拿新预检摘要替换旧确认。状态摘要不是跨进程锁或事务；执行时停止编辑、编译和其他 SVN 修改。
 
-### Shelf 示例
+实际合并只留下本地待审查内容/属性变化，可能包含 `svn:mergeinfo` 或冲突，返回 `needs_review` / `conflicted`，不是“已经合并提交成功”。请检查状态、差异、mergeinfo，运行项目测试，再另行决定提交。遇到错误不自动解决、回滚或重试；GUI 重新读取前明确显示状态未知，不把“0 项”当作干净证据。
+
+详见 [分支与合并后端范围](docs/BRANCHES.md)、[分支 GUI 确认流程](docs/BRANCH_GUI.md)。反向合并、双 URL 合并、自动 reintegrate、record-only、部分目录 switch、混合修订和远端分支删除等仍未提供。
+
+## 脚本与 AI：一次调用，一个 JSON 对象
+
+CLI 不需要启动 GUI，也不依赖 tkinter。请在项目目录运行；以下示例将 `/wc` 换成已有工作副本根，Windows 可将 `python` 换成 `py -3`。
 
 ```console
-py -3 -m svn_client.cli --workspace "C:\Work\Project" shelf create --name before-refactor --path src/file.txt --dry-run
-py -3 -m svn_client.cli --workspace "C:\Work\Project" shelf create --name before-refactor --path src/file.txt --yes
-py -3 -m svn_client.cli --workspace "C:\Work\Project" shelf list
-py -3 -m svn_client.cli --workspace "C:\Work\Project" shelf inspect SHELF_ID
-py -3 -m svn_client.cli --workspace "C:\Work\Project" shelf restore SHELF_ID --dry-run
+python -m svn_client.cli --workspace /wc status
+python -m svn_client.cli --workspace /wc info --path src/a.txt
+python -m svn_client.cli --workspace /wc log --path src/a.txt --limit 20 --revision HEAD:1
+python -m svn_client.cli --workspace /wc diff --path src/a.txt
+python -m svn_client.cli --workspace /wc history --path src/a.txt --limit 100 --start-revision HEAD
+python -m svn_client.cli --workspace /wc history --path src/a.txt --limit 100 --start-revision 125
+python -m svn_client.cli --workspace /wc compare --path src/a.txt --from BASE --to WORKING
+python -m svn_client.cli --workspace /wc compare --path src/a.txt --from 120 --to 125
+python -m svn_client.cli --workspace /wc changelist list
+python -m svn_client.cli --workspace /wc changelist assign --name fixes --path src/a.txt --dry-run
+python -m svn_client.cli --workspace /wc changelist commit --name fixes --message "Fix parser" --dry-run
+python -m svn_client.cli --workspace /wc shelf create --name before-change --path src/a.txt --dry-run
+python -m svn_client.cli --workspace /wc shelf list
+python -m svn_client.cli --workspace /wc conflict inspect --path src/a.txt
+python -m svn_client.cli --workspace /wc conflict resolve --path src/a.txt --accept working --dry-run
+python -m svn_client.cli --workspace /wc file move --source src/a.txt --destination src/renamed.txt --dry-run
+python -m svn_client.cli --workspace /wc file copy --source src/a.txt --destination src/copied.txt --dry-run
+python -m svn_client.cli --workspace /wc file delete --path src/old.txt --dry-run
+python -m svn_client.cli --workspace /wc lock inspect --path assets/model.bin
+python -m svn_client.cli --workspace /wc lock acquire --path assets/model.bin --comment "修改模型" --dry-run
+python -m svn_client.cli --workspace /wc lock release --path assets/model.bin --dry-run
+python -m svn_client.cli --workspace /wc branch switch --url https://svn.example/repo/branches/feature --revision 125 --dry-run
+python -m svn_client.cli --workspace /wc branch merge --source-url https://svn.example/repo/branches/feature --start-revision 120 --end-revision 125 --dry-run
+python -m svn_client.cli --workspace /wc branch plan-copy --kind tag --source-url https://svn.example/repo/trunk --destination-url https://svn.example/repo/tags/v1 --revision 125 --message "Plan v1 snapshot"
 ```
 
-将 `SHELF_ID` 替换为 `shelf list` 返回的实际标识。`inspect` 只校验备份本身，不判断当前工作副本能否恢复；恢复资格应使用 `restore --dry-run`。恢复和删除的实际执行都需要 `--yes`，且删除不可撤销。
+示例中的 URL、修订和文件名仅为语法示例，必须换成明确选定的实际对象。`branch plan-copy` 天生只读，不接受 `--yes`，也无需 `--dry-run`。
 
-### 调用约定
+- 全局选项在命令之前，子命令选项在其后。支持多目标的命令可重复 `--path` 或使用 `--paths-json FILE|-`；只有显式 `-` 才从标准输入读取。
+- 修改命令必须 `--yes`，或用互斥的 `--dry-run` 预检。预检可以读取工作文件、访问服务器或使用清理后的临时文件，但不执行所请求的工作副本/锁/Shelf 修改。
+- 先审查返回的完整范围、风险及摘要，再明确授权执行。changelist 提交使用 `--expect-members-sha256`；文件、冲突、锁以及分支切换/合并使用 `--expect-state-sha256`。各摘要保护内容不同，不能互换；**branch switch/merge 的执行强制要求旧预检摘要和 `--yes`**。
+- 若分支合并预检的 `preview.truncated` 为真，不要基于不完整文本确认；以足够的 `--max-text-bytes` 重新只读预检并核对完整计划。计划生成、预演完成和服务器写入成功是不同阶段。
+- `--yes` 是调用方的执行开关，不是用户授权系统。AI 仍须遵守用户授予的操作、数据和范围权限。
+- 帮助也输出 JSON。检查 `schema_version`、`ok`、`outcome` 和 `error.code`，不要只凭退出码或消息文字决定重试。新合并流程即使调用返回成功，也会用 `needs_review` / `conflicted` 明确要求人工审查；没有提交仓库。
+- `operation_uncertain`（8）表示修改结果不能确定，不能假定回滚。`output_limit`（9）也可能发生在操作已完成后，不得为了取得完整输出重新提交、恢复或删除。
+- 文本字段默认最多 262144 UTF-8 字节，JSON 默认最多 4194304 字节；存在明确截断/超限标志。文本 diff 不含二进制 payload，也不是可靠补丁导出。
+- `--timeout` 默认 120 秒，按每个 SVN 子进程计算，不是整个多阶段预检的总时限。无自动重试。
 
-- 一次调用只输出一个 JSON 对象，帮助和可处理错误同样使用 JSON。
-- 修改命令必须显式提供 `--yes` 或 `--dry-run`，两者互斥；缺少时在调用后端前拒绝。`--yes` 不能代替 AI 调用方取得用户授权。
-- `--dry-run` 做真实的本地预检，不修改工作副本或 Shelf；它不是服务端提交演练，不保证认证、权限、锁、远程最新状态或钩子会通过。
-- 同时检查 `schema_version`、`ok`、`outcome`、`error.code` 和退出码，不能只解析错误文字。
-- `uncertain` 表示修改可能已部分或全部发生。没有收到 JSON 也不能推断没有执行。不要自动重试提交、恢复或删除。
-- JSON 超限可能发生在修改已经完成之后。即使 `ok` 为 false，也可能有 `outcome: completed`；应另行读取状态核查，不能为获得输出重做修改。
-- 默认单个差异/诊断字段上限为 256 KiB，整体 JSON 上限为 4 MiB。输出注明截断；这些限额不控制底层 SVN 已缓冲输出的内存峰值。
-- 差异不包含二进制文件载荷，截断或解码后的文本不应用作可靠补丁。
-- CLI 不提供通用 SVN 命令执行器、登录、shell、外部 diff/editor 或 GUI 组件启动器。
+参数和 JSON v1 契约见 [CLI 文档](docs/CLI.md)，各工作流详见 [历史与比较](docs/HISTORY.md)、[冲突](docs/CONFLICTS.md)、[文件操作](docs/FILEOPS.md)、[锁](docs/LOCKS.md)、[分支与合并](docs/BRANCHES.md)。读取、检查和删除已有本地 Shelf 可不安装 SVN；其他需要 SVN 的命令必须满足依赖。
 
-完整命令、参数、退出码、JSON v1 契约、输出边界及 AI 参数数组示例见 [docs/CLI.md](docs/CLI.md)。
+## 安全使用原则
 
-## 安全与故障处理
-
-- 还原会丢弃未提交修改；目录操作可能递归影响子项。操作前核对范围，并保留独立备份。
-- 更新可能产生内容、属性或树冲突。本版只识别和阻止冲突项提交，没有内置解决流程，请使用可信 SVN 客户端处理后刷新。
-- 超时、中断或报错不表示事务已回滚。先检查工作副本、仓库历史和 Shelf，再决定下一步。
-- 操作期间不要并行编辑、更新、提交或运行其他修改同一工作副本的程序；应用内排队不能锁住外部进程。
-- SVN 认证交给已有客户端环境。本工具不提供密码填写、凭据保存和证书绕过；遇到认证/证书失败应修复可信连接，不要关闭安全检查。
-- 日志、差异、属性和备份可能包含项目私有内容。常见 URL 密码脱敏不是通用秘密扫描，不应把原始输出上传到未经授权的服务。
-
-### 常见问题
-
-- **找不到 SVN**：确认安装了命令行组件，而非仅图形客户端。GUI 可在“文件 → 设置 SVN 程序…”选择 `svn.exe`，然后重新打开工作副本；CLI 建议配置 PATH。
-- **所选目录不是工作副本**：若尚未检出，可使用“新建 / 检出…”；若父目录中有多个独立副本，可在“管理…”中扫描父目录，再分别验证和打开。`svn+ssh` 请先通过可信外部客户端检出。
-- **启动仍未恢复上次路径**：确认“管理…”中的自动恢复已启用，路径仍存在，且上次设置保存成功。失效路径可重新定位；只登记但尚未成功打开的扫描候选不会替换上次打开记录。
-- **按钮不可用**：确认不是演示模式、没有任务正在执行，并在“待提交更改”选中适当文件或命名列表标题。目录导航不会隐式替你选择提交文件。
-- **Shelf 恢复失败**：检查 BASE、现有修改、新增路径碰撞或不支持状态，不要通过强制覆盖消除提示。
-- **文字模糊或缩放不合适**：参见 [显示与 DPI 说明](docs/DISPLAY.md)。跨显示器后可在目标显示器重新启动；当前不宣称完整动态跨屏缩放支持。
+1. **先备份，再使用一次性副本验证。** 还原会丢弃未提交更改，删除 Shelf 永久删除备份；“预检通过”不是备份。
+2. **明确核对目标。** 文件/冲突/锁流程不自动扩大范围；分支 switch/merge 明确针对整个工作副本，一般更新、还原及目录 Shelf 选择也应仔细核对递归范围。
+3. **不要并行修改同一工作副本。** 本应用的串行锁不能阻止外部编辑器、其他 SVN 客户端或另一个进程。
+4. **失败不等于回滚。** 超时、中断、网络错误、部分写入或后续校验失败后，先读状态、内容、历史或锁状态，再决定下一步。
+5. **保管日志和 JSON。** 路径、源代码、提交记录、属性和服务器备注可能包含私有数据；不要发送到未授权第三方。
 
 ## 测试与验证状态
 
@@ -244,44 +240,22 @@ py -3 -m svn_client.cli --workspace "C:\Work\Project" shelf restore SHELF_ID --d
 
 ```console
 python -m unittest discover -s tests -v
+python -m unittest discover -s benchmarks -p "test_*.py" -v
+python -m compileall -q svn_client tests benchmarks
 ```
 
-Windows 也可使用 `py -3 -m unittest discover -s tests -v`。
+自动测试覆盖后端参数与路径边界、设置/扫描/检出、原生 changelist、Shelf 数据完整性/压缩/恢复、流式状态、历史/比较、冲突、文件操作、锁、严格分支流程、JSON CLI、样式、DPI 和无显示 GUI 回调/确认流程。管道测试实际运行本地 Python 测试进程，验证有界读取、stdout/stderr、超时、取消和进程回收，**不是运行真实 SVN**。真实集成测试只创建自己的临时仓库，要求同时安装 `svn` 与 `svnadmin`；缺少时跳过。
 
-2026-11-03 对本次隔离的工作区管理与 Shelf v2 快照的测试结果：**358 项测试，341 项通过、17 项跳过，无失败**。已执行的测试包括后端参数与路径保护、变更列表范围校验、工作区迁移/恢复/切换与故障处理、检出确认及目标保护、有界多副本发现、Shelf v1/v2 完整性与压缩失败场景、CLI JSON/确认/预检/错误处理，以及 UI 辅助逻辑和模拟显示设置。
+**本次开发环境的真实 SVN 测试跳过，原生 Windows GUI、DPI 实测、网络认证、服务器 hook、真实大仓库和安装流程均未验收。** 无显示构造测试不等于窗口已经正确渲染，合成压缩/性能数据不等于真实工程表现。请在目标机器和 SVN 版本上重新运行，并人工检查实际界面。
 
-以下部分尚未通过实际运行验收：
+## 仍未覆盖与后续方向
 
-- 真实 SVN 仓库集成测试：开发环境缺少 `svn` 与 `svnadmin`，相关测试跳过。
-- Windows 原生 GUI、实际 Tk 交互、认证、安装与中文/长路径端到端流程。
-- 原生 DPI 清晰度和不同缩放显示器之间的动态切换。
-- 大仓库、超宽目录、大二进制资源、慢网和中断恢复性能。
+- 可靠精确目标的服务器分支/标签创建执行；目前只有只读计划。
+- 更宽范围的 switch/merge、图形化合并跟踪、反向/双源合并和目录级结构操作。
+- 三方合并编辑器、属性/树冲突流程及可靠绑定冲突辅助版本。
+- 服务器连接档案、凭据管理、externals 定义与固定修订管理。
+- P4V 式服务器编号 changelist、可共享服务器 shelf、review 集成、拖放归组和跨根事务。
+- 大列表虚拟化、减少逐文件 SVN 调用、GUI 取消/进度、剩余命令的有界输出，以及真实 Windows 与大仓库性能验收。
+- 安装器、打包 `.exe`、签名、升级流程及完整无障碍/高 DPI 交互验收。
 
-本地目录按需读取减少了全树枚举，但单层目录仍先完整列出并排序；SVN 状态查询仍是工作副本级，Pending 列表未虚拟化，远程目录与差异仍完整读取。当前没有足够依据宣称已达到大型生产工程的性能或可靠性要求。
-
-## 后续方向
-
-以下是待开发或待验收方向，不是当前版本已有功能，也不表示完成日期：
-
-- [ ] 工作区登记的多实例合并、更完整的外部引用定义与固定修订提示，以及真实 Windows/SVN 检出验收。
-- [ ] 连接诊断与清晰认证引导，始终区分各工作副本和仓库的操作范围。
-- [ ] 冲突查看、可信外部合并工具与明确的解决/重新提交流程。
-- [ ] 文件删除、移动/重命名、文件历史、指定版本比较与远程内容预览。
-- [ ] 服务器锁、分支/标签、switch/merge 等团队工作流。
-- [ ] 提交范围复核、Shelf 内容对比和更完整的失败恢复提示。
-- [ ] 大工作区增量状态、可取消任务与真实性能基准。
-- [ ] Windows 原生端到端测试、安装打包和 GUI/CLI 能力对齐。
-
-## 文档与代码入口
-
-- [CLI 参考](docs/CLI.md)：命令、JSON 契约、退出码与 AI 示例。
-- [Shelf 参考](docs/SHELVES.md)：支持范围、恢复约束和 Python API。
-- [显示与 DPI](docs/DISPLAY.md)：字体、缩放策略及手工验证清单。
-- [工作区与多个 SVN 副本](docs/WORKSPACES.md)：启动恢复、命名登记、失效路径修复与多根操作边界。
-- [检出说明](docs/CHECKOUT.md)：受支持协议、目标目录限制、认证与部分失败处理。
-- `main.py` / `svn_client/ui.py`：桌面入口与界面。
-- `svn_client/backend.py`：SVN 子进程封装与变更列表逻辑。
-- `svn_client/shelves.py`：本地备份与恢复。
-- `svn_client/workspaces.py` / `svn_client/discovery.py`：本地登记与有界工作副本候选扫描。
-- `svn_client/cli.py`：非交互 JSON 接口。
-- `tests/`：单元、模拟及需要外部 SVN 工具的集成测试。
+后续能力应在精确范围、确认、失败后可核查和回归测试完整的前提下逐步增加，不用自动扩大操作范围来掩盖不支持的 SVN 语义。

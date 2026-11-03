@@ -22,7 +22,7 @@ py -3 -m svn_client.cli --workspace "C:\Work\Project" status
 - 所有修改都要求 `--yes`，或用 `--dry-run` 只做预检；两个选项不能同时出现。缺少确认时，在调用后端前返回退出码 `3`。只读命令不接受这两个选项。
 - `--yes` 是调用者明确执行这次操作的标记，不是用户授权系统。AI 调用方仍必须核对用户给出的权限、目标和操作范围。
 - 不提供通用 SVN 命令执行器、shell 命令、密码参数、账号登录、证书绕过、凭据存储或外部 diff/editor。SVN 使用现有认证缓存，始终带有非交互及不新增认证缓存参数。请提前在可信 SVN 客户端完成正常认证。
-- 本地目标不能越过工作副本边界，不接受 URL 目标。路径通过参数向量传给 SVN，不进行 shell 展开。更严格的 changelist/Shelf 检查还会拒绝不支持的链接、外部引用和节点状态。
+- 本地目标不能越过工作副本边界，普通路径参数不接受 URL。分支流程只在专用 URL 参数中接受经过验证的同仓库目录 URL。路径通过参数向量传给 SVN，不进行 shell 展开。更严格的 changelist/Shelf 检查还会拒绝不支持的链接、外部引用和节点状态。
 - `log` 和指定仓库版本的 `diff` 可能访问仓库网络。创建 Shelf 只是本地备份，**不会清空工作区、上传或提交**；恢复保留 Shelf。
 - 无自动重试、无限循环或后台监控。外部编辑器仍可并发改变文件；CLI 不是隔离沙箱或跨所有进程的事务系统。
 
@@ -44,6 +44,74 @@ python -m svn_client.cli --workspace /wc diff --path src/file.txt --path docs/re
 - `diff` 返回 `data.diff` 文本字段对象，另有 `binary_payloads_included: false`。无 `--path` 时查看整个所选工作区；目录目标可能包含其子项。
 - `--revision` 支持非负数字、`HEAD`、`BASE`、`COMMITTED`、`PREV`，或两个值组成的范围，如 `BASE:HEAD`。这版接口不接受日期修订语法。
 - 差异使用后端解码后的 SVN 文本输出，不是原始字节导出；二进制文件可能只显示 SVN 的提示，不能把空文本解释为二进制内容相同。需要可靠补丁或原始文件导出时，请使用外部 SVN 工具；不要把此接口的截断差异作为补丁应用。
+
+### 有界文件历史与显式版本比较
+
+```console
+python -m svn_client.cli --workspace /wc history --path src/file.txt --limit 100
+python -m svn_client.cli --workspace /wc history --path src/file.txt --start-revision 125
+python -m svn_client.cli --workspace /wc compare --path src/file.txt --from BASE --to WORKING
+python -m svn_client.cli --workspace /wc compare --path src/file.txt --from 120 --to HEAD
+```
+
+- 新 `history` 命令默认 `HEAD:0`，返回 `path`、`start_revision`、`entries`、`has_more`、`next_start_revision`。有下一页时将游标用于 `--start-revision`，每页 1–1000 项；不更新本地工作副本。未指定路径时为 `.`。筛选提交按路径，提交内 `changed_paths` 包含该次提交全部路径。
+- 新 `compare` 命令要求一个明确 `--path`。左侧支持 BASE/HEAD/数字，右侧另支持 WORKING。默认 BASE → WORKING。返回范围、两侧修订和带截断标记的 `diff`；二进制载荷不包含在内。WORKING 仅可在右侧，不伪造反向补丁。
+- 两者不会修改工作副本或仓库，拒绝符号链接、管理目录、URL 目标和 svn+ssh 传输。原始进程输出有独立硬上限：历史 XML 4 MiB、diff 8 MiB、诊断 64 KiB；超限明确失败、不返回部分结果。`compare` 的 `--max-text-bytes` 最多 8 MiB，URL 密码遮蔽后才做显示截断。
+- 旧 `log` / `diff` 接口未改变，不要把新接口的进程捕获上限套用到旧接口。具体语义、安全边界及真实 SVN / Windows 未验证事项见 [HISTORY.md](HISTORY.md)。
+
+### 完整工作副本切换、向前合并与分支/标签计划
+
+这是保守的实验性入口。实际切换或合并必须先读取 `--dry-run` 的 `data.preflight.state_sha256`，核对整个工作副本、URL、固定修订、预览和警告，然后同时提供 `--yes` 与 **该次已核对的** `--expect-state-sha256`。哈希必填，CLI 不会临时生成一个新哈希来代替审核。
+
+```console
+python -m svn_client.cli --workspace /wc branch switch --url https://svn.example/repo/branches/feature --revision 123 --dry-run
+python -m svn_client.cli --workspace /wc branch switch --url https://svn.example/repo/branches/feature --revision 123 --expect-state-sha256 <已核对的64位小写哈希> --yes
+python -m svn_client.cli --workspace /wc branch merge --source-url https://svn.example/repo/branches/feature --start-revision 123 --end-revision 130 --dry-run
+python -m svn_client.cli --workspace /wc branch merge --source-url https://svn.example/repo/branches/feature --start-revision 123 --end-revision 130 --expect-state-sha256 <已核对的64位小写哈希> --yes
+```
+
+- 只接受显式非负数字修订；不接受 HEAD、BASE、日期或修订范围字符串。合并要求 `start < end`，跨度最多 64 个修订，表示 **start 之后到 end 为止**，仍受 SVN merge tracking 影响。
+- `--workspace` 必须是真正的完整工作副本根目录，同一 BASE 修订，全部干净；包括被忽略或未版本化文件也会导致拒绝。不自动清理、更新、还原或扩大范围来使检查通过。
+- 当前最多 10,000 个版本化条目和 256 MiB 工作文件内容；拒绝稀疏、嵌套、外部引用、切换子树、链接、已有冲突和锁等不受支持状态。源与目标必须是相同仓库 UUID 和同一根 URL 接入端点。具体限制见 [BRANCHES.md](BRANCHES.md)。
+- URL 必须是无凭据的 `http`、`https`、`svn` 或 `file` 目录 URL；不接受 svn+ssh、查询串、片段、路径穿越或相对仓库别名。URL 中的 `@` 按名称字面字符处理，修订单独提供。
+- `branch switch --dry-run` 是只读元数据预检，`svn_dry_run: false`，因为 SVN switch 没有原生 dry-run。它不模拟真实应用或预先证明祖先关系、冲突及最终成功。
+- `branch merge --dry-run` 调用真实 SVN 的只读 `merge --dry-run`，`svn_dry_run: true`。它会检查范围内每个受限源历史状态，而非只看终点，可能产生多次网络查询。识别到预演冲突时，后端拒绝实际应用。
+- `data.preflight.preview` 使用带 `truncated` 和 UTF-8 字节数的文本对象，遵守 `--max-text-bytes`。若截断影响审核，应先提高限额重新读取，不应把片段当作完整预演。后端预览另有 1 MiB 上限，普通 SVN 输出仍先缓冲到内存。
+- 执行时后端重新预检并比对调用方传入的旧哈希。状态变化会明确拒绝，不能自动换新哈希后重试。哈希是过期审核检测，不是权限凭据或跨进程锁；执行期间不要同时编辑、构建或运行其他 SVN 工具。
+
+切换验证成功时，顶层 `outcome` 为 `completed`，`data.result.outcome` 为 `switched`。合并的顶层与 `data.result.outcome` 均为 **`needs_review` 或 `conflicted`**，`data.requires_review: true`，并返回 `changes` / `conflicts`。退出码 0 和 `ok: true` 仅代表结果可读取，**不代表已经解决冲突、正确完成所有合并或提交到仓库**。必须核对状态、差异与 mergeinfo，运行项目测试，再另行授权提交。
+
+所有这些命令都明确返回 `commit_performed: false`。实际命令或事后验证失败返回退出码 8 / `operation_uncertain`，保留局部结果，不回滚或自动重试。分支后端明确认定“尚未发送 apply 命令”的拒绝，包括执行前哈希失效，返回退出码 4 / `validation_failed` / `refused`。
+
+分支与标签创建只有只读计划：
+
+```console
+python -m svn_client.cli --workspace /wc branch plan-copy --kind branch --source-url https://svn.example/repo/trunk --destination-url https://svn.example/repo/branches/new-feature --revision 123 --message "Plan new feature"
+python -m svn_client.cli --workspace /wc branch plan-copy --kind tag --source-url https://svn.example/repo/trunk --destination-url https://svn.example/repo/tags/v1 --revision 123 --message-file planned-message.txt
+```
+
+`plan-copy` 不接受 `--yes`、`--force` 或执行模式，始终是 `dry_run: true` / `outcome: planned`，且 `execution_supported: false`、`repository_unchanged: true`。计划读取已提交源和目标父目录，不包含本地未提交内容。计划说明最多 8192 UTF-8 字节，可用 `--message-file -` 显式读取 stdin；输出只返回说明字节数，不回显全文。
+
+`would_commit_immediately: true` 描述的是将来真正 URL → URL copy 的语义，**不是本命令已提交**。本版没有创建执行入口：SVN CLI 在目标并发出现为目录时可能将源复制进该目录，无法保证已核对的精确目标，因此不发送 copy。标签也只是普通 SVN 目录，并非天然不可修改。完整原因、限制和真实 SVN 待验证项见 [BRANCHES.md](BRANCHES.md)。
+
+### 仓库文件锁
+
+```console
+python -m svn_client.cli --workspace /wc lock inspect --path asset.png
+python -m svn_client.cli --workspace /wc lock acquire --path asset.png --comment "修改贴图" --dry-run
+python -m svn_client.cli --workspace /wc lock acquire --path asset.png --comment "修改贴图" --expect-state-sha256 <64位小写哈希> --yes
+python -m svn_client.cli --workspace /wc lock release --path asset.png --dry-run
+python -m svn_client.cli --workspace /wc lock release --path asset.png --expect-state-sha256 <64位小写哈希> --yes
+```
+
+- 每次明确选择 1–128 个已经提交过的普通本地文件。支持重复 `--path` 或 `--paths-json FILE|-`，不接受隐含工作区范围。目录、switched/结构变化/冲突、外部引用和链接不支持。
+- `inspect` 返回当前服务器所有者、备注及本工作副本是否持有有效令牌；不输出原始令牌。相同用户名不等于同一工作副本持有锁。
+- `--dry-run` 返回 `data.preflight`，包括 `files`、`comment`、`warnings`、`state_sha256`。它确实访问服务器，但不改变锁。查询逐文件执行，超时按子进程计算。
+- `--expect-state-sha256` 可选但推荐；绑定准确文件、操作、备注、仓库/版本及锁状态，不绑定本地文件内容。CLI 无论如何都会把当次预检哈希传给后端执行前复检。
+- 不抢锁、不破锁、不强制令牌。只释放本工作副本真正持有的当前锁。加锁备注会发给服务器，请勿包含密码或其他秘密。
+- 成功结果已重新读取服务器验证。多文件锁不是原子操作；错误可能部分成功。`operation_uncertain` 的 `observed_locks`（可读取时）提供当前脱敏状态，不表示回滚。先重新查询，不自动重试。
+
+锁会限制其他人的提交，不会禁止本地编辑。`svn:needs-lock` 可能改变本地写权限，正常提交也可能释放锁。支持范围、确认语义和当前真实 SVN 验证限制见 [LOCKS.md](LOCKS.md)。
 
 ### 本地原生变更列表
 
@@ -134,7 +202,7 @@ python -m svn_client.cli --workspace /wc shelf create --name backup --paths-json
 - `schema_version` 固定为 `1`；调用方应检查版本并允许未来添加字段，不依赖 JSON 键顺序。
 - `ok` 表示这次请求的结果可用。`command` 为 `status` 或 `changelist.commit` 等名称；帮助和尚未完成解析的请求可能为 `null`。
 - `workspace` 是解析后的绝对路径，解析/确认阶段尚未求值或输出缩减时可为 `null`。
-- `outcome`：`read`（只读结果）、`planned`（预检通过）、`completed`（修改调用成功返回）、`refused`（执行前拒绝）、`failed`（已知只读/预检错误）或 `uncertain`（修改已调用但未成功返回）。
+- `outcome`：`read`（只读结果）、`planned`（预检通过）、`completed`（修改调用成功返回）、`needs_review`（合并结果待审核）、`conflicted`（合并后观察到冲突，需人工处理）、`refused`（执行前拒绝）、`failed`（已知只读/预检错误）或 `uncertain`（修改已调用但未成功返回）。
 - `data` 为具体命令结果，错误通常为 `null`。
 - `error` 非空时包含稳定 `code`、面向人的 `message`、`message_truncated` 和可为空的 `details`。脚本应分支判断 `code`，不要解析英文错误句子。
 - `warnings` 为字符串数组。Shelf 预检对象内也可能有更具体的 `warnings`。
@@ -173,19 +241,19 @@ python -m svn_client.cli --workspace /wc shelf create --name backup --paths-json
 {"text": "...", "truncated": false, "source_utf8_bytes": 123, "returned_utf8_bytes": 123}
 ```
 
-字节计数针对后端解码及 URL 密码隐藏后的文本；截断不切开 UTF-8 字符。此字段出现在 `data.diff`、`data.svn.stdout/stderr` 及不确定错误的 `details.cause` 等位置。`truncated: true` 绝不代表完整差异或诊断。
+字节计数针对后端解码及 URL 密码隐藏后的文本；截断不切开 UTF-8 字符。此字段出现在 `data.diff`、分支 `data.preflight.preview` / `data.result.output`、`data.svn.stdout/stderr` 及不确定错误的 `details.cause` 等位置。`truncated: true` 绝不代表完整差异或诊断。
 
 `--max-output-bytes` 默认 4194304，允许 2048–67108864。整个 JSON 超限时不静默省略列表成员，而返回 `output_limit`、退出码 `9`。`details` 包含原始结果的 `original_outcome`、`original_error_code`、所需字节数和 `mutation_attempted`；`outcome` 保留原结果。
 
 **尤其注意：如果超限发生在已完成修改之后，`ok` 为 false 但 `outcome` 仍可为 `completed`。不得为了再次获取输出而重做提交、恢复或删除。** 只读请求可缩小查询或提高限额；已经执行的修改应另行读取状态和历史。
 
-这些限制控制返回的文本/JSON，不限制底层 SVN 已缓冲到内存的输出总量，也不是全程内存配额。大量工作副本或长历史请用目标路径和 `--limit` 缩小范围。
+这些可配置限额控制返回的文本/JSON，本身不是底层 SVN 输出总量或全程内存配额。新 `history` / `compare` 另有上述固定进程捕获上限，旧 `log` / `diff` 没有同等保证。大量工作副本或长历史仍应使用目标路径和 `--limit` 缩小范围。
 
 ### 退出码
 
 | 代码 | `error.code` | 含义 |
 | --- | --- | --- |
-| 0 | 无 | 命令/帮助/预检成功 |
+| 0 | 无 | 命令/帮助/预检结果可读取；合并仍可能需要审核或解决冲突，必须检查 `outcome` |
 | 2 | `usage_error` | 参数、命令或选项格式不正确 |
 | 3 | `confirmation_required` | 修改缺少 `--yes` 或 `--dry-run` |
 | 4 | `validation_failed` | 路径、输入、成员、状态或恢复冲突检查失败 |
@@ -198,7 +266,7 @@ python -m svn_client.cli --workspace /wc shelf create --name backup --paths-json
 | 74 | `io_error` | 输入/输出 I/O 错误；管道断开时无法返回 JSON |
 | 130 | `interrupted` | 修改调用前收到中断 |
 
-一旦进入修改方法，后续错误会保守报告 `operation_uncertain`，即使后端实际在内部验证阶段拒绝。这避免把已部分完成的操作误判为可安全重试。中断修改同样为 `8`。外部强杀、进程崩溃或输出接收方关闭时可能没有 JSON；调用方必须按未知结果处理，不得以“没收到结果”为“没发生修改”。
+除分支后端明确保证尚未发送 apply 命令的 `BranchError` 外，一旦进入修改方法，后续错误会保守报告 `operation_uncertain`，即使后端实际在内部验证阶段拒绝。这避免把已部分完成的操作误判为可安全重试。中断修改同样为 `8`。外部强杀、进程崩溃或输出接收方关闭时可能没有 JSON；调用方必须按未知结果处理，不得以“没收到结果”为“没发生修改”。
 
 `--timeout` 默认为 120 秒，是**每个 SVN 子进程**的时限，不是整个 CLI 的时限。一次预检可能调用多个 SVN 子进程。调用方若设置总时限并终止 CLI，同样不能假定已发出的提交或局部恢复自动回滚。
 
@@ -236,6 +304,6 @@ review_hash = response["data"]["preflight"]["members_sha256"]
 
 ## 验证状态
 
-测试命令：`python -m unittest discover -s tests -v`。CLI 测试覆盖 JSON 格式、非交互输入、路径边界、参数注入边界、确认门槛、真正的预检调用、完整成员哈希、提交与恢复的不确定结果、二进制/Unicode 输出边界以及进程入口。
+测试命令：`python -m unittest discover -s tests -v`。CLI 测试覆盖 JSON 格式、非交互输入、路径边界、参数注入边界、确认门槛、真正的预检调用、完整成员哈希、分支必填审核哈希与只读复制计划、合并待审核/冲突结果、提交与恢复的不确定结果、二进制/Unicode 输出边界以及进程入口。
 
 真实 SVN 集成测试仅使用一次性本地测试仓库，要求 `svn` 与 `svnadmin`。当前开发环境中两者不可用，因此这部分测试跳过；**没有据此声称真实仓库、Windows 原生运行、认证流程或 GUI 已通过验证**。首次使用请先在可丢弃工作副本中测试，并独立备份重要内容。

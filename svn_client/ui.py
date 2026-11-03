@@ -17,19 +17,26 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote
 
 from .backend import SvnClient, discover_svn
+from .branches_ui import BranchUiMixin
+from .conflict_dialogs import (ConflictConfirmDialog, ConflictInspectDialog,
+                               can_keep_working, display_path, inspection_text,
+                               is_conflicted)
 from .display import configure_display, enable_high_dpi
+from .operation_ui import OperationUiMixin
+from .history_ui import HistoryUiMixin, history_cell
 from .shelves import ShelfManager
+from .theme import COLORS, apply_theme, text_options
 from .workspaces import (load_settings, normalize_settings, remember_workspace,
                          remove_workspace, rename_workspace, save_settings,
                          startup_workspace, validate_name)
 
 
 APP_NAME = "SVN Desk"
-BG = "#f3f5f8"
-NAV = "#18283d"
-TEXT = "#26364b"
-MUTED = "#718096"
-BLUE = "#2468cc"
+BG = COLORS["bg"]
+NAV = COLORS["nav"]
+TEXT = COLORS["text"]
+MUTED = COLORS["muted"]
+BLUE = COLORS["primary"]
 STATUS_LABELS = {
     "modified": "已修改", "added": "已添加", "deleted": "待删除",
     "unversioned": "未版本化", "missing": "本地缺失", "conflicted": "冲突",
@@ -215,13 +222,13 @@ class CommitDialog(tk.Toplevel):
                        if changelist is not None else "此操作会将以下路径的更改发送到远程仓库。目录会包含其下的更改。")
         ttk.Label(body, text=description,
                   wraplength=self.display.px(590)).pack(anchor="w", pady=(7, 12))
-        listing = tk.Text(body, height=6, relief="flat", font=self.display.mono_font(), bg="#e9eef5")
+        listing = tk.Text(body, height=6, relief="flat", font=self.display.mono_font(), **text_options())
         listing.pack(fill="x")
         listing.insert("1.0", "\n".join(f"[{statuses[path]}] {path}" if statuses else path for path in paths))
         listing.configure(state="disabled")
         ttk.Label(body, text="提交说明（必填）").pack(anchor="w", pady=(16, 6))
         self.message = tk.Text(body, height=7, wrap="word", relief="solid", bd=1,
-                               font=self.display.font(), undo=True)
+                               font=self.display.font(), undo=True, **text_options("input"))
         self.message.pack(fill="both", expand=True)
         buttons = ttk.Frame(body)
         buttons.pack(fill="x", pady=(16, 0))
@@ -513,7 +520,7 @@ class WorkspaceDiscoveryDialog(tk.Toplevel):
         self.destroy()
 
 
-class SvnDesk(tk.Tk):
+class SvnDesk(BranchUiMixin, HistoryUiMixin, OperationUiMixin, tk.Tk):
     def __init__(self, working_copy=None, *, demo=False):
         enable_high_dpi()
         super().__init__()
@@ -526,6 +533,7 @@ class SvnDesk(tk.Tk):
         self.shelf_manager = None
         self.root_path = None
         self.info = {}
+        self._workspace_state_unknown = False
         self.entries = []
         self.changelist_candidates = []
         self.logs = []
@@ -548,6 +556,8 @@ class SvnDesk(tk.Tk):
         self._folder_offset = 0
         self._folder_scope = None
         self._preview_request = 0
+        self._branch_request = 0
+        self._init_history_state()
         self._controls = []
         self._action_buttons = {}
         self._change_lookup = {}
@@ -601,28 +611,7 @@ class SvnDesk(tk.Tk):
             return False
 
     def _make_style(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        p = self.display.px
-        style.configure(".", font=self.display.font(), background=BG, foreground=TEXT)
-        style.configure("TFrame", background=BG)
-        style.configure("White.TFrame", background="white")
-        style.configure("TLabel", background=BG, foreground=TEXT)
-        style.configure("Heading.TLabel", font=self.display.font(15, "bold"))
-        style.configure("Muted.TLabel", foreground=MUTED)
-        style.configure("TButton", padding=(p(12), p(7)), borderwidth=0, background="#e7ecf3")
-        style.map("TButton", background=[("active", "#dbe4f1"), ("disabled", "#edf0f4")],
-                  foreground=[("disabled", "#9aa4b1")])
-        style.configure("Primary.TButton", foreground="white", background=BLUE)
-        style.map("Primary.TButton", background=[("active", "#1d57ae"), ("disabled", "#a8bce0")], foreground=[("disabled", "#f4f6fa")])
-        style.configure("Treeview", background="white", fieldbackground="white", foreground=TEXT,
-                        rowheight=p(30), borderwidth=0, font=self.display.font())
-        style.configure("Treeview.Heading", background="#eaf0f6", foreground="#53647b", padding=(p(8), p(9)), relief="flat")
-        style.map("Treeview", background=[("selected", "#e0ecff")], foreground=[("selected", "#174d94")])
-        style.configure("TNotebook", tabmargins=(0, 5, 0, 0), borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(p(16), p(9)), background="#e9edf4")
-        style.map("TNotebook.Tab", background=[("selected", "white")], foreground=[("selected", BLUE)])
-        style.configure("Horizontal.TProgressbar", troughcolor="#e6ebf2", background=BLUE, borderwidth=0)
+        apply_theme(self, self.display)
 
     def _make_menu(self):
         menu = tk.Menu(self)
@@ -646,6 +635,23 @@ class SvnDesk(tk.Tk):
                                 ("移回未分组…", self.remove_from_changelist), ("提交所选变更列表…", self.commit_changelist)]:
             changelist_menu.add_command(label=label, command=callback)
         menu.add_cascade(label="变更列表", menu=changelist_menu)
+        conflict_menu = tk.Menu(menu, tearoff=False)
+        conflict_menu.add_command(label="筛选冲突状态", command=self.filter_conflicts)
+        conflict_menu.add_command(label="检查选中冲突…", command=self.inspect_conflicts)
+        menu.add_cascade(label="冲突", menu=conflict_menu)
+        files_menu = tk.Menu(menu, tearoff=False)
+        for label, callback in (("移动 / 重命名文件…", self.move_file),
+                                ("复制文件（保留历史）…", self.copy_file),
+                                ("删除已版本化文件…", self.delete_files),
+                                ("检查仓库文件锁…", self.inspect_locks)):
+            files_menu.add_command(label=label, command=callback)
+        menu.add_cascade(label="文件与锁", menu=files_menu)
+        branch_menu = tk.Menu(menu, tearoff=False)
+        branch_menu.add_command(label="切换整个工作副本…", command=self.switch_working_copy)
+        branch_menu.add_command(label="合并明确向前范围到整个副本…", command=self.merge_revision_range)
+        branch_menu.add_separator()
+        branch_menu.add_command(label="分支 / 标签计划（只读，不创建）…", command=self.preview_branch_copy)
+        menu.add_cascade(label="分支与合并", menu=branch_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="使用说明", command=self.show_help)
         help_menu.add_command(label="关于 SVN Desk", command=lambda: messagebox.showinfo(APP_NAME, "SVN Desk 0.1\n\nP4V 风格的独立 Subversion 桌面工作台。\n不隶属于 Perforce 或 Apache Subversion。", parent=self))
@@ -668,17 +674,17 @@ class SvnDesk(tk.Tk):
         self.main_split = ttk.Panedwindow(self, orient="horizontal")
         self.main_split.pack(fill="both", expand=True)
         sidebar_width = max(180, min(self.display.px(270), self.winfo_screenwidth() // 4))
-        sidebar = ttk.Frame(self.main_split, width=sidebar_width, padding=(10, 12))
+        sidebar = ttk.Frame(self.main_split, width=sidebar_width, padding=(10, 12), style="Sidebar.TFrame")
         sidebar.pack_propagate(False)
         self.main_split.add(sidebar, weight=0)
-        ttk.Label(sidebar, text="SVN Desk", font=self.display.font(16, "bold")).pack(anchor="w", pady=(0, 9))
+        ttk.Label(sidebar, text="SVN Desk", font=self.display.font(16, "bold"), style="Sidebar.TLabel").pack(anchor="w", pady=(0, 9))
         self.workspace_name = ttk.Label(sidebar, text="尚未打开工作副本", wraplength=sidebar_width - 25,
-                                       font=self.display.font(10, "bold"))
+                                       font=self.display.font(10, "bold"), style="Sidebar.TLabel")
         self.workspace_name.pack(fill="x", pady=(0, 10))
         self.nav_buttons = []
         navigator = ttk.Notebook(sidebar)
         navigator.pack(fill="both", expand=True)
-        workspace_page, repo_page = ttk.Frame(navigator), ttk.Frame(navigator)
+        workspace_page, repo_page = ttk.Frame(navigator, style="Sidebar.TFrame"), ttk.Frame(navigator, style="Sidebar.TFrame")
         navigator.add(workspace_page, text="工作副本")
         navigator.add(repo_page, text="仓库")
         self.workspace_tree = self._navigation_tree(workspace_page)
@@ -692,7 +698,7 @@ class SvnDesk(tk.Tk):
         self.repository_tree.bind("<Return>", lambda event: self._activate_key(self._repository_tree_open))
         self.repository_tree.bind("<<TreeviewOpen>>", self._repository_tree_open)
         ttk.Label(sidebar, text="目录按需加载 · 双击文件查看内容\n工作副本内的链接和独立副本不展开",
-                  style="Muted.TLabel", wraplength=sidebar_width - 25).pack(anchor="w", pady=(10, 0))
+                  style="SidebarMuted.TLabel", wraplength=sidebar_width - 25).pack(anchor="w", pady=(10, 0))
         content = ttk.Frame(self.main_split, padding=(14, 16, 14, 10))
         self.main_split.add(content, weight=1)
         heading = ttk.Frame(content)
@@ -729,6 +735,10 @@ class SvnDesk(tk.Tk):
         self._button(toolbar, "更新…", self.update_workspace)
         self._button(toolbar, "提交选中项…", self.commit_selected, primary=True, action="commit_files")
         self._button(toolbar, "查看差异", self.preview_changes, action="diff")
+        self._button(toolbar, "文件历史", self.show_selected_history, action="history_file")
+        self._button(toolbar, "比较版本…", self.compare_selected_file, action="compare_file")
+        self._button(toolbar, "检查冲突…", self.inspect_conflicts, action="conflict")
+        self._button(toolbar, "仓库锁…", self.inspect_locks, action="file_lock")
         self._button(toolbar, "添加…", self.add_selected, action="add")
         self._button(toolbar, "新建 Shelf…", self.create_shelf, action="shelf")
         self.summary_var = tk.StringVar(value="打开工作副本后，即可查看本地修改。")
@@ -749,7 +759,7 @@ class SvnDesk(tk.Tk):
             self.pages.append(frame)
         list_actions = WrapToolbar(self.pages[0], padding=(10, 9, 10, 3))
         list_actions.pack(fill="x")
-        self._button(list_actions, "+ 新建变更列表…", self.new_changelist, primary=True, action="new_list")
+        self._button(list_actions, "+ 新建变更列表…", self.new_changelist, action="new_list")
         self._button(list_actions, "移动到列表…", self.move_to_changelist, action="move")
         self._button(list_actions, "移回未分组…", self.remove_from_changelist, action="unassign")
         self._button(list_actions, "提交所选列表…", self.commit_changelist, action="commit_group")
@@ -766,10 +776,10 @@ class SvnDesk(tk.Tk):
         self.changes.bind("<Return>", lambda event: self._activate_key(self._pending_activated))
         self.changes.bind("<<TreeviewSelect>>", self._selection_hint)
         self.changes.bind("<Button-3>", self._pending_menu)
-        self.changes.tag_configure("group", background="#edf3fb", foreground="#245386")
-        self.changes.tag_configure("conflict", foreground="#bb3a35")
-        self.changes.tag_configure("added", foreground="#26714c")
-        self.changes.tag_configure("missing", foreground="#a66b17")
+        self.changes.tag_configure("group", background=COLORS["group_bg"], foreground=COLORS["group_fg"])
+        self.changes.tag_configure("conflict", foreground=COLORS["danger"])
+        self.changes.tag_configure("added", foreground=COLORS["success"])
+        self.changes.tag_configure("missing", foreground=COLORS["warning"])
         file_header = ttk.Frame(self.pages[1], padding=(10, 9))
         file_header.pack(fill="x")
         self.files_note = ttk.Label(file_header, text="工作副本中的本地文件（隐藏 .svn）", style="Muted.TLabel")
@@ -780,10 +790,13 @@ class SvnDesk(tk.Tk):
         self.files.bind("<Double-1>", lambda event: self.preview_file())
         self.files.bind("<Return>", lambda event: self._activate_key(self.preview_file))
         self.files.bind("<<TreeviewSelect>>", self._file_selection_details)
+        self.files.bind("<Button-3>", self._files_context_menu)
+        self._build_history_controls(self.pages[2], WrapToolbar)
         self.history = self._tree(self.pages[2], [("revision", "修订", 70), ("author", "作者", 110),
                                                 ("date", "日期", 160), ("message", "提交说明", 360)])
         self.history.bind("<<TreeviewSelect>>", self.preview_history)
         self.history.bind("<Double-1>", lambda event: self.preview_revision_diff())
+        self.history.bind("<Return>", lambda event: self._activate_key(self.preview_revision_diff))
         repo_header = ttk.Frame(self.pages[3], padding=(10, 9))
         repo_header.pack(fill="x")
         ttk.Button(repo_header, text="上一级", command=self.repository_up).pack(side="left", padx=(0, 8))
@@ -811,10 +824,10 @@ class SvnDesk(tk.Tk):
         self.preview_title = ttk.Label(preview_frame, text="选择文件查看差异", style="Muted.TLabel", padding=(10, 8))
         self.preview_title.pack(fill="x")
         self.preview = self._text_area(preview_frame)
-        self.preview.tag_configure("add", foreground="#20704a", background="#effaf3")
-        self.preview.tag_configure("remove", foreground="#b3423c", background="#fff1ef")
-        self.preview.tag_configure("header", foreground="#2766b6", background="#edf4fd")
-        self.console = self._text_area(log_frame, background="#1d2b3e", foreground="#c7d7ec")
+        self.preview.tag_configure("add", foreground=COLORS["diff_add_fg"], background=COLORS["diff_add_bg"])
+        self.preview.tag_configure("remove", foreground=COLORS["diff_remove_fg"], background=COLORS["diff_remove_bg"])
+        self.preview.tag_configure("header", foreground=COLORS["diff_header_fg"], background=COLORS["diff_header_bg"])
+        self.console = self._text_area(log_frame, kind="console")
         footer = ttk.Frame(content)
         footer.pack(fill="x", pady=(11, 0))
         self.status_var = tk.StringVar(value="就绪")
@@ -823,9 +836,9 @@ class SvnDesk(tk.Tk):
         self.progress.pack(side="right")
 
     def _navigation_tree(self, parent):
-        frame = ttk.Frame(parent)
+        frame = ttk.Frame(parent, style="Sidebar.TFrame")
         frame.pack(fill="both", expand=True)
-        tree = ttk.Treeview(frame, show="tree", selectmode="browse")
+        tree = ttk.Treeview(frame, show="tree", selectmode="browse", style="Navigation.Treeview")
         tree.column("#0", width=self.display.px(240), minwidth=self.display.px(100))
         scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
@@ -1005,6 +1018,9 @@ class SvnDesk(tk.Tk):
         else:
             menu.add_command(label="查看本地文件内容", command=lambda: self._preview_local_path(relative))
             menu.add_command(label="在待提交列表中定位", command=lambda: self._locate_pending_file(relative))
+        menu.add_separator()
+        menu.add_command(label="目录历史（含后代）" if kind == "dir" else "此文件历史", command=lambda: self.open_path_history(relative),
+                         state="disabled" if self._busy or self.demo or not self.client else "normal")
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1080,11 +1096,11 @@ class SvnDesk(tk.Tk):
             tree.column(name, width=self.display.px(width), minwidth=self.display.px(60), anchor="w", stretch=name in {"path", "message", "name"})
         return tree
 
-    def _text_area(self, parent, background="white", foreground=TEXT):
+    def _text_area(self, parent, *, kind="normal"):
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
-        text = tk.Text(frame, wrap="none", height=10, bg=background, fg=foreground, relief="flat", bd=0,
-                       padx=12, pady=9, font=self.display.mono_font(), insertbackground=foreground, state="disabled")
+        text = tk.Text(frame, wrap="none", height=10, relief="flat", bd=0,
+                       padx=self.display.px(12), pady=self.display.px(9), font=self.display.mono_font(), state="disabled", **text_options(kind))
         ybar = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
         xbar = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
         text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
@@ -1118,6 +1134,10 @@ class SvnDesk(tk.Tk):
     def _action_available(self, action):
         if self._busy or not (self.client or self.demo):
             return False
+        if action in {"history_file", "compare_file"}:
+            return self._history_file_action_available()
+        if action in {"file_delete", "file_move", "file_copy", "file_lock"}:
+            return self._file_action_available(action)
         if action == "new_list":
             return bool(self.changelist_candidates)
         if self.tabs.index(self.tabs.select()) != 0:
@@ -1133,6 +1153,8 @@ class SvnDesk(tk.Tk):
             return False
         if action in {"diff", "shelf"}:
             return True
+        if action == "conflict":
+            return all(is_conflicted(entry) for entry in files)
         if action == "add":
             return all(entry.item == "unversioned" for entry in files)
         if action == "move":
@@ -1147,10 +1169,11 @@ class SvnDesk(tk.Tk):
         return False
 
     def _update_action_states(self):
+        self._update_history_controls()
         for action, button in self._action_buttons.items():
             button.configure(state="normal" if self._action_available(action) else "disabled")
 
-    def _run(self, label, work, done=None, *, mutation=False, on_error=None):
+    def _run(self, label, work, done=None, *, mutation=False, on_error=None, preserve_view_on_error=False):
         if self._busy or self._closing:
             self.bell()
             return
@@ -1158,16 +1181,16 @@ class SvnDesk(tk.Tk):
         self._append_log("› " + label)
         def worker():
             try:
-                self._queue.put((True, work(), done, label, mutation, on_error))
+                self._queue.put((True, work(), done, label, mutation, on_error, preserve_view_on_error))
             except Exception as error:
-                self._queue.put((False, error, done, label, mutation, on_error))
+                self._queue.put((False, error, done, label, mutation, on_error, preserve_view_on_error))
         threading.Thread(target=worker, daemon=True).start()
 
     def _drain_queue(self):
         if self._closing:
             return
         try:
-            ok, result, done, label, mutation, on_error = self._queue.get_nowait()
+            ok, result, done, label, mutation, on_error, preserve_view_on_error = self._queue.get_nowait()
         except queue.Empty:
             pass
         else:
@@ -1178,22 +1201,41 @@ class SvnDesk(tk.Tk):
                     try:
                         done(result)
                     except Exception as error:
-                        self._append_log("显示结果失败：" + str(error))
-                        messagebox.showerror("无法显示结果", str(error), parent=self)
+                        self._log_callback_failure("显示结果失败", error)
+                        try:
+                            messagebox.showerror("无法显示结果", str(error), parent=self)
+                        except Exception as notification_error:
+                            self._log_callback_failure("结果错误提示未能显示", notification_error)
             else:
                 self._append_log("失败：" + str(result))
-                self.details_tabs.select(1)
-                if self.root_path:
-                    self.path_var.set(str(self.root_path))
+                if not preserve_view_on_error:
+                    self.details_tabs.select(1)
+                    if self.root_path:
+                        self.path_var.set(str(self.root_path))
                 note = "\n\n操作可能已部分执行。将重新读取本地状态，请确认结果后再操作。" if mutation else ""
                 if on_error:
-                    on_error(result)
+                    try:
+                        on_error(result)
+                    except Exception as callback_error:
+                        # The handler may already have queued a mandatory
+                        # post-attempt refresh. Keep polling without another modal.
+                        self._log_callback_failure("失败结果回调未能完整显示", callback_error)
                 else:
-                    messagebox.showerror(label + "失败", str(result) + note, parent=self)
+                    try:
+                        messagebox.showerror(label + "失败", str(result) + note, parent=self)
+                    except Exception as notification_error:
+                        self._log_callback_failure("失败提示未能显示", notification_error)
                 if mutation and self.client:
                     self.refresh()
         self._drain_tree_queue()
         self.after(90, self._drain_queue)
+
+    def _log_callback_failure(self, label, error):
+        try:
+            self._append_log(label + "：" + str(error) + "；后台结果轮询继续，操作不会自动重试。")
+        except Exception:
+            # A damaged/closed text widget must not stop queue re-arming.
+            pass
 
     def _append_log(self, text):
         self.console.configure(state="normal")
@@ -1424,6 +1466,7 @@ class SvnDesk(tk.Tk):
             self._clear_workspace_selection()
             self.client, self.shelf_manager, self.root_path, self.info, status_data, self.shelves = data
             self.entries, self.changelist_candidates = status_data
+            self._workspace_state_unknown = False
             self.all_files = []
             self.path_var.set(str(self.root_path))
             changed = new_settings != self.settings
@@ -1437,8 +1480,7 @@ class SvnDesk(tk.Tk):
             self._repo_url = ""
             self.repo_var.set("选择“仓库浏览”加载当前仓库目录。")
             self.repository.delete(*self.repository.get_children())
-            self.logs = []
-            self._render_history()
+            self._reset_history_state(reset_form=True)
             self._folder_rows = None
             self._render_all()
             self._reset_workspace_tree()
@@ -1458,30 +1500,40 @@ class SvnDesk(tk.Tk):
                 messagebox.showwarning("未能恢复上次工作区" if auto_restore else "无法打开工作区", str(error) + "\n\n记录已保留。可使用“工作区管理”重新定位或打开其他副本。", parent=self)
         self._run("恢复上次工作区" if auto_restore else "打开工作副本", load, loaded, on_error=failed)
 
-    def refresh(self):
+    def refresh(self, *, reset_navigation=False):
         if self.demo:
             self._load_demo()
             return
         if not self.client or self._busy:
             return
+        if getattr(self, "_workspace_state_unknown", False) is True:
+            reset_navigation = True
+        if reset_navigation:
+            self._invalidate_branch_views()
         client, shelves, root = self.client, self.shelf_manager, self.root_path
         def load():
             return client.info(), read_groupable_status(client, root), shelves.list()
         def loaded(data):
+            if self.client is not client:
+                return
             self.info, status_data, self.shelves = data
             self.entries, self.changelist_candidates = status_data
-            self.logs = []
-            self._render_history()
+            self._workspace_state_unknown = False
+            self._reset_history_state(reset_form=reset_navigation)
             self._render_all()
-            folder_node = next((iid for iid, data in self._workspace_nodes.items()
-                                if data == (self._folder_scope, "dir") and self.workspace_tree.exists(iid)), None)
-            if folder_node:
-                self._refresh_workspace_directory(folder_node)
-            current = self.tabs.index(self.tabs.select())
-            if current == 2:
-                self.load_history()
-            elif current == 3:
-                self.load_repository(self._repo_url or self.info.get("url"))
+            if reset_navigation:
+                self._reset_workspace_tree()
+                self.repo_var.set("工作副本映射已重新读取；请选择仓库目录继续浏览。")
+            else:
+                folder_node = next((iid for iid, data in self._workspace_nodes.items()
+                                    if data == (self._folder_scope, "dir") and self.workspace_tree.exists(iid)), None)
+                if folder_node:
+                    self._refresh_workspace_directory(folder_node)
+                current = self.tabs.index(self.tabs.select())
+                if current == 2:
+                    self.load_history()
+                elif current == 3:
+                    self.load_repository(self._repo_url or self.info.get("url"))
         self._run("刷新工作副本", load, loaded)
 
     def _info_text(self):
@@ -1496,7 +1548,10 @@ class SvnDesk(tk.Tk):
         conflicts = sum(e.item == "conflicted" or e.tree_conflicted or e.props == "conflicted" for e in self.entries)
         changed = sum(has_local_changes(entry) for entry in self.entries)
         groups = {getattr(entry, "changelist", None) for entry in self.entries} - {None}
-        self.summary_var.set(f"{changed} 个待处理更改  ·  {len(groups)} 个本地变更列表  ·  {conflicts} 个冲突  ·  r{self.info.get('revision', '?')}")
+        if getattr(self, "_workspace_state_unknown", False) is True:
+            self.summary_var.set("工作副本状态未知，尚未重新读全；不能据此判断干净或无冲突。请刷新或重新打开并核查。")
+        else:
+            self.summary_var.set(f"{changed} 个待处理更改  ·  {len(groups)} 个本地变更列表  ·  {conflicts} 个冲突  ·  r{self.info.get('revision', '?')}")
         self._render_changes()
         self._render_files()
         self._render_shelves()
@@ -1571,7 +1626,7 @@ class SvnDesk(tk.Tk):
         self._log_lookup = {}
         for index, entry in enumerate(self.logs):
             iid = f"log{index}"
-            self.history.insert("", "end", iid=iid, values=(f"r{entry.revision}", entry.author, str(entry.date).replace("T", " ")[:19], entry.message.splitlines()[0] if entry.message else "（无说明）"))
+            self.history.insert("", "end", iid=iid, values=(f"r{entry.revision}", history_cell(entry.author, 120), str(entry.date).replace("T", " ")[:19], history_cell(entry.message) if entry.message else "（无说明）"))
             self._log_lookup[iid] = entry
 
     def _render_shelves(self):
@@ -1590,10 +1645,10 @@ class SvnDesk(tk.Tk):
         current = self.tabs.index(self.tabs.select())
         self.title_label.configure(text=self.tabs.tab(current, "text"))
         for index, button in enumerate(self.nav_buttons):
-            button.configure(bg="#29476c" if current == index else NAV, fg="white" if current == index else "#c1cee0")
+            button.configure(bg=COLORS["selection"] if current == index else NAV, fg=TEXT if current == index else MUTED)
         self._update_action_states()
         if not self._busy and not self.demo and self.client:
-            if current == 2 and not self.logs:
+            if current == 2 and self._history_auto_pending:
                 self.load_history()
             elif current == 3 and not self._repo_url:
                 self.load_repository(self.info.get("url"))
@@ -1650,7 +1705,10 @@ class SvnDesk(tk.Tk):
             menu.add_separator()
             item("提交选中文件…", self.commit_selected, "commit_files")
             item("查看文件差异", self.preview_changes, "diff")
+            item("检查选中冲突…", self.inspect_conflicts, "conflict")
             menu.add_command(label="还原选中文件…", command=self.revert_selected)
+            menu.add_separator()
+            self._file_action_menu(menu)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1662,6 +1720,109 @@ class SvnDesk(tk.Tk):
             self.select_tab(0)
             return []
         return [self._change_lookup[i] for i in self.changes.selection() if i in self._change_lookup]
+
+    def filter_conflicts(self):
+        if self._busy:
+            return
+        self.select_tab(0)
+        self.filter_var.set("冲突")
+        self._show_preview("冲突筛选", "请选择具体冲突行，点击“检查冲突”。\n\n这里只提供受限的 working 流程：先在外部手工检查并处理工作文件，再明确预检和确认。\n属性、混合、树冲突和整份版本替换请使用可信 SVN 客户端。不会自动解决或提交。")
+
+    def _conflict_context_matches(self, client, paths):
+        if self._closing or self.client is not client or self.tabs.index(self.tabs.select()) != 0:
+            return False
+        selection = self.changes.selection()
+        if any(iid in self._group_lookup for iid in selection):
+            return False
+        current = [self._change_lookup[iid].path for iid in selection if iid in self._change_lookup]
+        normalize = lambda values: {os.path.normcase(os.path.normpath(value)) for value in values}
+        return bool(current) and normalize(current) == normalize(paths)
+
+    def inspect_conflicts(self):
+        if not self._can_operate():
+            return
+        entries = self._selected_entries()
+        if (not entries or any(not is_conflicted(entry) for entry in entries)
+                or any(iid in self._group_lookup for iid in self.changes.selection())):
+            messagebox.showinfo("选择具体冲突节点", "请只选择要检查的冲突行，不选择分组标题或普通文件。可先使用“冲突 → 筛选冲突状态”。", parent=self)
+            return
+        from .conflicts import ConflictManager, MAX_RESOLVE_PATHS
+        paths = tuple(sorted({entry.path for entry in entries}))
+        if len(paths) > MAX_RESOLVE_PATHS:
+            messagebox.showwarning("选择范围过大", f"单次最多检查 {MAX_RESOLVE_PATHS} 个路径，请缩小选择。", parent=self)
+            return
+        client = self.client
+        manager = ConflictManager(client)
+        def inspected(inspections):
+            if not self._conflict_context_matches(client, paths):
+                if not self._closing:
+                    self.status_var.set("工作区或选区已变化，未继续冲突操作；请重新检查。")
+                return
+            self._show_preview("选中冲突的检查结果", "\n\n".join(inspection_text(entry) for entry in inspections))
+            dialog = ConflictInspectDialog(self, inspections)
+            if dialog.result != "working" or not can_keep_working(inspections):
+                return
+            if not self._conflict_context_matches(client, paths):
+                if not self._closing:
+                    self.status_var.set("工作区或选区已变化，未进行预检。")
+                return
+            self._preflight_conflict_resolution(manager, client, paths)
+        self._run("只读检查选中冲突", lambda: tuple(manager.inspect(path) for path in paths), inspected)
+
+    def _preflight_conflict_resolution(self, manager, client, paths):
+        def preflight_failed(error):
+            if self._conflict_context_matches(client, paths):
+                self._show_preview("冲突预检未通过", "没有发出解决命令。\n\n" + str(error))
+            messagebox.showwarning("冲突预检未通过", str(error) + "\n\n本次没有执行解决，请重新检查状态。", parent=self)
+            if self.client is client:
+                self.refresh()
+        def checked(plan):
+            if not self._conflict_context_matches(client, paths):
+                if not self._closing:
+                    self.status_var.set("预检期间工作区或选区已变化，未执行解决。")
+                return
+            normalize = lambda values: {os.path.normcase(os.path.normpath(value)) for value in values}
+            if plan.accept != "working" or not can_keep_working(plan.inspections) or normalize(plan.paths) != normalize(paths):
+                messagebox.showerror("解决方案不匹配", "预检没有返回与选中范围一致的受支持 working 方案，未执行操作。", parent=self)
+                return
+            self._show_preview("冲突解决预检（尚未执行）", "方式：working，保留已手工核对的当前工作文件。\n"
+                               + "\n".join(display_path(path) for path in plan.paths)
+                               + "\n\n冲突辅助文件不受内容指纹保护，执行时会被移除。请先保护重要内容。\n"
+                               + "\n".join(plan.warnings))
+            dialog = ConflictConfirmDialog(self, plan, manager.working_copy)
+            if not dialog.confirmed:
+                return
+            if not self._conflict_context_matches(client, paths):
+                if not self._closing:
+                    self.status_var.set("确认期间工作区或选区已变化，未执行解决。")
+                return
+            scope_text = f"工作副本：{manager.working_copy}\n" + "\n".join(display_path(path) for path in plan.paths)
+            def completed(result):
+                if result.stdout:
+                    self._append_log(result.stdout)
+                if result.stderr:
+                    self._append_log(result.stderr)
+                self._append_log("已完成预检范围的 working 处理：\n" + scope_text)
+                if self._conflict_context_matches(client, paths):
+                    self._show_preview("已执行 working 冲突解决", scope_text + "\n\nSVN 已返回并复核上述节点的冲突状态。\n\n没有提交到仓库，也没有判断内容语义正确。请检查文件、运行项目测试，再决定是否提交。")
+                if self.client is client:
+                    self.refresh()
+            def failed(error):
+                from .conflicts import ConflictError
+                refused = isinstance(error, ConflictError)
+                title = "解决操作被拒绝" if refused else "冲突解决结果需要核查"
+                detail = ("本次在解决命令执行前被拒绝，请重新检查和确认。" if refused else
+                          "部分或全部节点可能已处理，不能把错误当作回滚。请先检查状态和文件，程序不会自动重试。")
+                if self._conflict_context_matches(client, paths):
+                    self._show_preview(title, scope_text + "\n\n" + detail + "\n\n" + str(error))
+                messagebox.showwarning(title, scope_text + "\n\n" + detail + "\n\n" + str(error), parent=self)
+                if self.client is client:
+                    self.refresh()
+            # Scope-specific callbacks refresh only the captured workspace and
+            # distinguish a pre-command refusal from an uncertain SVN outcome.
+            self._run("明确执行 working 冲突解决", lambda: manager.resolve(plan.paths, plan.accept,
+                      confirmed=True, expected_state_sha256=plan.state_sha256), completed, on_error=failed)
+        self._run("预检 working 冲突解决", lambda: manager.preflight_resolve(paths, "working"), checked, on_error=preflight_failed)
 
     def _changelist_names(self):
         return sorted({getattr(entry, "changelist", None) for entry in self.entries} - {None}, key=str.casefold)
@@ -1803,6 +1964,7 @@ class SvnDesk(tk.Tk):
         self._preview_local_path(path)
 
     def _file_selection_details(self, event=None):
+        self._update_action_states()
         self._preview_request += 1
         selected = self.files.selection()
         if not selected or selected[0] not in self._file_lookup:
@@ -1820,37 +1982,6 @@ class SvnDesk(tk.Tk):
         else:
             self._run("读取本地文件", lambda: read_preview(self.root_path, path),
                       lambda text: self._show_preview(path, text) if request == self._preview_request else None)
-
-    def load_history(self):
-        if self.demo or not self.client or self._busy:
-            return
-        def loaded(entries):
-            self.logs = entries
-            self._render_history()
-            self.status_var.set(f"已加载最近 {len(entries)} 条提交 · 双击查看修订差异")
-        self._run("读取最近 100 条提交历史", lambda: self.client.log(limit=100, revision="HEAD:0"), loaded)
-
-    def preview_history(self, event=None):
-        self._preview_request += 1
-        selected = self.history.selection()
-        if not selected:
-            return
-        entry = self._log_lookup[selected[0]]
-        paths = "\n".join(f"{p.get('action', '')}  {p.get('path', '')}" for p in entry.changed_paths)
-        self._show_preview(f"修订 r{entry.revision}", f"作者：{entry.author}\n日期：{entry.date}\n\n{entry.message}\n\n更改路径\n{paths}\n\n双击此修订可加载完整差异。")
-
-    def preview_revision_diff(self):
-        selected = self.history.selection()
-        if not selected or self._busy:
-            return
-        entry = self._log_lookup[selected[0]]
-        request = self._preview_request
-        if self.demo:
-            self._show_preview(f"r{entry.revision} 差异", "演示模式：真实仓库的修订差异会显示在这里。")
-            return
-        self._run(f"读取 r{entry.revision} 差异", lambda: self.client.command(["diff", "-c", str(entry.revision), "--", "."]),
-                  lambda result: self._show_preview(f"r{entry.revision} 差异", result.stdout or "此路径没有文本差异。", diff=True)
-                  if request == self._preview_request else None)
 
     def load_repository(self, url):
         if not url or not self.client or self.demo or self._busy:
@@ -2022,9 +2153,10 @@ class SvnDesk(tk.Tk):
                 messagebox.showinfo("已保存", "SVN 程序路径已保存。重新打开工作副本后生效。", parent=self)
 
     def show_help(self):
-        self._show_preview("使用说明", "1. 安装 SVN 命令行工具，打开已有工作副本。\n2. 点击“+ 新建变更列表”，输入名称、选择已版本化文件，点击“创建并归组”。\n3. 也可先按 Ctrl / Shift 多选文件，再点击“移动到列表”。已有列表可从下拉框选择。\n4. 选中分组标题，点击“提交所选列表”，核对全部成员并填写提交说明。筛选隐藏的成员也会列入确认。\n5. “移回未分组”只清除分组标签，不还原、不删除文件；未版本化文件请先添加。\n6. 双击文件查看差异，双击分组查看全部成员。文件操作只作用于明确选中的文件行。\n7. 重要修改可以创建本地 Shelf。创建只备份，不清空修改。恢复前请备份现有工作。\n\nSVN 与 P4V 的差别\n• SVN 变更列表仅在本机工作副本保存；不是服务器上的编号提交单。\n• 列表仅支持文件，每个文件只能归属一个列表；目录无法归组。\n• SVN 不保存空列表，移走最后一个文件后列表自动消失。\n• 提交成功后，已提交文件的标签默认移除。干净的已归组文件仍可显示，但不计入待提交修改数。\n• 分组不保存文件内容，也不锁定文件；Shelf 才是本地内容备份。\n• 新增目录等依赖无法只通过文件分组隔离；SVN 拒绝时不会自动扩大提交范围。\n\n快捷键：Ctrl+O 打开工作副本 · F5 刷新 · Ctrl+D 查看选中差异\n\n安全提示\n• 还原会丢弃未提交更改，删除 Shelf 会永久删除备份。\n• 本地 Shelf 不是服务器备份；不会同步到其他电脑。\n• SVN 身份验证由安装的 SVN 客户端处理，本程序不保存密码。\n• 本界面没有通用 SVN 命令输入框。未覆盖的命令请使用外部 SVN 客户端。")
+        self._show_preview("使用说明", "1. 安装 SVN 命令行工具，打开已有工作副本，或通过“新建 / 检出”创建副本。已验证工作区会记住名称和路径，下次启动恢复。\n2. 点击“+ 新建变更列表”，输入名称、选择已版本化文件，点击“创建并归组”。\n3. 也可先按 Ctrl / Shift 多选文件，再点击“移动到列表”。已有列表可从下拉框选择。\n4. 选中分组标题，点击“提交所选列表”，核对全部成员并填写提交说明。筛选隐藏的成员也会列入确认。\n5. “移回未分组”只清除分组标签，不还原、不删除文件；未版本化文件请先添加。\n6. 双击文件查看差异，双击分组查看全部成员。文件操作只作用于明确选中的文件行。\n7. 重要修改可以创建本地 Shelf。创建只备份，不清空修改。恢复前请备份现有工作。\n8. “工作副本文件”页右键普通已版本化文件，可移动 / 重命名、保留历史复制或删除。移动 / 复制限一个文件；删除要求内容和属性均干净。全部需预检和明确确认。\n9. “仓库锁”先只读查询服务器，核对所有者后明确选择加锁 / 解锁。只释放本工作副本持有的锁，不抢锁或破锁。\n10. 冲突文件可使用“检查冲突”：当前只支持人工处理后的纯内容冲突 working，保留当前文件，移除冲突记录与辅助文件；不自动合并，也不证明内容正确。属性、混合、树冲突请用可信 SVN 工具处理。\n11. 一个父目录含多个副本时，可在文件菜单扫描并逐个验证登记。每次仍只对当前独立副本操作，不跨仓库提交。\n12. 选中一个已版本化文件后，可用“文件历史”按路径分页；历史页也能明确查询目录范围。双击修订打开当前路径的前后版本比较。“比较版本”明确选择 BASE / HEAD / 数字，右侧可选 WORKING，并标出预览截断。\n13. “分支与合并”菜单仅支持整个干净工作副本的固定修订切换或明确向前范围合并，需完整预检和二次确认。切换没有 SVN dry-run；合并预演不保证最终无冲突，不会自动提交。分支 / 标签只能生成只读计划，不能创建。\n\nSVN 与 P4V 的差别\n• SVN 变更列表仅在本机工作副本保存；不是服务器上的编号提交单。\n• 列表仅支持文件，每个文件只能归属一个列表；目录无法归组。\n• SVN 不保存空列表，移走最后一个文件后列表自动消失。\n• 提交成功后，已提交文件的标签默认移除。干净的已归组文件仍可显示，但不计入待提交修改数。\n• 分组不保存文件内容，也不锁定文件；Shelf 才是本地内容备份。\n• 新增目录等依赖无法只通过文件分组隔离；SVN 拒绝时不会自动扩大提交范围。\n\n快捷键：Ctrl+O 打开工作副本 · F5 刷新 · Ctrl+D 查看选中差异\n\n安全提示\n• 还原会丢弃未提交更改，删除 Shelf 会永久删除备份。\n• 本地 Shelf 不是服务器备份；不会同步到其他电脑。\n• SVN 身份验证由安装的 SVN 客户端处理，本程序不保存密码。\n• 本界面没有通用 SVN 命令输入框。未覆盖的命令请使用外部 SVN 客户端。")
 
     def _load_demo(self):
+        self._workspace_state_unknown = False
         from types import SimpleNamespace
         self.root_path = Path("D:/Projects/OrionGame")
         self.path_var.set(str(self.root_path))
@@ -2048,6 +2180,10 @@ class SvnDesk(tk.Tk):
         self.shelves = [{"id": "demo-shelf-01", "name": "控制器手感调整 · 实验 A", "created_at": "2026-11-03T08:32:00Z", "entry_count": 2,
                          "paths": ["src/player/controller.py", "tests/test_controller.py"]}]
         self._render_all()
+        self._history_path = "."
+        self._history_loaded = True
+        self._history_auto_pending = False
+        self.history_note_var.set("演示历史：示例数据，不连接仓库。新比较操作在演示模式禁用。")
         self._render_history()
         self._reset_workspace_tree()
         self.changes.selection_set(next(iid for iid, entry in self._change_lookup.items() if entry.path == "src/player/controller.py"))

@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-11-03T10:04:10.380293+00:00",
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41"
+  },
+  "source_sha256": {
+    "svn_client/backend.py": "9c00352ec453744df82b4997480b96f08375d368e7086553999973b12bb65ea2",
+    "svn_client/status_stream.py": "b8c5f3ecb2628966d90cb362660b5fd3c5569e00c03edeee7eb370b099378521",
+    "benchmarks/benchmark_status_stream.py": "d3c8c9672a956ca18fb83003af1dc6e82cfb32c1f6f6e7a5b5aae8d9e1abba6d",
+    "benchmarks/benchmark_client.py": "b5043f0d3d9360e8727904e9b6876d63a9048287d33ed454d3697edc077c0031"
+  },
+  "parameters": {
+    "sizes": [
+      1000,
+      10000,
+      100000
+    ],
+    "repeats": 3
+  },
+  "transport_bounds": {
+    "stdout_chunk_bytes": 65536,
+    "stdout_queue_chunks": 4,
+    "stderr_retained_bytes": 65536
+  },
+  "exclusions": [
+    "Synthetic XML, no real SVN or subprocess timings, no network or GUI.",
+    "Input XML prepared before measurements; both retain the complete result list.",
+    "Current parser is actual status() using the compatible injected command transport.",
+    "Prior parser is the frozen preceding full-tree algorithm included in this script.",
+    "Python tracemalloc only; no total RSS, native allocation, OS pipes, or child memory.",
+    "Warmup once, independent untraced timings, then one separately traced execution.",
+    "Queue/diagnostic bounds are implementation limits, not measurements of this in-process run."
+  ],
+  "status": [
+    {
+      "entries": 1000,
+      "xml_utf8_bytes": 181931,
+      "all_entries_and_order_equal": true,
+      "status_counts": {
+        "normal": 800,
+        "modified": 120,
+        "added": 30,
+        "deleted": 20,
+        "missing": 10,
+        "conflicted": 10,
+        "unversioned": 10
+      },
+      "previous_full_tree": {
+        "samples_ms": [
+          9.856,
+          9.752,
+          9.797
+        ],
+        "median_ms": 9.797,
+        "min_ms": 9.752,
+        "max_ms": 9.856,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.678,
+        "retained_traced_mib": 0.472
+      },
+      "incremental_status": {
+        "samples_ms": [
+          12.113,
+          11.986,
+          12.833
+        ],
+        "median_ms": 12.113,
+        "min_ms": 11.986,
+        "max_ms": 12.833,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.273,
+        "retained_traced_mib": 0.58
+      },
+      "peak_allocation_reduction_percent": 24.14,
+      "median_time_change_percent": 23.64
+    },
+    {
+      "entries": 10000,
+      "xml_utf8_bytes": 1816943,
+      "all_entries_and_order_equal": true,
+      "status_counts": {
+        "normal": 8000,
+        "modified": 1200,
+        "added": 300,
+        "deleted": 200,
+        "missing": 100,
+        "conflicted": 100,
+        "unversioned": 100
+      },
+      "previous_full_tree": {
+        "samples_ms": [
+          115.509,
+          114.0,
+          123.807
+        ],
+        "median_ms": 115.509,
+        "min_ms": 114.0,
+        "max_ms": 123.807,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 17.623,
+        "retained_traced_mib": 5.5
+      },
+      "incremental_status": {
+        "samples_ms": [
+          130.767,
+          131.657,
+          130.358
+        ],
+        "median_ms": 130.767,
+        "min_ms": 130.358,
+        "max_ms": 131.657,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 6.38,
+        "retained_traced_mib": 5.608
+      },
+      "peak_allocation_reduction_percent": 63.8,
+      "median_time_change_percent": 13.21
+    },
+    {
+      "entries": 100000,
+      "xml_utf8_bytes": 18167071,
+      "all_entries_and_order_equal": true,
+      "status_counts": {
+        "normal": 80000,
+        "modified": 12000,
+        "added": 3000,
+        "deleted": 2000,
+        "missing": 1000,
+        "conflicted": 1000,
+        "unversioned": 1000
+      },
+      "previous_full_tree": {
+        "samples_ms": [
+          1426.538,
+          1427.321,
+          1467.731
+        ],
+        "median_ms": 1427.321,
+        "min_ms": 1426.538,
+        "max_ms": 1467.731,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 167.666,
+        "retained_traced_mib": 46.56
+      },
+      "incremental_status": {
+        "samples_ms": [
+          1319.127,
+          1286.857,
+          1318.171
+        ],
+        "median_ms": 1318.171,
+        "min_ms": 1286.857,
+        "max_ms": 1319.127,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 47.59,
+        "retained_traced_mib": 46.667
+      },
+      "peak_allocation_reduction_percent": 71.62,
+      "median_time_change_percent": -7.65
+    }
+  ],
+  "source_changed_during_run": false,
+  "finished_utc": "2026-11-03T10:04:42.873634+00:00"
+}

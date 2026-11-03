@@ -56,7 +56,7 @@ class BackendUnitTests(unittest.TestCase):
         self.assertEqual(kwargs["cwd"], Path(self.directory.name))
 
     def test_status_xml_metadata(self):
-        with patch("svn_client.backend.subprocess.run", return_value=self.result(STATUS_XML)):
+        with patch.object(self.client, "command", return_value=CommandResult((), 0, STATUS_XML, "")):
             entries = self.client.status()
         self.assertEqual(entries[0].path, "中文 @ file.txt")
         self.assertEqual(entries[0].revision, 5)
@@ -179,7 +179,7 @@ class BackendUnitTests(unittest.TestCase):
                 self.client.command(["status"])
 
     def test_invalid_xml_reported(self):
-        with patch("svn_client.backend.subprocess.run", return_value=self.result("not XML")):
+        with patch.object(self.client, "command", return_value=CommandResult((), 0, "not XML", "")):
             with self.assertRaisesRegex(SvnError, "invalid XML"):
                 self.client.status()
 

@@ -1,0 +1,604 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-11-03T09:31:56.474577+00:00",
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "cpu_count": 9,
+    "processor": ""
+  },
+  "parameters": {
+    "status_sizes": [
+      1000,
+      10000,
+      100000
+    ],
+    "scan_files": 10000,
+    "small_files": 100,
+    "large_mib": 16,
+    "repeats": 3
+  },
+  "source_sha256": {
+    "svn_client/backend.py": "8bfe5950fd09724a5ae4d9fb34135bfc977d31e4ee9724ac3c37b499b5c9826b",
+    "svn_client/cli.py": "2303ffcff3945057181a90e71643419e77a8b3218695da6df8f3292dfb70b707",
+    "svn_client/conflict_dialogs.py": "7e379cc5b2ab5ee4d9b3e65db05ecf47b0092d145d9231e8268631a5da805e5f",
+    "svn_client/conflicts.py": "40beb09d72ebcdbd748e06554859ecc8607c86d08ef7b38e30cda7e1e05dbac0",
+    "svn_client/discovery.py": "fbb2b0867a0370e29426c3f158592628e0e9bb540a2000719bd902d1cd09fb0c",
+    "svn_client/display.py": "fe32d2997364a6880de46b4fd035b5a2553592677994e7219e5f973ebe308910",
+    "svn_client/fileops.py": "baf53906d2369d246f08c3a13fb7947a8c095f3b8a2a968ef394e227d5723be1",
+    "svn_client/fileops_dialogs.py": "972874312d8590555a660ffd708ddf9da300bb0201bbe5ae45dde9e320b5d943",
+    "svn_client/locks.py": "e8aad64c83fe250dbf4dafe0d9aefa113355fc3c17f3ead573d1095ccdb5931c",
+    "svn_client/locks_dialogs.py": "117dc6480daf97f004c6c29881d0db04ec42b10bc352f8f51e7621a4adb41cea",
+    "svn_client/operation_ui.py": "1e2750880e1fa92b67c2b644f85301b8b479296342c44b40568a03d7041089a4",
+    "svn_client/shelves.py": "19fce1353b0d1a96fd0c3fcba6711bbee3d92abb7f6253b1e135b84518826fc2",
+    "svn_client/theme.py": "7d759a270d2349ec662bcd4aa121f67e4759200240ae6bc1753b333f1ec9c938",
+    "svn_client/ui.py": "a6ff34e9f188d010c5579acdb59f7944b597634a8629dbd029adb37832657395",
+    "svn_client/workspaces.py": "d6523ab8759194184d719aa6cf15e3c9e90357dfbeebe37bbec5136afe2efad7"
+  },
+  "exclusions": [
+    "No real SVN executable, subprocess launch, repository, authentication or network operation.",
+    "No GUI rendering, Windows-native behavior, installer, shell integration or frame timing.",
+    "Memory is separate-run Python tracemalloc, not total RSS/working set or child-process memory.",
+    "Fixtures, XML and existing record inputs are prepared outside measured memory/time windows.",
+    "Warmups and repeated runs warm filesystem caches; these are not cold-disk throughput tests.",
+    "Shelf SVN metadata is simulated; BASE is literal fixture content without EOL/keyword translation.",
+    "Shelf data I/O, compression, hashing, manifests, preflight and restore are production code.",
+    "Large shelf cases are unversioned. They do not measure whole-file svn cat BASE buffering.",
+    "A shelf list measurement contains one shelf, not an accumulated large shelf collection.",
+    "local_files is a retained helper/comparison; current UI uses lazy directory_entries, not this full recursive scan.",
+    "Refresh candidate scan uses 80% clean/20% modified existing files; its SVN response is simulated."
+  ],
+  "status": [
+    {
+      "entries": 1000,
+      "xml_utf8_bytes": 181931,
+      "status_counts": {
+        "normal": 800,
+        "modified": 120,
+        "added": 30,
+        "deleted": 20,
+        "missing": 10,
+        "conflicted": 10,
+        "unversioned": 10
+      },
+      "parse": {
+        "samples_ms": [
+          11.289,
+          11.639,
+          11.8
+        ],
+        "median_ms": 11.639,
+        "min_ms": 11.289,
+        "max_ms": 11.8,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.679,
+        "retained_traced_mib": 0.474
+      },
+      "group_unfiltered": {
+        "samples_ms": [
+          0.211,
+          0.238,
+          0.226
+        ],
+        "median_ms": 0.226,
+        "min_ms": 0.211,
+        "max_ms": 0.238,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.028,
+        "retained_traced_mib": 0.007
+      },
+      "group_filtered": {
+        "samples_ms": [
+          0.318,
+          0.356,
+          0.319
+        ],
+        "median_ms": 0.319,
+        "min_ms": 0.318,
+        "max_ms": 0.356,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.028,
+        "retained_traced_mib": 0.005
+      }
+    },
+    {
+      "entries": 10000,
+      "xml_utf8_bytes": 1816943,
+      "status_counts": {
+        "normal": 8000,
+        "modified": 1200,
+        "added": 300,
+        "deleted": 200,
+        "missing": 100,
+        "conflicted": 100,
+        "unversioned": 100
+      },
+      "parse": {
+        "samples_ms": [
+          114.395,
+          115.213,
+          116.461
+        ],
+        "median_ms": 115.213,
+        "min_ms": 114.395,
+        "max_ms": 116.461,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 17.624,
+        "retained_traced_mib": 5.501
+      },
+      "group_unfiltered": {
+        "samples_ms": [
+          2.03,
+          2.357,
+          2.301
+        ],
+        "median_ms": 2.301,
+        "min_ms": 2.03,
+        "max_ms": 2.357,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.264,
+        "retained_traced_mib": 0.06
+      },
+      "group_filtered": {
+        "samples_ms": [
+          3.55,
+          3.397,
+          3.329
+        ],
+        "median_ms": 3.397,
+        "min_ms": 3.329,
+        "max_ms": 3.55,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.264,
+        "retained_traced_mib": 0.031
+      }
+    },
+    {
+      "entries": 100000,
+      "xml_utf8_bytes": 18167071,
+      "status_counts": {
+        "normal": 80000,
+        "modified": 12000,
+        "added": 3000,
+        "deleted": 2000,
+        "missing": 1000,
+        "conflicted": 1000,
+        "unversioned": 1000
+      },
+      "parse": {
+        "samples_ms": [
+          1533.385,
+          1534.431,
+          1616.834
+        ],
+        "median_ms": 1534.431,
+        "min_ms": 1533.385,
+        "max_ms": 1616.834,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 167.666,
+        "retained_traced_mib": 46.56
+      },
+      "group_unfiltered": {
+        "samples_ms": [
+          24.848,
+          23.799,
+          23.826
+        ],
+        "median_ms": 23.826,
+        "min_ms": 23.799,
+        "max_ms": 24.848,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.641,
+        "retained_traced_mib": 0.595
+      },
+      "group_filtered": {
+        "samples_ms": [
+          40.574,
+          40.04,
+          40.195
+        ],
+        "median_ms": 40.195,
+        "min_ms": 40.04,
+        "max_ms": 40.574,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.641,
+        "retained_traced_mib": 0.29
+      }
+    }
+  ],
+  "scan": {
+    "files": 10000,
+    "file_bytes": 24,
+    "files_per_directory": 1000,
+    "excluded_sentinels_verified": true,
+    "full_local_files": {
+      "samples_ms": [
+        364.469,
+        331.324,
+        335.3
+      ],
+      "median_ms": 335.3,
+      "min_ms": 331.324,
+      "max_ms": 364.469,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 2.645,
+      "retained_traced_mib": 2.567
+    },
+    "capped_local_files": {
+      "samples_ms": [
+        101.242,
+        99.258,
+        102.479
+      ],
+      "median_ms": 101.242,
+      "min_ms": 99.258,
+      "max_ms": 102.479,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 1.495,
+      "retained_traced_mib": 1.416
+    },
+    "one_directory": {
+      "samples_ms": [
+        31.579,
+        25.672,
+        26.428
+      ],
+      "median_ms": 26.428,
+      "min_ms": 25.672,
+      "max_ms": 31.579,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 0.307,
+      "retained_traced_mib": 0.23
+    },
+    "capped_returned": 3000,
+    "capped_truncated": true,
+    "refresh_status_and_candidates": {
+      "samples_ms": [
+        187.697,
+        215.287,
+        182.166
+      ],
+      "median_ms": 187.697,
+      "min_ms": 182.166,
+      "max_ms": 215.287,
+      "warmup_runs": 1,
+      "timed_runs": 3,
+      "peak_traced_mib": 11.546,
+      "retained_traced_mib": 4.772
+    },
+    "refresh_pending": 2000,
+    "refresh_candidates": 10000
+  },
+  "shelves": [
+    {
+      "name": "small-modified",
+      "files": 100,
+      "bytes_per_file": 4096,
+      "input_bytes": 409600,
+      "stored_blob_bytes": 6040,
+      "blob_encodings": {
+        "zlib": 100
+      },
+      "versioned": true,
+      "compressible": true,
+      "restore_hashes_verified": true,
+      "create_preflight": {
+        "samples_ms": [
+          62.138,
+          53.175,
+          61.507
+        ],
+        "median_ms": 61.507,
+        "min_ms": 53.175,
+        "max_ms": 62.138,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.244,
+        "retained_traced_mib": 0.181
+      },
+      "create": {
+        "samples_ms": [
+          85.841,
+          78.914,
+          71.921
+        ],
+        "median_ms": 78.914,
+        "min_ms": 71.921,
+        "max_ms": 85.841,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.509,
+        "retained_traced_mib": 0.06
+      },
+      "list_one_shelf": {
+        "samples_ms": [
+          1.262,
+          0.92,
+          1.012
+        ],
+        "median_ms": 1.012,
+        "min_ms": 0.92,
+        "max_ms": 1.262,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.216,
+        "retained_traced_mib": 0.014
+      },
+      "restore_preflight": {
+        "samples_ms": [
+          59.532,
+          64.463,
+          66.524
+        ],
+        "median_ms": 64.463,
+        "min_ms": 59.532,
+        "max_ms": 66.524,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.287,
+        "retained_traced_mib": 0.179
+      },
+      "restore": {
+        "samples_ms": [
+          92.427,
+          99.567,
+          87.248
+        ],
+        "median_ms": 92.427,
+        "min_ms": 87.248,
+        "max_ms": 99.567,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 1.29,
+        "retained_traced_mib": 0.047
+      },
+      "simulated_svn_calls": {
+        "create_preflight": {
+          "info": 101,
+          "status": 2,
+          "proplist": 300,
+          "cat": 100,
+          "export": 100
+        },
+        "create": {
+          "info": 101,
+          "status": 2,
+          "proplist": 300,
+          "cat": 100,
+          "export": 100
+        },
+        "restore_preflight": {
+          "info": 101,
+          "status": 1,
+          "proplist": 200,
+          "cat": 100,
+          "export": 100
+        },
+        "restore": {
+          "info": 101,
+          "status": 1,
+          "proplist": 300,
+          "cat": 100,
+          "export": 100
+        }
+      }
+    },
+    {
+      "name": "large-compressible",
+      "files": 1,
+      "bytes_per_file": 16777216,
+      "input_bytes": 16777216,
+      "stored_blob_bytes": 40786,
+      "blob_encodings": {
+        "zlib": 1
+      },
+      "versioned": false,
+      "compressible": true,
+      "restore_hashes_verified": true,
+      "create_preflight": {
+        "samples_ms": [
+          27.038,
+          27.777,
+          26.891
+        ],
+        "median_ms": 27.038,
+        "min_ms": 26.891,
+        "max_ms": 27.777,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.017,
+        "retained_traced_mib": 0.009
+      },
+      "create": {
+        "samples_ms": [
+          96.883,
+          95.63,
+          108.733
+        ],
+        "median_ms": 96.883,
+        "min_ms": 95.63,
+        "max_ms": 108.733,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.174,
+        "retained_traced_mib": 0.013
+      },
+      "list_one_shelf": {
+        "samples_ms": [
+          0.185,
+          0.215,
+          0.239
+        ],
+        "median_ms": 0.215,
+        "min_ms": 0.185,
+        "max_ms": 0.239,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.012,
+        "retained_traced_mib": 0.003
+      },
+      "restore_preflight": {
+        "samples_ms": [
+          22.571,
+          22.351,
+          22.671
+        ],
+        "median_ms": 22.571,
+        "min_ms": 22.351,
+        "max_ms": 22.671,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.162,
+        "retained_traced_mib": 0.008
+      },
+      "restore": {
+        "samples_ms": [
+          52.458,
+          51.444,
+          48.442
+        ],
+        "median_ms": 51.444,
+        "min_ms": 48.442,
+        "max_ms": 52.458,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.17,
+        "retained_traced_mib": 0.007
+      },
+      "simulated_svn_calls": {
+        "create_preflight": {
+          "info": 1,
+          "status": 2
+        },
+        "create": {
+          "info": 1,
+          "status": 2
+        },
+        "restore_preflight": {
+          "info": 1,
+          "status": 1
+        },
+        "restore": {
+          "info": 1,
+          "status": 1
+        }
+      }
+    },
+    {
+      "name": "large-high-entropy",
+      "files": 1,
+      "bytes_per_file": 16777216,
+      "input_bytes": 16777216,
+      "stored_blob_bytes": 16777216,
+      "blob_encodings": {
+        "raw": 1
+      },
+      "versioned": false,
+      "compressible": false,
+      "restore_hashes_verified": true,
+      "create_preflight": {
+        "samples_ms": [
+          27.039,
+          29.391,
+          27.717
+        ],
+        "median_ms": 27.717,
+        "min_ms": 27.039,
+        "max_ms": 29.391,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.016,
+        "retained_traced_mib": 0.009
+      },
+      "create": {
+        "samples_ms": [
+          440.301,
+          434.99,
+          451.278
+        ],
+        "median_ms": 440.301,
+        "min_ms": 434.99,
+        "max_ms": 451.278,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 3.629,
+        "retained_traced_mib": 0.012
+      },
+      "list_one_shelf": {
+        "samples_ms": [
+          0.157,
+          0.132,
+          0.199
+        ],
+        "median_ms": 0.157,
+        "min_ms": 0.132,
+        "max_ms": 0.199,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 0.012,
+        "retained_traced_mib": 0.003
+      },
+      "restore_preflight": {
+        "samples_ms": [
+          15.165,
+          15.915,
+          16.31
+        ],
+        "median_ms": 15.915,
+        "min_ms": 15.165,
+        "max_ms": 16.31,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.015,
+        "retained_traced_mib": 0.008
+      },
+      "restore": {
+        "samples_ms": [
+          32.123,
+          31.661,
+          32.729
+        ],
+        "median_ms": 32.123,
+        "min_ms": 31.661,
+        "max_ms": 32.729,
+        "warmup_runs": 1,
+        "timed_runs": 3,
+        "peak_traced_mib": 2.023,
+        "retained_traced_mib": 0.007
+      },
+      "simulated_svn_calls": {
+        "create_preflight": {
+          "info": 1,
+          "status": 2
+        },
+        "create": {
+          "info": 1,
+          "status": 2
+        },
+        "restore_preflight": {
+          "info": 1,
+          "status": 1
+        },
+        "restore": {
+          "info": 1,
+          "status": 1
+        }
+      }
+    }
+  ],
+  "source_changed_during_run": false,
+  "finished_utc": "2026-11-03T09:32:28.458645+00:00"
+}

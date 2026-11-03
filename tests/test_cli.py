@@ -1,6 +1,7 @@
 """JSON protocol/safety tests; fake backends never touch a user repository."""
 from __future__ import annotations
 
+from dataclasses import replace
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from svn_client.backend import CommandResult, LogEntry, StatusEntry, SvnError
+from svn_client.branches import BranchError, BranchOperationError, BranchPlan, BranchResult, CopyPlan
 from svn_client.cli import DEFAULT_TEXT_BYTES, EXIT_CODES, MAX_INPUT_BYTES, main
 from svn_client.shelves import ShelfConflict, ShelfError
 
@@ -477,6 +479,259 @@ class CliTests(unittest.TestCase):
         code = main(["--workspace", str(self.workspace), "status"], stdout=output, stdin=NoRead())
         self.assertEqual(code, EXIT_CODES["io_error"])
         self.client.status.assert_called_once()
+
+
+class CliBranchTests(unittest.TestCase):
+    """CLI safety contract; branch transport tests live in test_branches.py."""
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.workspace = Path(self.directory.name)
+        self.source = "https://svn.example.test/repo/branches/feature"
+        self.destination = "https://svn.example.test/repo/tags/v1"
+        self.digest = "a" * 64
+        self.client = Mock()
+        self.branches = Mock()
+        self.switch_plan = BranchPlan("switch", str(self.workspace), self.source, 12,
+                                      "https://svn.example.test/repo/trunk", 10,
+                                      "uuid", "https://svn.example.test/repo", None,
+                                      self.digest, "", False, False, ("Whole workspace only",))
+        self.merge_plan = replace(self.switch_plan, operation="merge", start_revision=10,
+                                  preview_text="U    src/a.txt\n", svn_dry_run=True)
+        self.switch_result = BranchResult("switch", "switched", str(self.workspace),
+                                          self.source, 12, "Switched to revision 12.\n", (), ())
+        self.merge_result = BranchResult("merge", "needs_review", str(self.workspace),
+                                         "https://svn.example.test/repo/trunk", 10,
+                                         "U    src/a.txt\n", (StatusEntry("src/a.txt", "modified"),), ())
+        self.copy_plan = CopyPlan("tag", self.source, 12, self.destination, "uuid", 14,
+                                  "private planned message", self.digest, ("Plan only",))
+        self.branches.preflight_switch.return_value = self.switch_plan
+        self.branches.preflight_merge.return_value = self.merge_plan
+        self.branches.preflight_copy.return_value = self.copy_plan
+        self.branches.switch.return_value = self.switch_result
+        self.branches.merge.return_value = self.merge_result
+        client_patch = patch("svn_client.cli.SvnClient", return_value=self.client)
+        branch_patch = patch("svn_client.cli.BranchManager", return_value=self.branches)
+        self.client_factory = client_patch.start()
+        self.branch_factory = branch_patch.start()
+        self.addCleanup(client_patch.stop)
+        self.addCleanup(branch_patch.stop)
+
+    def invoke(self, arguments, *, stdin=None, globals_=()):
+        output = io.StringIO()
+        code = main(["--workspace", str(self.workspace), *globals_, "branch", *arguments],
+                    stdout=output, stdin=NoRead() if stdin is None else stdin)
+        raw = output.getvalue()
+        self.assertEqual(raw.count("\n"), 1)
+        self.assertTrue(raw.isascii())
+        return code, json.loads(raw)
+
+    def switch(self, *extra):
+        return ["switch", "--url", self.source, "--revision", "12", *extra]
+
+    def merge(self, *extra):
+        return ["merge", "--source-url", self.source, "--start-revision", "10",
+                "--end-revision", "12", *extra]
+
+    def copy(self, *extra):
+        return ["plan-copy", "--kind", "tag", "--source-url", self.source,
+                "--destination-url", self.destination, "--revision", "12",
+                "--message", "private planned message", *extra]
+
+    def test_switch_and_merge_require_explicit_confirmation(self):
+        for arguments in (self.switch(), self.merge()):
+            with self.subTest(arguments=arguments):
+                code, payload = self.invoke(arguments)
+                self.assertEqual(code, 3)
+                self.assertEqual(payload["error"]["code"], "confirmation_required")
+        self.client_factory.assert_not_called()
+        self.branch_factory.assert_not_called()
+
+    def test_yes_without_reviewed_hash_refused_before_client(self):
+        for arguments in (self.switch("--yes"), self.merge("--yes")):
+            with self.subTest(arguments=arguments):
+                code, payload = self.invoke(arguments)
+                self.assertEqual(code, 3)
+                self.assertIn("--expect-state-sha256", payload["error"]["message"])
+        self.client_factory.assert_not_called()
+
+    def test_hash_without_yes_is_not_permission(self):
+        code, _ = self.invoke(self.switch("--expect-state-sha256", self.digest))
+        self.assertEqual(code, 3)
+        self.client_factory.assert_not_called()
+
+    def test_malformed_hash_refused_before_client(self):
+        for value in ("bad", "A" * 64, "a" * 63):
+            with self.subTest(value=value):
+                code, payload = self.invoke(self.switch("--yes", "--expect-state-sha256", value))
+                self.assertEqual(code, 4)
+                self.assertEqual(payload["outcome"], "refused")
+        self.client_factory.assert_not_called()
+
+    def test_numeric_revision_only_including_zero(self):
+        for value in ("HEAD", "BASE", "1:3", "-1", str(2**63)):
+            with self.subTest(value=value):
+                arguments = ["switch", "--url", self.source, "--revision", value, "--dry-run"]
+                code, _ = self.invoke(arguments)
+                self.assertEqual(code, 2)
+        code, _ = self.invoke(["switch", "--url", self.source, "--revision", "0", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.branches.preflight_switch.assert_called_once_with(self.source, revision=0)
+
+    def test_credential_or_unsupported_url_rejected_before_client(self):
+        for value in ("https://user:secret@host/repo", "svn+ssh://host/repo", "../branch", "https://host/repo?a=b"):
+            with self.subTest(value=value):
+                code, payload = self.invoke(["switch", "--url", value, "--revision", "12", "--dry-run"])
+                self.assertEqual(code, 4)
+                self.assertNotIn("secret", json.dumps(payload))
+        self.client_factory.assert_not_called()
+
+    def test_switch_preview_labels_no_svn_dry_run(self):
+        code, payload = self.invoke(self.switch("--dry-run"))
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["outcome"], "planned")
+        plan = payload["data"]["preflight"]
+        self.assertEqual(plan["state_sha256"], self.digest)
+        self.assertEqual(plan["scope"], "whole_working_copy_root")
+        self.assertFalse(plan["svn_dry_run"])
+        self.assertEqual(plan["preview"]["text"], "")
+        self.assertFalse(payload["data"]["commit_performed"])
+        self.branches.switch.assert_not_called()
+
+    def test_merge_preview_is_actual_svn_dry_run_and_bounded(self):
+        self.branches.preflight_merge.return_value = replace(self.merge_plan, preview_text="中文" * 100)
+        code, payload = self.invoke(self.merge("--dry-run"), globals_=["--max-text-bytes", "4"])
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["data"]["preflight"]["svn_dry_run"])
+        self.assertTrue(payload["data"]["preflight"]["preview"]["truncated"])
+        self.assertEqual(payload["data"]["preflight"]["preview"]["text"], "中")
+        self.branches.preflight_merge.assert_called_once_with(self.source, start_revision=10, end_revision=12)
+        self.branches.merge.assert_not_called()
+
+    def test_review_hash_on_dry_run_rejects_mismatch(self):
+        code, payload = self.invoke(self.merge("--dry-run", "--expect-state-sha256", "b" * 64))
+        self.assertEqual(code, 4)
+        self.assertEqual(payload["error"]["details"]["current_state_sha256"], self.digest)
+        self.branches.merge.assert_not_called()
+
+    def test_switch_executes_only_callers_reviewed_hash(self):
+        code, payload = self.invoke(self.switch("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["outcome"], "completed")
+        self.assertEqual(payload["data"]["result"]["outcome"], "switched")
+        self.assertFalse(payload["data"]["commit_performed"])
+        self.branches.switch.assert_called_once_with(self.source, revision=12, confirmed=True,
+                                                     expected_state_sha256=self.digest)
+        self.branches.preflight_switch.assert_not_called()
+
+    def test_merge_needs_review_is_not_completed_or_committed(self):
+        code, payload = self.invoke(self.merge("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["outcome"], "needs_review")
+        self.assertTrue(payload["data"]["requires_review"])
+        self.assertFalse(payload["data"]["commit_performed"])
+        self.assertFalse(payload["data"]["automatic_retry_safe"])
+        self.assertEqual(payload["data"]["result"]["changes"][0]["path"], "src/a.txt")
+        self.branches.merge.assert_called_once_with(self.source, start_revision=10, end_revision=12,
+                                                    confirmed=True, expected_state_sha256=self.digest)
+        self.branches.preflight_merge.assert_not_called()
+
+    def test_merge_conflicts_are_explicit_in_top_outcome(self):
+        self.branches.merge.return_value = replace(self.merge_result, outcome="conflicted",
+                                                   conflicts=("src/a.txt",))
+        code, payload = self.invoke(self.merge("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["outcome"], "conflicted")
+        self.assertEqual(payload["data"]["result"]["conflicts"], ["src/a.txt"])
+        self.assertTrue(payload["data"]["requires_review"])
+
+    def test_preflight_error_is_known_refusal(self):
+        self.branches.preflight_switch.side_effect = BranchError("Dirty working copy")
+        code, payload = self.invoke(self.switch("--dry-run"))
+        self.assertEqual(code, 4)
+        self.assertEqual(payload["outcome"], "refused")
+        self.branches.switch.assert_not_called()
+
+    def test_stale_guard_inside_mutator_is_known_prewritten_refusal(self):
+        self.branches.switch.side_effect = BranchError("Reviewed state changed before apply")
+        code, payload = self.invoke(self.switch("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 4)
+        self.assertEqual(payload["outcome"], "refused")
+        self.branches.switch.assert_called_once()
+
+    def test_branch_operation_error_is_uncertain_never_retried(self):
+        self.branches.merge.side_effect = BranchOperationError("Attempted but verification failed")
+        code, payload = self.invoke(self.merge("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 8)
+        self.assertEqual(payload["outcome"], "uncertain")
+        self.assertFalse(payload["error"]["details"]["automatic_retry_safe"])
+        self.branches.merge.assert_called_once()
+
+    def test_interrupted_mutation_is_uncertain(self):
+        self.branches.switch.side_effect = KeyboardInterrupt()
+        code, payload = self.invoke(self.switch("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 8)
+        self.assertEqual(payload["outcome"], "uncertain")
+        self.branches.switch.assert_called_once()
+
+    def test_unexpected_branch_result_is_uncertain(self):
+        self.branches.merge.return_value = replace(self.merge_result, outcome="completed")
+        code, payload = self.invoke(self.merge("--yes", "--expect-state-sha256", self.digest))
+        self.assertEqual(code, 8)
+        self.assertEqual(payload["outcome"], "uncertain")
+
+    def test_copy_plan_cannot_execute_or_echo_message(self):
+        code, payload = self.invoke(self.copy())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["outcome"], "planned")
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(payload["data"]["execution_supported"])
+        self.assertTrue(payload["data"]["repository_unchanged"])
+        self.assertFalse(payload["data"]["commit_performed"])
+        self.assertTrue(payload["data"]["preflight"]["would_commit_immediately"])
+        self.assertNotIn("private planned message", json.dumps(payload))
+        self.branches.preflight_copy.assert_called_once_with(self.source, self.destination,
+                                                             revision=12, kind="tag", message="private planned message")
+        self.branches.switch.assert_not_called()
+        self.branches.merge.assert_not_called()
+
+    def test_copy_plan_rejects_yes_and_invented_execute_modes(self):
+        for extra in ("--yes", "--force", "--execute"):
+            with self.subTest(extra=extra):
+                code, _ = self.invoke(self.copy(extra))
+                self.assertEqual(code, 2)
+        code, _ = self.invoke(["create", "--yes"])
+        self.assertEqual(code, 2)
+        self.client_factory.assert_not_called()
+        self.branch_factory.assert_not_called()
+
+    def test_copy_plan_stdin_message_explicit_and_bounded(self):
+        arguments = self.copy()[:-2] + ["--message-file", "-"]
+        code, _ = self.invoke(arguments, stdin=io.StringIO("中文 planned message"))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.branches.preflight_copy.call_args.kwargs["message"], "中文 planned message")
+        self.branches.preflight_copy.reset_mock()
+        code, payload = self.invoke(arguments, stdin=io.StringIO("x" * 8193))
+        self.assertEqual(code, 4)
+        self.assertEqual(payload["outcome"], "refused")
+        self.branches.preflight_copy.assert_not_called()
+
+    def test_output_limit_preserves_merge_review_state_and_no_retry(self):
+        self.branches.merge.return_value = replace(self.merge_result,
+                                                   changes=tuple(StatusEntry(str(i) + "x" * 100, "modified") for i in range(100)))
+        code, payload = self.invoke(self.merge("--yes", "--expect-state-sha256", self.digest),
+                                    globals_=["--max-output-bytes", "2048"])
+        self.assertEqual(code, 9)
+        self.assertEqual(payload["outcome"], "needs_review")
+        self.assertTrue(payload["error"]["details"]["mutation_attempted"])
+        self.branches.merge.assert_called_once()
+
+    def test_branch_help_remains_json(self):
+        code, payload = self.invoke(["switch", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--expect-state-sha256", payload["data"]["help"])
+        self.client_factory.assert_not_called()
 
 
 class CliProcessTests(unittest.TestCase):

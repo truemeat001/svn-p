@@ -357,33 +357,36 @@ class SvnClient:
         }
 
     def status(self, paths: Sequence[str | os.PathLike[str]] | None = None,
-               *, include_ignored: bool = False, verbose: bool = False) -> list[StatusEntry]:
+               *, include_ignored: bool = False, verbose: bool = False,
+               cancel_event: threading.Event | None = None) -> list[StatusEntry]:
+        """Read a complete status snapshot with bounded XML/pipe buffering.
+
+        The returned list still grows with the number of entries. Custom
+        ``command`` transports remain supported; their own output capture is
+        outside this method's memory guarantees. No partial list is returned
+        on cancellation, timeout, malformed XML, or the explicit output limit.
+        """
+        from .status_stream import parse_status_chunks, run_status, status_lock, text_chunks
+
+        if cancel_event is not None and cancel_event.is_set():
+            raise SvnError("SVN status was cancelled; no partial status was returned.")
         args = ["status", "--xml", "--ignore-externals"]
         if include_ignored:
             args.append("--no-ignore")
         if verbose:
             args.append("--verbose")
-        root = self._xml([*args, "--", *self._local_targets(paths)])
-        changelists = {id(entry): group.get("name") for group in root.findall(".//changelist")
-                      for entry in group.findall("entry")}
-        results = []
-        for entry in root.findall(".//entry"):
-            status = entry.find("wc-status")
-            if status is None:
-                continue
-            commit = status.find("commit")
-            results.append(StatusEntry(
-                path=self._relative(entry.get("path", "")), item=status.get("item", "none"),
-                props=status.get("props", "none"), revision=_int(status.get("revision")),
-                tree_conflicted=status.get("tree-conflicted") == "true",
-                copied=status.get("copied") == "true", switched=status.get("switched") == "true",
-                wc_locked=status.get("wc-locked") == "true", moved_from=status.get("moved-from"),
-                moved_to=status.get("moved-to"), changelist=changelists.get(id(entry)),
-                file_external=status.get("file-external") == "true",
-                last_changed_revision=_int(commit.get("revision")) if commit is not None else None,
-                last_changed_author=status.findtext("commit/author", ""),
-            ))
-        return results
+        args.extend(["--", *self._local_targets(paths)])
+        # Preserve injected/subclassed command transports instead of silently
+        # bypassing them. The normal installed-SVN path never captures full XML.
+        if getattr(self.command, "__func__", None) is not SvnClient.command:
+            result = self.command(args)
+            return parse_status_chunks(text_chunks(result.stdout), self._relative,
+                                       cancel_event=cancel_event)
+        argv = [self.executable, "status", "--non-interactive", "--no-auth-cache", *args[1:]]
+        with status_lock(self._lock, self.timeout, cancel_event) as duration:
+            return run_status(argv, cwd=self.working_copy, timeout=duration,
+                              relative=self._relative, display_args=self._display_args(argv),
+                              decode=self._decode, cancel_event=cancel_event)
 
     def log(self, limit: int = 100, target: str | os.PathLike[str] | None = None,
             *, revision: str | None = None) -> list[LogEntry]:
