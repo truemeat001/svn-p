@@ -19,11 +19,11 @@ python3 server.py
 
 - 搜索文件/变更列表，状态与目录范围筛选；目录只筛选，不会扩大选区。
 - 本地 changelist 分组/折叠、文件多选、当前可见项选择、隐藏选中项计数、完整只读审查。
-- 可选本地 changelist 标签移动与移回默认组：启动时明确启用，完整选区预检，再单独确认；没有提交、还原或 Shelf API。
+- 可选本地 changelist 标签移动与移回默认组：启动时明确启用，完整选区预检，再单独确认；没有提交或还原 API；本地 Shelf 另行显式启用。
 - 选中行详情、diff / properties、分页文件历史和独立有界操作日志；离线模式仍明确使用示例数据。
 - F5 刷新、Ctrl/Cmd K 搜索、方向键浏览、空格切换选择、Esc 关闭弹窗。
 - 详情/差异/日志面板显示切换，窄桌面视口布局；**最低布局宽度 520px，非手机产品。**
-- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库。默认没有 SVN 写能力；唯一可选写入口是经过预检和确认的本地 changelist 标签。
+- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库。默认没有 SVN 写能力；可选写入口是经过预检和确认的本地 changelist 标签，以及单独启用的本地 Shelf 备份/恢复。
 
 ## 真实工作区流程
 
@@ -35,7 +35,7 @@ python3 server.py --workspace "/path/to/working-copy-root" \
 # 可选 --svn 指定可信、已经安装的 SVN 原生程序。
 ```
 
-工作副本必须是含 `.svn` 的已有根目录。`--backend-source` 指向可信原版源码根，复用其 `svn_client.backend.SvnClient.status` / `status_stream`。本轮为修复零退出码告警误判，更新了原后端的只读 status 完成检查；其他安全实现和 Shelf 未改。默认刷新只执行本地 `status(verbose=False)`；启用本地归组后使用 `status(verbose=True)` 并仅显示变更项与有标签的干净成员，不加 `--show-updates`，不自动执行历史或远程查询。显式文件读取复用原版有界 `HistoryManager`；本地 `info` 验证身份后，按用户点击执行 `diff` 或 `log`。SVN 程序和目录授权范围在启动时固定，网页不能输入路径或任意命令。
+工作副本必须是含 `.svn` 的已有根目录。`--backend-source` 指向可信原版源码根，复用其 `svn_client.backend.SvnClient.status` / `status_stream`。本轮为修复零退出码告警误判，更新了原后端的只读 status 完成检查；原版 Shelf 核心保持不变；新的可选 Web Shelf 适配见下文。默认刷新只执行本地 `status(verbose=False)`；启用本地归组后使用 `status(verbose=True)` 并仅显示变更项与有标签的干净成员，不加 `--show-updates`，不自动执行历史或远程查询。显式文件读取复用原版有界 `HistoryManager`；本地 `info` 验证身份后，按用户点击执行 `diff` 或 `log`。SVN 程序和目录授权范围在启动时固定，网页不能输入路径或任意命令。
 
 状态结果只包含元数据。当前状态行可以显式读取单文件的有界差异或分页历史；不是任意文件浏览器，不提供整文件内容、目录差异、仓库树或持续连接状态。失败返回错误，清空结果并标记状态未知，绝不回退为示例或“干净”。5 万行上限是返回给 UI 前的拒绝阈值，不是流式 UI 或内存上限。依赖原后端完成有界 XML/超时处理。挂载网络目录的本地文件读取仍可能访问该文件系统。
 
@@ -55,7 +55,20 @@ python3 server.py --workspace "/path/to/test-working-copy" \
 
 计划同时绑定所选文件 SHA-256：等长修改并还原 mtime 也须重新预检。每文件最多 32 MiB，每次摘要遍历的选区总量最多 64 MiB，以 64 KiB 块读取并检查累计 10 秒协作式时限；超限拒绝，不回退成仅元数据检查。预检两遍，成功执行共三遍，执行后变化返回结果未知。文件系统阻塞调用无法被该时限中断，摘要也不能使外部 SVN 命令与其他本机进程原子化。**c797d99 的 Windows 验收发现了旧元数据检查漏洞；本轮摘要修复仍待新的 Windows 真实 SVN 复测。**
 
-这只是当前工作副本的 SVN 原生标签，不是服务器编号 CL，不修改工作文件内容，也不触碰提交、还原或 Shelf。空命名组会自然消失。只允许已版本化单文件，拒绝目录、链接、hardlink、reparse point、跨设备、嵌套 WC、external、switched、冲突、缺失及锁定条目。安全边界与完整验证记录见 [本地归组工作流](docs/LOCAL_CHANGELISTS.md)。**当前未完成 Windows 真实 SVN 归组验收，请先在可丢弃测试副本验证。**
+这只是当前工作副本的 SVN 原生标签，不是服务器编号 CL，不修改工作文件内容，也不触碰提交、还原或 Shelf；Shelf 使用独立入口。空命名组会自然消失。只允许已版本化单文件，拒绝目录、链接、hardlink、reparse point、跨设备、嵌套 WC、external、switched、冲突、缺失及锁定条目。安全边界与完整验证记录见 [本地归组工作流](docs/LOCAL_CHANGELISTS.md)。**当前未完成 Windows 真实 SVN 归组验收，请先在可丢弃测试副本验证。**
+
+### 本地 Shelf 备份与恢复（独立启用）
+
+```sh
+python3 server.py --workspace "/path/to/disposable-test-wc" \
+  --backend-source "/path/to/paired-original" --enable-shelves
+```
+
+选择最多 100 个明确普通文件，完整预览并预检后，单独确认创建本地 Shelf。创建保留原文件，不自动还原或提交。浏览本地 Shelf 后可预检并确认恢复整个明确范围：原版本化文件必须清洁且匹配记录的 BASE，新文件目标必须不存在。Shelf 始终保留，失败可能已部分恢复，没有自动重试或回滚。
+
+复用经校验的原版 Shelf 核心，新建 format 2，兼容上限以内的 format 1/2，不迁移或改写旧备份。此 Web 切片不支持目录、超过 32 MiB 的单文件或超过 64 MiB 的总内容；没有服务器 Shelf 或删除入口。默认使用原版按工作区区分的本地存储，也可显式设置 `--shelf-storage`，位置必须在所有工作副本与授权扫描范围之外。状态、内容、目标或 Shelf 改变需重新预检；确认只用一次，有效期 120 秒。
+
+**本轮尚未经过 Windows 真实 SVN 或浏览器执行验收**，请先用可丢弃副本验证。详细边界、限额及失败语义见 [本地 Shelf 工作流](docs/LOCAL_SHELVES.md)。
 
 ### 单文件差异与历史
 
@@ -88,7 +101,7 @@ python3 server.py --scan-parent "/path/to/projects" \
 ## 安全边界
 
 - 仅监听 `127.0.0.1`；精确 Host、Origin / Fetch Metadata、每次启动临时 session token、无 CORS、no-store、CSP、iframe 禁止。
-- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。无通用命令、任意文件读取、上传、提交、还原或 Shelf 入口。
+- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`，以及独立启用的 `/api/shelves-list`、`/api/shelf-preflight` 与 `/api/shelf-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。无通用命令、任意文件读取、上传、提交、还原、Shelf 删除或服务器 Shelf 入口。
 - 原始 SVN 错误输出不会返回网页或记录到日志；动态路径/标签按文本转义。
 - 这是本机应用桥接，不是对不可信本机进程的安全沙箱，不应暴露到局域网或互联网。
 - Python 标准库服务用于原型，不是生产 HTTP 部署方案。

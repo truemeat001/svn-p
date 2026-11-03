@@ -119,3 +119,15 @@ This exercises demo behavior and mocked failure/recovery. It does not perform SV
 ## Final checkpoint review
 
 Independent reviewer rechecked the fixes and independently reran **11 JS + 20 Python** tests successfully. No remaining checkpoint-blocking issue was found within the reviewed source/API scope. Final manual browser reload + refresh preserved the demonstration identity and one selected file. Four screenshot files are provided: default diff layout, list-focused overview, conflict filter and exact-selection review dialog.
+
+## Local Shelf checkpoint · 2026-11-03
+
+The opt-in exact-file local Shelf vertical workflow has 31 passing model tests
+and 156 Python tests (154 passed, 2 real-SVN tests skipped), including 30 new
+Shelf service/HTTP tests with synthetic SVN transport. Standalone generation and
+Python/JavaScript syntax checks passed. Independent review fixes were rerun.
+
+The new browser test source is present but browser execution was blocked by the
+installed Chromium sandbox socket restriction. No new browser screenshot or
+native Windows/SVN acceptance is claimed. See
+[SHELF_CHECKPOINT.md](SHELF_CHECKPOINT.md) and [LOCAL_SHELVES.md](LOCAL_SHELVES.md).

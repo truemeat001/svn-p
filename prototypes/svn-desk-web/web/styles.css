@@ -39,3 +39,7 @@
 
 .changelist-files li > span + span { color: var(--muted, #9eacc0); font-size: 11px; overflow-wrap: anywhere; }
 @media(max-width:760px){ .toolbar { overflow-x: auto; } .toolbar .tool-section { flex-shrink: 0; } }
+
+/* Shelf scopes stay readable in full, including selections hidden by filters. */
+.shelf-files{max-height:260px;overflow:auto;padding:0;list-style:none;border:1px solid var(--border,#dce3eb);border-radius:8px}.shelf-files li{padding:10px 12px;border-bottom:1px solid var(--border,#dce3eb)}.shelf-files li:last-child{border-bottom:0}.shelf-files strong{display:block;overflow-wrap:anywhere;font:12px/1.6 monospace}.shelf-files span,.shelf-item span{display:block;font-size:12px;opacity:.8;margin-top:4px}.shelf-name-label{display:flex;gap:12px;align-items:center;margin:16px 0}.shelf-name-label input{flex:1;min-width:0;padding:9px;border:1px solid var(--border,#dce3eb);border-radius:6px}.shelf-list{display:grid;gap:8px;max-height:220px;overflow:auto}.shelf-item{text-align:left;white-space:normal;display:block;width:100%;padding:10px 12px}.shelf-item strong{overflow-wrap:anywhere}#shelf-result{line-height:1.7;overflow-wrap:anywhere}#shelf-preview h3{margin-top:20px}
+.toolbar{overflow-x:auto}.toolbar .tool-section,.toolbar>button{flex-shrink:0}

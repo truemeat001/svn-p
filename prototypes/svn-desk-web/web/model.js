@@ -92,3 +92,24 @@ export function validateChangelistPlan(data,request,rows){
  if(expected.size)bad();return data;
 }
 export function canRelabelFile(row){return !!row&&['normal','none','modified','added','deleted','replaced'].includes(row.item)&&row.props!=='conflicted'&&!['switched','file_external','tree_conflicted','wc_locked'].some(key=>row[key])&&(!row.kind||['file','unknown'].includes(row.kind));}
+
+// Shelves are verified local backups, not simulated or server-side changelists.
+export function canShelfFile(row){return !!row&&(['modified','added','deleted','unversioned'].includes(row.item)||['normal','none'].includes(row.item)&&row.props==='modified')&&row.props!=='conflicted'&&!['switched','file_external','tree_conflicted','wc_locked'].some(key=>row[key])&&(!row.kind||['file','unknown'].includes(row.kind));}
+export function parseShelfName(value){return parseChangelistTarget('assign',value);}
+export function sameShelfScope(a,b){return !!a&&!!b&&['workspaceId','selectionVersion','snapshotToken'].every(key=>a[key]===b[key]);}
+export function validateShelfFiles(files,totalBytes){
+ if(!Array.isArray(files)||files.length<1||files.length>100||!Number.isSafeInteger(totalBytes)||totalBytes<0)throw Error('Shelf 文件范围无效。');
+ const paths=new Set();let total=0;
+ for(const file of files){if(!file||typeof file.path!=='string'||!file.path||file.path.startsWith('/')||file.path.includes('\\')||file.path.split('/').some(p=>!p||p==='.'||p==='..')||/[\u0000-\u001f\u007f-\u009f]/u.test(file.path)||paths.has(file.path)||typeof file.state!=='string'||file.kind!=='file'||!Number.isSafeInteger(file.size)||file.size<0)throw Error('Shelf 文件信息无效。');paths.add(file.path);total+=file.size;}
+ if(total!==totalBytes)throw Error('Shelf 大小校验不匹配。');return files;
+}
+export function validateShelfPlan(data,request,files){
+ if(data?.mode!=='live'||!sameShelfScope(data,request)||data.operation!==request.operation||data.localOnly!==true||data.backupOnly!==(request.operation==='create')||data.expiresIn!==120||typeof data.planToken!=='string'||!data.planToken||data.planToken.length>128||/[\u0000-\u001f\u007f-\u009f]/u.test(data.planToken)||typeof data.name!=='string'||!data.name)throw Error('Shelf 预检身份或范围无效，请重新预检。');
+ validateShelfFiles(data.files,data.totalBytes);
+ if(request.operation==='create'&&(data.name!==request.name||!Array.isArray(request.ids)||request.ids.length!==files.length||new Set(request.ids).size!==files.length||files.some(f=>!request.ids.includes(f.id))))throw Error('Shelf 创建选区不匹配。');
+ if(request.operation==='restore'&&data.shelfId!==request.shelfId)throw Error('Shelf 恢复目标不匹配。');
+ const expected=new Map(files.map(f=>[f.path,f]));
+ if(expected.size!==data.files.length)throw Error('Shelf 文件范围不匹配。');
+ for(const f of data.files){const old=expected.get(f.path);if(!old||request.operation==='restore'&&['state','kind','size'].some(k=>f[k]!==old[k]))throw Error('Shelf 文件范围不匹配。');expected.delete(f.path);}
+ if(expected.size)throw Error('Shelf 文件范围不完整。');return data;
+}

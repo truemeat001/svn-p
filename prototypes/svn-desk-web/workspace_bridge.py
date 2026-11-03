@@ -245,11 +245,13 @@ class WorkspaceCatalog:
     def config(self):
         selected, adapter, generation = self._selection
         changelists = bool(adapter is not None and getattr(adapter, '_changelist_service', None) is not None)
+        shelves = bool(adapter is not None and getattr(adapter, '_shelf_service', None) is not None)
         return {'mode': 'live' if selected else 'select',
                 'workspace': selected.path.name if selected else '尚未选择工作区',
                 'root': str(selected.path) if selected else '请从已授权候选中选择',
                 'workspaceId': selected.id if selected else None,
-                'selectionVersion': generation, 'writesEnabled': changelists,
+                'selectionVersion': generation, 'writesEnabled': changelists or shelves,
+                'shelfWritesEnabled': shelves,
                 'changelistWritesEnabled': changelists,
                 'workspaceSelectionEnabled': True,
                 'persistenceEnabled': bool(self.settings_file) and not self.settings_warning}
@@ -304,6 +306,32 @@ class WorkspaceCatalog:
                     adapter._changelist_service.invalidate()
                 if kind == 'apply':
                     raise MutationUncertain('Workspace changed after label execution.') from error
+                raise
+            return {**payload, **self.config()}
+
+    def shelf_operation(self, kind, data):
+        from file_reads import StaleRead
+        from changelist_ops import MutationUncertain
+        with self.operation():
+            candidate, adapter, generation = self._selection
+            if (candidate is None or adapter is None or data['workspaceId'] != candidate.id
+                    or data['selectionVersion'] != generation):
+                raise StaleRead('Workspace selection changed.')
+            self._check(candidate)
+            service = getattr(adapter, '_shelf_service', None)
+            if service:
+                storage = local_path(service.manager.storage_dir)
+                if any(storage == p or p in storage.parents for p in (*self.roots, *self.parents)):
+                    raise ValueError('Shelf storage overlaps the authorized project scope.')
+            payload = adapter.shelf_operation(kind, data)
+            try:
+                self._check(candidate)
+            except Exception as error:
+                adapter._read_snapshot = None
+                if service:
+                    service.invalidate()
+                if kind == 'apply':
+                    raise MutationUncertain('Workspace changed after Shelf execution.') from error
                 raise
             return {**payload, **self.config()}
 
