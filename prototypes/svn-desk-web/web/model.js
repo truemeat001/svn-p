@@ -189,3 +189,40 @@ export function contextMenuPosition(x,y,width,height,viewportWidth,viewportHeigh
  return {left:Math.max(inset,Math.min(Number.isFinite(x)?x:inset,viewportWidth-width-inset)),
   top:Math.max(inset,Math.min(Number.isFinite(y)?y:inset,viewportHeight-height-inset))};
 }
+
+// Repository locks are distinct from local wc_locked administrative flags.
+export function lockScopeRows(rows,selected){
+ const files=reviewSelection(rows,selected);
+ if(!files.length||files.length>100||files.length!==selected.size||new Set(files.map(f=>f.id)).size!==files.length||files.some(f=>!['normal','modified'].includes(f.item)||!['none','normal','modified'].includes(f.props)||['switched','file_external','tree_conflicted','wc_locked','copied','moved_from','moved_to'].some(k=>f[k])||f.kind&&!['file','unknown'].includes(f.kind)))throw Error('请选择 1–100 个普通已版本化文件；目录、冲突和不安全条目不可用。');
+ return files;
+}
+export function parseLockComment(action,value){
+ if(!['lock','unlock'].includes(action)||typeof value!=='string'||action==='unlock'&&value!==''||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value)||new TextEncoder().encode(value).length>4096)throw Error('锁定说明须为有效文本，不超过 4096 UTF-8 字节；解锁不能附说明。');
+ if(/(?:opaquelocktoken:|urn:uuid:)[^\s"'<>]+/.test(value)||/[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/i.test(value))throw Error('锁定说明不能包含密码或锁令牌。');
+ return value;
+}
+export function validateLockPlan(data,request,rows){
+ const bad=()=>{throw Error('锁定预检身份、范围或仓库锁信息不匹配，请重新预检。');};
+ parseLockComment(request.action,request.comment);
+ if(data?.mode!=='live'||!sameShelfScope(data,request)||data.action!==request.action||data.comment!==request.comment||data.contactsRepository!==true||data.expiresIn!==120||typeof data.planToken!=='string'||!data.planToken||data.planToken.length>128||/[\u0000-\u001f\u007f-\u009f]/u.test(data.planToken)||!Array.isArray(request.ids)||new Set(request.ids).size!==request.ids.length||!Array.isArray(data.files))bad();
+ const files=lockScopeRows(rows,new Set(request.ids)),expected=new Map(files.map(f=>[f.id,f]));
+ if(data.files.length!==files.length)bad();
+ for(const f of data.files){const row=expected.get(f?.id);if(!row||f.path!==row.path||f.item!==row.item||f.props!==row.props||f.fromChangelist!==(row.changelist||null)||!['locked','ownedByWorkingCopy','localTokenPresent','staleLocalToken'].every(k=>typeof f[k]==='boolean')||!['workingRevision','serverLastChangedRevision'].every(k=>typeof f[k]==='string'&&/^(0|[1-9][0-9]{0,18})$/.test(f[k])&&BigInt(f[k])<=9223372036854775807n)||request.action==='lock'&&BigInt(f.workingRevision)<BigInt(f.serverLastChangedRevision)||f.staleLocalToken||(request.action==='lock'?(f.locked||f.localTokenPresent||f.ownedByWorkingCopy):(!f.locked||!f.localTokenPresent||!f.ownedByWorkingCopy)))bad();expected.delete(f.id);}
+ if(expected.size)bad();return data;
+}
+const LOCK_WARNINGS={'operation-outcome-unknown':'仓库操作结果未知','status-refresh-failed':'本地状态刷新失败','workspace-changed':'工作区发生变化','command-diagnostics':'SVN 返回额外诊断'};
+export function validateLockResult(payload,request,files){
+ const bad=()=>{throw Error('锁定操作响应无效。');},r=payload?.lockResult;
+ if(payload?.mode!=='live'||payload.workspaceId!==request.workspaceId||payload.selectionVersion!==request.selectionVersion||typeof payload.statusRefreshed!=='boolean'||!r||r.action!==request.action||!['verified','uncertain'].includes(r.outcome)||r.verified!==(r.outcome==='verified')||!Array.isArray(r.files)||JSON.stringify([...r.files].sort())!==JSON.stringify(files.map(f=>f.path).sort())||!Array.isArray(r.warnings)||r.warnings.some(w=>typeof w!=='string'||!Object.hasOwn(LOCK_WARNINGS,w))||new Set(r.warnings).size!==r.warnings.length)bad();
+ if(!Array.isArray(payload.rows)||payload.rows.some(row=>!row||typeof row.id!=='string'||typeof row.path!=='string'))bad();
+ if(payload.statusRefreshed){if(typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===request.snapshotToken||r.warnings.some(w=>['status-refresh-failed','workspace-changed'].includes(w)))bad();}
+ else if(payload.snapshotToken!==null||payload.rows.length)bad();
+ if(r.verified&&r.warnings.includes('operation-outcome-unknown')||!r.verified&&!r.warnings.includes('operation-outcome-unknown'))bad();
+ return r;
+}
+export function lockResultSummary(result,{statusRefreshed=false,stale=false}={}){
+ let message=result.verified?`已核实${result.action==='lock'?'锁定':'解锁'}完成（${result.files.length} 个文件）。`:'锁定操作结果未知。请先用原版可信 SVN 客户端检查仓库锁和本地令牌，再决定下一步；不要直接重试。';
+ if(result.warnings.length)message+=` 警告：${result.warnings.map(w=>LOCK_WARNINGS[w]).join('；')}。`;
+ if(!statusRefreshed||stale)message+=' 本地状态不可用，请显式刷新；已核实的操作结果不会因此撤销。';
+ return message+' 不会自动重试或强制抢锁。';
+}

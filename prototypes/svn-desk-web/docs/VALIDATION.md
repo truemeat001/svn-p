@@ -260,3 +260,29 @@ Chromium launch was blocked by the environment's process-singleton socket
 restriction. The browser acceptance script is provided but did not execute its
 assertions. No new screenshot, real SVN, Windows, WebView2 or native packaging
 result is claimed. Details and outstanding checks: [FILE_CONTEXT_MENU.md](FILE_CONTEXT_MENU.md).
+
+## Exact-file repository locks · 2026-11-04
+
+Base `069d454a118fd60641bcc5b172e50033d6c3e146`. Optional `--enable-locks`
+adds explicit remote preflight and separately confirmed single-use lock/unlock
+plans over the unchanged original LockManager. It never forces, steals or breaks
+locks. Default status is still local; lock-enabled status includes clean rows.
+
+- 71 JavaScript model/controller tests passed, including independent regression
+  of existing commit input callbacks after lock integration.
+- 294 Python tests ran: 292 passed and 2 existing real-SVN tests skipped.
+- 21 lock service tests, 7 HTTP/catalog tests and 5 independent adversarial tests
+  cover exact paths, ownership, mutation races, parent administrative locks,
+  malformed remote metadata, partial/error outcomes and preserved completion.
+- Independent review found a commit input callback regression; fixed and verified.
+  An additional parent-directory administrative-lock check was independently
+  reviewed and tested before any server request or write.
+- JavaScript/Python syntax checks and rebuilt standalone demo passed.
+
+All executed lock tests use synthetic temporary files and mock SVN, plus loopback
+HTTP. The browser contract is available as `npm run test:locks:ui`; bundled
+Playwright Chromium is unavailable and the installed Chromium launch was denied
+at process-singleton socket creation. No bypass, real SVN/`svnadmin` operation,
+Windows test, new screenshot or native package is claimed. Read
+[FILE_LOCKS.md](FILE_LOCKS.md) for the disposable-repository acceptance checklist
+and remaining safety/atomicity limitations.

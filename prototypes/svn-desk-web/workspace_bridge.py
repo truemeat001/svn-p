@@ -247,11 +247,13 @@ class WorkspaceCatalog:
         changelists = bool(adapter is not None and getattr(adapter, '_changelist_service', None) is not None)
         shelves = bool(adapter is not None and getattr(adapter, '_shelf_service', None) is not None)
         commits = bool(adapter is not None and getattr(adapter, '_commit_service', None) is not None)
+        locks = bool(adapter is not None and getattr(adapter, '_lock_service', None) is not None)
         return {'mode': 'live' if selected else 'select',
                 'workspace': selected.path.name if selected else '尚未选择工作区',
                 'root': str(selected.path) if selected else '请从已授权候选中选择',
                 'workspaceId': selected.id if selected else None,
-                'selectionVersion': generation, 'writesEnabled': changelists or shelves or commits,
+                'selectionVersion': generation, 'writesEnabled': changelists or shelves or commits or locks,
+                'locksEnabled': locks,
                 'commitsEnabled': commits,
                 'shelfWritesEnabled': shelves,
                 'changelistWritesEnabled': changelists,
@@ -351,7 +353,7 @@ class WorkspaceCatalog:
                 self._check(candidate)
             except Exception as error:
                 adapter._read_snapshot = None
-                for name in ('_changelist_service', '_shelf_service', '_commit_service'):
+                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service'):
                     service = getattr(adapter, name, None)
                     if service:
                         service.invalidate()
@@ -363,6 +365,29 @@ class WorkspaceCatalog:
                 raise
             if payload.get('statusRefreshed') is False:
                 return {**self.config(), **payload}  # Revoked capabilities win over configured services.
+            return {**payload, **self.config()}
+
+    def lock_operation(self, kind, data):
+        from file_reads import StaleRead
+        with self.operation():
+            candidate, adapter, generation = self._selection
+            if (candidate is None or adapter is None or data['workspaceId'] != candidate.id
+                    or data['selectionVersion'] != generation):
+                raise StaleRead('Workspace selection changed.')
+            self._check(candidate)
+            payload = adapter.lock_operation(kind, data)
+            try:
+                self._check(candidate)
+            except Exception:
+                adapter._read_snapshot = None
+                service = getattr(adapter, '_lock_service', None)
+                if service:
+                    service.invalidate()
+                if kind == 'apply' and isinstance(payload.get('lockResult'), dict):
+                    return {**self.config(), **adapter._lock_status_unknown(payload['lockResult'], 'workspace-changed')}
+                raise
+            if payload.get('statusRefreshed') is False:
+                return {**self.config(), **payload}
             return {**payload, **self.config()}
 
     def select(self, identifier):
