@@ -104,6 +104,8 @@
       <div class="content-header"><div><div class="eyebrow">PENDING CHANGES</div><h1>待提交更改 <span id="headline-count">12</span></h1><p id="scope-note">3 个本地变更列表 · 仅当前工作副本</p></div><button class="subtle-button" id="collapse-all"><span data-icon="collapse"></span>折叠分组</button></div>
       <div class="filterbar"><label class="search-box"><span data-icon="search"></span><input id="search" type="search" placeholder="搜索文件或变更列表…" aria-label="搜索文件或变更列表"><kbd>Ctrl K</kbd></label><button class="filter-chip active" data-filter="all">全部<span id="filter-all-count">12</span></button><button class="filter-chip" data-filter="modified">已修改</button><button class="filter-chip" data-filter="conflicted">冲突<span id="filter-conflict-count">1</span></button><button class="icon-button" id="clear-filters" aria-label="清除筛选" title="清除搜索与目录范围" data-icon="filter-x"></button></div>
       <button id="lock-inspected" class="subtle-button hidden" disabled>已用原版可信客户端核对仓库锁和本地令牌，并已刷新本地状态</button>
+      <div id="shelf-last-result" class="error-banner hidden" role="status"></div>
+      <div id="commit-last-result" class="error-banner hidden" role="status"></div>
       <div id="file-op-last-result" class="error-banner hidden" role="status"></div>
       <div id="add-last-result" class="error-banner hidden" role="status"></div>
       <div id="lock-last-result" class="error-banner hidden" role="status"></div>
@@ -236,6 +238,23 @@ function validateShelfPlan(data,request,files){
  if(expected.size!==data.files.length)throw Error('Shelf 文件范围不匹配。');
  for(const f of data.files){const old=expected.get(f.path);if(!old||request.operation==='restore'&&['state','kind','size'].some(k=>f[k]!==old[k]))throw Error('Shelf 文件范围不匹配。');expected.delete(f.path);}
  if(expected.size)throw Error('Shelf 文件范围不完整。');return data;
+}
+
+// Completed Shelf facts are separate from later local-status availability.
+const SHELF_WARNINGS={'status-refresh-failed':'本地状态刷新失败','workspace-changed':'工作区发生变化'};
+function validateShelfResult(payload,request,plan){
+ const bad=()=>{throw Error('Shelf 执行响应身份或完整文件范围无效。');},r=payload?.shelfResult;
+ if(payload?.mode!=='live'||payload.workspaceId!==request.workspaceId||payload.selectionVersion!==request.selectionVersion||typeof payload.statusRefreshed!=='boolean'||!r||r.operation!==request.operation||r.name!==plan.name||typeof r.shelfId!=='string'||!r.shelfId||r.shelfId.length>64||/[\u0000-\u001f\u007f-\u009f]/u.test(r.shelfId)||request.operation==='restore'&&r.shelfId!==request.shelfId||r.shelfRetained!==true||r.outcome!=='verified'||r.verified!==true||!Array.isArray(r.files)||r.files.some(p=>typeof p!=='string')||JSON.stringify([...r.files].sort())!==JSON.stringify(plan.files.map(f=>f.path).sort())||!Array.isArray(r.warnings)||r.warnings.some(w=>typeof w!=='string'||!Object.hasOwn(SHELF_WARNINGS,w))||new Set(r.warnings).size!==r.warnings.length)bad();
+ if(!Array.isArray(payload.rows)||payload.rows.some(row=>!row||typeof row.id!=='string'||typeof row.path!=='string'))bad();
+ if(payload.statusRefreshed){if(typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===request.snapshotToken||r.warnings.length)bad();}
+ else if(payload.snapshotToken!==null||payload.rows.length||!r.warnings.length)bad();
+ return r;
+}
+function shelfResultSummary(result,{statusRefreshed=false,stale=false}={}){
+ let message=`${result.operation==='create'?'本地 Shelf 已创建，源文件未清除':'整个 Shelf 已恢复，备份仍保留'}：${result.name} · ${result.files.length} 个文件。`;
+ if(result.warnings.length)message+=` 警告：${result.warnings.map(w=>SHELF_WARNINGS[w]).join('；')}。`;
+ if(!statusRefreshed||stale)message+=' 当前文件列表不可用，请显式刷新；已核实的 Shelf 操作不会因此撤销。';
+ return message+' 不会自动重试或删除备份。';
 }
 
 // Repository commits never expand an explicit selection into its whole changelist.
@@ -827,23 +846,24 @@ async function preflightShelf(){
  }catch(error){if(generation===shelfGeneration&&$('shelf-result'))$('shelf-result').textContent=`预检失败：${error.message} 未发送执行请求。`;}
  finally{setBusy(false);if($('shelf-preflight'))$('shelf-preflight').disabled=false;if($('shelf-name'))$('shelf-name').disabled=false;}
 }
+function preserveShelfResult(message){$('shelf-last-result').textContent=message;$('shelf-last-result').classList.remove('hidden');if($('shelf-result'))$('shelf-result').textContent=message;log(message,'WARN');notify(message);}
 async function applyShelf(){
  const plan=shelfPlan;if(!plan||!shelvesAvailable()||shelfApplying||!$('modal').open||modalView!==plan.view)return;
  if(!sameShelfScope(plan.request,shelfScope())||plan.key!==selectionKey()||Date.now()>=plan.expiresAt){invalidateShelf();return;}
  if(plan.request.operation==='create'&&parseShelfName($('shelf-name').value)!==plan.request.name||plan.request.operation==='restore'&&shelfChoice?.id!==plan.request.shelfId){invalidateShelf();return;}
  const generation=shelfGeneration;shelfPlan=null;shelfApplying=true;invalidateReads();setBusy(true);renderPreview();
  for(const id of ['shelf-confirm','shelf-preflight','shelf-name'])if($(id))$(id).disabled=true;
- $('shelf-result').textContent='请求已发送，正在执行。关闭窗口不等于取消；不要重复操作或同时编辑文件。';
+ $('shelf-result').textContent='请求已发送，正在执行。关闭窗口不等于取消；不要重复操作或同时编辑文件。';let verifiedResult=null;
  try{
-  const payload=await api('/api/shelf-apply',{...shelfScope(),planToken:plan.result.planToken,confirmed:true});
-  if(generation!==shelfGeneration||modalView!==plan.view||!$('modal').open||!sameShelfScope(plan.request,shelfScope()))throw Error('窗口或工作范围已改变，未采用迟到的执行响应。');
-  const result=payload?.shelfResult,expected=plan.result.files.map(f=>f.path).sort();
-  if(payload.mode!=='live'||payload.workspaceId!==plan.request.workspaceId||payload.selectionVersion!==plan.request.selectionVersion||typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===plan.request.snapshotToken||!result||result.operation!==plan.request.operation||result.name!==plan.result.name||typeof result.shelfId!=='string'||!result.shelfId||plan.request.operation==='restore'&&result.shelfId!==plan.request.shelfId||result.shelfRetained!==true||!Array.isArray(result.files)||JSON.stringify([...result.files].sort())!==JSON.stringify(expected))throw Error('执行响应身份或完整文件范围无效。');
-  applySnapshot(payload);const message=`${result.operation==='create'?'本地 Shelf 已创建，源文件未清除':'整个 Shelf 已恢复，备份仍保留'}：${result.name} · ${result.files.length} 个文件。`;
-  $('shelf-result').textContent=message;log(message);notify(message);
+  const payload=await api('/api/shelf-apply',{workspaceId:plan.request.workspaceId,selectionVersion:plan.request.selectionVersion,snapshotToken:plan.request.snapshotToken,planToken:plan.result.planToken,confirmed:true});
+  const result=validateShelfResult(payload,plan.request,plan.result);verifiedResult=result;
+  const stale=generation!==shelfGeneration||modalView!==plan.view||!$('modal').open||!sameShelfScope(plan.request,shelfScope());
+  const message=shelfResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});preserveShelfResult(message);
+  try{if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);}
+  finally{if($('shelf-result'))$('shelf-result').textContent=message;}
  }catch(error){
-  const message=`Shelf 执行结果未知，可能已部分或全部生效。请显式刷新并重新审查；不会自动重试。${error.message}`;
-  failSnapshot(message);if($('shelf-result'))$('shelf-result').textContent=message;log(message,'WARN');notify('Shelf 结果未知，请显式刷新并审查。');
+  const message=verifiedResult?shelfResultSummary(verifiedResult,{statusRefreshed:false,stale:true}):'Shelf 执行结果未知，可能已部分或全部生效。请显式刷新并重新审查；不会自动重试。';
+  preserveShelfResult(message);try{failSnapshot(message);}finally{if($('shelf-result'))$('shelf-result').textContent=message;}
  }finally{shelfApplying=false;setBusy(false);render();}
 }
 
@@ -870,21 +890,25 @@ async function preflightCommit(){
  }catch(error){if(generation===commitGeneration&&modalView==='commit'&&$('modal').open)$('commit-result').textContent=`预检失败：${error.message} 未发送提交请求。`;}
  finally{setBusy(false);if($('commit-preflight'))$('commit-preflight').disabled=false;}
 }
+function preserveCommitResult(message){$('commit-last-result').textContent=message;$('commit-last-result').classList.remove('hidden');if($('commit-result'))$('commit-result').textContent=message;log(message,'WARN');notify(message);}
 async function applyCommit(){
  const plan=commitPlan;if(!plan||commitApplying||!commitsAvailable()||modalView!=='commit'||!$('modal').open)return;
  try{if(Date.now()>=plan.expiresAt||plan.key!==selectionKey()||JSON.stringify(plan.request)!==JSON.stringify(commitRequest())){invalidateLock();invalidateCommit();return;}}catch(error){invalidateCommit(error.message);return;}
  const generation=commitGeneration;commitPlan=null;commitApplying=true;invalidateReads();setBusy(true);renderPreview();
  for(const id of ['commit-confirm','commit-preflight','commit-message','commit-keep'])$(id).disabled=true;
- $('commit-result').textContent='正在提交到仓库。关闭不等于取消；不要重复操作。';
+ $('commit-result').textContent='正在提交到仓库。关闭不等于取消；不要重复操作。';let completedResult=null;
  try{
   const payload=await api('/api/commit-apply',{workspaceId:plan.request.workspaceId,selectionVersion:plan.request.selectionVersion,snapshotToken:plan.request.snapshotToken,planToken:plan.result.planToken,confirmed:true});
-  const result=validateCommitResult(payload,plan.request,plan.result.files);
+  const result=validateCommitResult(payload,plan.request,plan.result.files);completedResult=result;
   const stale=generation!==commitGeneration||modalView!=='commit'||!$('modal').open||!sameShelfScope(plan.request,shelfScope());
   const message=commitResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});
-  if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);
-  if($('commit-result')){$('commit-result').textContent=message;$('commit-result').setAttribute('role',result.warnings.length||result.outcome!=='committed'||stale?'alert':'status');}
-  log(message,result.warnings.length||result.outcome!=='committed'||stale?'WARN':'INFO');notify(message);
- }catch(error){const message='提交结果未知：未收到可验证的提交响应。仓库可能已写入。请显式刷新本地状态并检查仓库历史，再决定下一步；不会自动重试。';failSnapshot(message);if($('commit-result'))$('commit-result').textContent=message;log(message,'WARN');notify('提交结果未知，请刷新并检查仓库历史；不要直接重试。');}
+  preserveCommitResult(message);
+  try{if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);}
+  finally{if($('commit-result')){$('commit-result').textContent=message;$('commit-result').setAttribute('role',result.warnings.length||result.outcome!=='committed'||stale?'alert':'status');}}
+ }catch(error){
+  const message=completedResult?commitResultSummary(completedResult,{statusRefreshed:false,stale:true}):'提交结果未知：未收到可验证的提交响应。仓库可能已写入。请显式刷新本地状态并检查仓库历史，再决定下一步；不会自动重试。';
+  preserveCommitResult(message);try{failSnapshot(message);}finally{if($('commit-result'))$('commit-result').textContent=message;}
+ }
  finally{commitApplying=false;setBusy(false);render();}
 }
 
@@ -916,16 +940,19 @@ async function applyLock(){
  try{if(Date.now()>=plan.expiresAt||plan.key!==selectionKey()||JSON.stringify(plan.request)!==JSON.stringify(lockRequest())){invalidateLock();return;}}catch(error){invalidateLock(error.message);return;}
  const generation=lockGeneration;lockPlan=null;lockApplying=true;invalidateReads();setBusy(true);renderPreview();
  for(const id of ['lock-confirm','lock-preflight','lock-comment'])if($(id))$(id).disabled=true;
- $('lock-result').textContent='请求已发送；关闭不等于取消，不要重复操作。';
+ $('lock-result').textContent='请求已发送；关闭不等于取消，不要重复操作。';let validatedResult=null;
  try{const payload=await api('/api/lock-apply',{workspaceId:plan.request.workspaceId,selectionVersion:plan.request.selectionVersion,snapshotToken:plan.request.snapshotToken,planToken:plan.result.planToken,confirmed:true});
   const result=validateLockResult(payload,plan.request,plan.result.files),stale=generation!==lockGeneration||modalView!=='lock'||!$('modal').open||!sameShelfScope(plan.request,shelfScope());
-  const message=lockResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});
+  validatedResult=result;const message=lockResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});
   if(!result.verified)lockInspectionRequired=true;
-  if(!result.verified||stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);
   preserveLockResult(message);
+  try{if(!result.verified||stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);}
+  finally{if($('lock-result'))$('lock-result').textContent=message;}
  }catch(error){const rejected=Number.isInteger(error.httpStatus)&&error.httpStatus>=400&&error.httpStatus<500;
-  const message=rejected?'请求在执行前被拒绝，未发送锁定或解锁命令。请刷新并重新审查选区后预检。':'锁定操作结果未知：未收到可验证响应。请先用原版可信 SVN 客户端检查仓库锁和本地令牌，再显式刷新；不要直接重试。';
-  if(!rejected)lockInspectionRequired=true;failSnapshot(message);preserveLockResult(message);
+  const message=validatedResult?lockResultSummary(validatedResult,{statusRefreshed:false,stale:true}):rejected?'请求在执行前被拒绝，未发送锁定或解锁命令。请刷新并重新审查选区后预检。':'锁定操作结果未知：未收到可验证响应。请先用原版可信 SVN 客户端检查仓库锁和本地令牌，再显式刷新；不要直接重试。';
+  if(!validatedResult&&!rejected||validatedResult&&!validatedResult.verified)lockInspectionRequired=true;
+  preserveLockResult(message);try{failSnapshot(message);}finally{if($('lock-result'))$('lock-result').textContent=message;}
+
  }finally{lockApplying=false;setBusy(false);render();}
 }
 
@@ -1003,11 +1030,12 @@ async function applyAdd(){
  try{const payload=await api('/api/add-apply',{workspaceId:plan.request.workspaceId,selectionVersion:plan.request.selectionVersion,snapshotToken:plan.request.snapshotToken,planToken:plan.result.planToken,confirmed:true});
   const result=validateAddResult(payload,plan.request,plan.result.files);verifiedResult=result;const stale=generation!==addGeneration||modalView!=='add'||!$('modal').open||!sameShelfScope(plan.request,shelfScope());
   const message=addResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});
-  if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);
   preserveAddResult(message);
+  try{if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);}
+  finally{if($('add-result'))$('add-result').textContent=message;}
  }catch(error){const rejected=Number.isInteger(error.httpStatus)&&error.httpStatus>=400&&error.httpStatus<500;
   const message=verifiedResult?addResultSummary(verifiedResult,{statusRefreshed:false,stale:true}):rejected?'添加请求在执行前被拒绝。请刷新并重新审查选区后预检。':'添加结果未知，部分文件可能已经登记。没有自动重试或回滚；请显式刷新并核对待添加文件，再决定下一步。';
-  failSnapshot(message);preserveAddResult(message);
+  preserveAddResult(message);try{failSnapshot(message);}finally{if($('add-result'))$('add-result').textContent=message;}
  }finally{addApplying=false;setBusy(false);render();}
 }
 

@@ -114,6 +114,23 @@ export function validateShelfPlan(data,request,files){
  if(expected.size)throw Error('Shelf 文件范围不完整。');return data;
 }
 
+// Completed Shelf facts are separate from later local-status availability.
+const SHELF_WARNINGS={'status-refresh-failed':'本地状态刷新失败','workspace-changed':'工作区发生变化'};
+export function validateShelfResult(payload,request,plan){
+ const bad=()=>{throw Error('Shelf 执行响应身份或完整文件范围无效。');},r=payload?.shelfResult;
+ if(payload?.mode!=='live'||payload.workspaceId!==request.workspaceId||payload.selectionVersion!==request.selectionVersion||typeof payload.statusRefreshed!=='boolean'||!r||r.operation!==request.operation||r.name!==plan.name||typeof r.shelfId!=='string'||!r.shelfId||r.shelfId.length>64||/[\u0000-\u001f\u007f-\u009f]/u.test(r.shelfId)||request.operation==='restore'&&r.shelfId!==request.shelfId||r.shelfRetained!==true||r.outcome!=='verified'||r.verified!==true||!Array.isArray(r.files)||r.files.some(p=>typeof p!=='string')||JSON.stringify([...r.files].sort())!==JSON.stringify(plan.files.map(f=>f.path).sort())||!Array.isArray(r.warnings)||r.warnings.some(w=>typeof w!=='string'||!Object.hasOwn(SHELF_WARNINGS,w))||new Set(r.warnings).size!==r.warnings.length)bad();
+ if(!Array.isArray(payload.rows)||payload.rows.some(row=>!row||typeof row.id!=='string'||typeof row.path!=='string'))bad();
+ if(payload.statusRefreshed){if(typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===request.snapshotToken||r.warnings.length)bad();}
+ else if(payload.snapshotToken!==null||payload.rows.length||!r.warnings.length)bad();
+ return r;
+}
+export function shelfResultSummary(result,{statusRefreshed=false,stale=false}={}){
+ let message=`${result.operation==='create'?'本地 Shelf 已创建，源文件未清除':'整个 Shelf 已恢复，备份仍保留'}：${result.name} · ${result.files.length} 个文件。`;
+ if(result.warnings.length)message+=` 警告：${result.warnings.map(w=>SHELF_WARNINGS[w]).join('；')}。`;
+ if(!statusRefreshed||stale)message+=' 当前文件列表不可用，请显式刷新；已核实的 Shelf 操作不会因此撤销。';
+ return message+' 不会自动重试或删除备份。';
+}
+
 // Repository commits never expand an explicit selection into its whole changelist.
 export function commitScopeRows(rows,selectedIds,operation='selected',name=null){
  if(!['selected','changelist'].includes(operation)||operation==='selected'&&name!==null||operation==='changelist'&&(typeof name!=='string'||!name))throw Error('提交范围无效。');

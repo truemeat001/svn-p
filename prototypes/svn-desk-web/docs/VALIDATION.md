@@ -399,3 +399,26 @@ new screenshot acceptance is claimed. The separate property-test compatibility
 checkpoint above does not validate this new workflow. Full limits, failure
 semantics and disposable-Windows acceptance checklist:
 [LOCAL_FILE_OPERATIONS.md](LOCAL_FILE_OPERATIONS.md).
+
+## Trial-blocker review: completed-result retention · 2026-11-04
+
+Base `2a25d94eee7fa918e8db9b04947ea8ada5bbe925`. No new workflow or native
+shell change. Independent full-module controller and bridge review reproduced
+completed Shelf results being lost after dismissal/status/candidate failure,
+and validated commit/lock/add facts being lost after UI snapshot/render failure.
+These now retain the completed fact while revoking stale state and capabilities.
+
+- 164 JavaScript tests passed, including 40 new whole-script DOM-adapter tests
+  and two strict Shelf completion-contract model tests.
+- 480 Python tests ran: 478 passed, two existing real-SVN tests skipped.
+- 16 new bridge/security tests cover all write endpoint authorization/body
+  matrices, actual threaded exclusion, Shelf result/capability preservation,
+  and original-core Shelf create/restore with synthetic XML and temporary files.
+- The original base fails the three new Shelf completion-retention reproductions;
+  the repaired code passes them. No source/backend/Shelf-format compatibility
+  rule was relaxed. The updated Shelf service and Web assets must ship together.
+- No browser assertions, Windows filesystem, real native SVN, GUI, native package,
+  or new screenshot acceptance is claimed by these local checks.
+
+See [TRIAL_RESULT_RETENTION.md](TRIAL_RESULT_RETENTION.md). The separate Windows
+and desktop-package validation remain necessary for the exact final bundle.

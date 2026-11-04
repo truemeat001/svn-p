@@ -26,3 +26,20 @@ test('Restore requires whole unchanged shelf metadata and matching identity',()=
  const restore={...plan,...req,backupOnly:false};validateShelfPlan(restore,req,files);
  for(const delta of [{shelfId:'other'},{files:[{...files[0],state:'deleted'},files[1]]},{files:[{...files[0],size:3},files[1]],totalBytes:5}])assert.throws(()=>validateShelfPlan({...restore,...delta},req,files));
 });
+
+import {validateShelfResult,shelfResultSummary} from '../web/model.js';
+const completed={mode:'live',workspaceId:'w',selectionVersion:1,statusRefreshed:true,snapshotToken:'new',rows:[],shelfResult:{operation:'create',name:'backup',shelfId:'saved',files:files.map(f=>f.path),shelfRetained:true,outcome:'verified',verified:true,warnings:[]}};
+test('Shelf completion is exact and independent of follow-up snapshot availability',()=>{
+ assert.equal(validateShelfResult(completed,request,plan),completed.shelfResult);
+ const stale={...completed,statusRefreshed:false,snapshotToken:null,shelfResult:{...completed.shelfResult,warnings:['status-refresh-failed']}};
+ const result=validateShelfResult(stale,request,plan);assert.match(shelfResultSummary(result),/本地 Shelf 已创建/);assert.match(shelfResultSummary(result),/显式刷新/);
+ for(const patch of [{workspaceId:'other'},{snapshotToken:'s'},{rows:null},{statusRefreshed:false}])assert.throws(()=>validateShelfResult({...completed,...patch},request,plan));
+ for(const patch of [{operation:'restore'},{name:'other'},{shelfId:''},{shelfRetained:false},{verified:false},{outcome:'uncertain'},{files:[files[0].path]},{warnings:['toString']},{warnings:['raw server output']},{warnings:['status-refresh-failed','status-refresh-failed']}])assert.throws(()=>validateShelfResult({...completed,shelfResult:{...completed.shelfResult,...patch}},request,plan));
+ assert.throws(()=>validateShelfResult({...stale,shelfResult:{...stale.shelfResult,warnings:[]}},request,plan));
+});
+test('Shelf restore completion must retain the exact reviewed backup ID',()=>{
+ const req={...request,operation:'restore',shelfId:'saved'};
+ const payload={...completed,shelfResult:{...completed.shelfResult,operation:'restore'}};
+ validateShelfResult(payload,req,plan);assert.match(shelfResultSummary(payload.shelfResult),/整个 Shelf 已恢复/);
+ assert.throws(()=>validateShelfResult({...payload,shelfResult:{...payload.shelfResult,shelfId:'other'}},req,plan));
+});

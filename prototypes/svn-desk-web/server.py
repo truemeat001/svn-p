@@ -251,15 +251,32 @@ class ReadOnlyAdapter:
                 if getattr(self, '_changelist_service', None):
                     self._changelist_service.invalidate()
             result = service.apply(data, self._read_snapshot, invalidate)
+            result = {**result, 'outcome': 'verified', 'verified': True,
+                      'warnings': list(result.get('warnings', []))}
             try:
                 rows = self._status_rows()
                 self._check_workspace()
-                return {**self._publish_snapshot(rows), 'shelfResult': result}
-            except Exception as error:
-                self._read_snapshot = None
-                raise MutationUncertain('Post-Shelf status could not be verified.') from error
+                return {**self._publish_snapshot(rows), 'shelfResult': result, 'statusRefreshed': True}
+            except Exception:
+                return self._shelf_status_unknown(result, 'status-refresh-failed')
         finally:
             self._busy.release()
+
+    def _shelf_status_unknown(self, result, warning):
+        """Keep a completed local Shelf fact when a later read becomes unknown."""
+        self._read_snapshot = None
+        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
+            service = getattr(self, name, None)
+            if service:
+                service.invalidate()
+        warnings = list(dict.fromkeys([*result.get('warnings', []), warning]))
+        return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
+                'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
+                'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
+                'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False,
+                'addsEnabled': False, 'fileOpsEnabled': False, 'writesEnabled': False,
+                'shelfResult': {**result, 'warnings': warnings},
+                'scope': 'Verified local Shelf operation retained; local status requires explicit refresh.'}
 
     def _commit_status_unknown(self, result, warning):
         """A failed follow-up read must not erase an already completed command."""

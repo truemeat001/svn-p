@@ -361,8 +361,13 @@ class WorkspaceCatalog:
                 self._check(candidate)
             except Exception as error:
                 if kind == 'apply':
+                    result = payload.get('shelfResult')
+                    if isinstance(result, dict) and result.get('verified') is True:
+                        return {**self.config(), **adapter._shelf_status_unknown(result, 'workspace-changed')}
                     raise MutationUncertain('Workspace changed after Shelf execution.') from error
                 raise
+            if payload.get('statusRefreshed') is False:
+                return {**self.config(), **payload}
             return {**payload, **self.config()}
 
     def commit_operation(self, kind, data):
