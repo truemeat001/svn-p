@@ -12,7 +12,8 @@ import threading
 # Frozen source resources remain read-only in the installation directory.
 sys.dont_write_bytecode = True
 
-from server import PrototypeServer, ReadOnlyAdapter, reviewed_commit_backend
+from server import PrototypeServer, ReadOnlyAdapter, reviewed_commit_backend, checkout_for
+from checkout_ops import checkout_arguments, checkout_requested
 from workspace_bridge import WorkspaceCatalog, trusted_modules
 from file_reads import history_module
 from shelf_ops import shelf_module
@@ -68,12 +69,13 @@ def parser():
     result.add_argument('--svn', help='Explicit trusted installed SVN executable')
     for flag in WRITE_FLAGS:
         result.add_argument('--enable-' + flag.replace('_', '-'), action='store_true')
+    checkout_arguments(result)
     result.add_argument('--self-check', action='store_true', help='Check bundled source/resources without SVN or a server')
     return result
 
 
 def catalog_for(args, source):
-    authorized = bool(args.workspace or args.scan_parent)
+    authorized = bool(args.workspace or args.scan_parent or checkout_requested(args))
     if not authorized:
         if args.svn or any(getattr(args, 'enable_' + name) for name in WRITE_FLAGS):
             raise ValueError('Capabilities require an explicitly authorized working copy or scan parent.')
@@ -155,7 +157,7 @@ def main(argv=None):
     try:
         source = backend_source()
         if args.self_check:
-            if args.workspace or args.scan_parent or args.svn or any(getattr(args, 'enable_' + name) for name in WRITE_FLAGS):
+            if args.workspace or args.scan_parent or args.checkout_url or args.checkout_destination or args.svn or any(getattr(args, 'enable_' + name) for name in WRITE_FLAGS):
                 raise ValueError('Self-check never accepts working-copy arguments.')
             verified_backend(source)
             prepare_external_runtime(source)
@@ -167,7 +169,8 @@ def main(argv=None):
             return 0
         prepare_external_runtime(source)
         catalog = catalog_for(args, source)
-        service = DesktopServer(0, catalog=catalog)
+        checkout = checkout_for(args, source, catalog) if checkout_requested(args) else None
+        service = DesktopServer(0, catalog=catalog, checkout=checkout)
         serve(service, sys.stdin, sys.stdout)
         return 0
     except (ValueError, OSError, RuntimeError, ImportError):

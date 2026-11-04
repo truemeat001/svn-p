@@ -3,21 +3,31 @@ const path = require('node:path');
 const PROTOCOL = 'svn-desk-desktop/1';
 const WRITE_FLAGS = new Set(['--enable-changelists', '--enable-shelves', '--enable-commits', '--enable-locks', '--enable-adds', '--enable-file-ops']);
 function parseOptions(argv, paths = path) {
-  const bridgeArgs = []; let profileRoot = null; let demo = false; let hasWorkspace = false;
+  const bridgeArgs = []; let profileRoot = null; let demo = false; let hasWorkspace = false; let checkoutUrl = false; let checkoutDestination = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--demo') { if (demo) throw Error('Duplicate demo option.'); demo = true; }
-    else if (arg === '--profile-root' || ['--workspace', '--scan-parent', '--svn'].includes(arg)) {
+    else if (arg === '--checkout-url') {
+      const value = argv[++i];
+      if (checkoutUrl || !value || value.startsWith('--') || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw Error('One bounded checkout URL is required.');
+      checkoutUrl = true; bridgeArgs.push(arg, value);
+    }
+    else if (arg === '--profile-root' || ['--workspace', '--scan-parent', '--svn', '--checkout-destination'].includes(arg)) {
       const value = argv[++i];
       if (!value || value.startsWith('--') || !paths.isAbsolute(value) || /[\x00-\x1f]/.test(value)) throw Error('An absolute local path is required.');
       if (paths === path.win32 && (!/^[A-Za-z]:\\/.test(value) || /(?:^|\\)\.\.?($|\\)/.test(value) || /[. ](?:\\|$)/.test(value) || value.slice(2).includes(':'))) throw Error('A canonical local drive path is required.');
       if (arg === '--profile-root') { if (profileRoot) throw Error('Duplicate profile option.'); profileRoot = paths.resolve(value); }
-      else { bridgeArgs.push(arg, paths.resolve(value)); hasWorkspace ||= arg !== '--svn'; }
+      else {
+        if (arg === '--checkout-destination') { if (checkoutDestination) throw Error('Duplicate checkout destination.'); checkoutDestination = true; }
+        bridgeArgs.push(arg, paths.resolve(value)); hasWorkspace ||= ['--workspace', '--scan-parent'].includes(arg);
+      }
     } else if (WRITE_FLAGS.has(arg)) {
       if (bridgeArgs.includes(arg)) throw Error('Duplicate capability option.');
       bridgeArgs.push(arg);
     } else throw Error('Unknown startup option.');
   }
+  if (checkoutUrl !== checkoutDestination) throw Error('Checkout URL and destination are required together.');
+  hasWorkspace ||= checkoutUrl && checkoutDestination;
   if ((demo && bridgeArgs.length) || (!hasWorkspace && bridgeArgs.length)) throw Error('Workspace capabilities require an explicitly selected workspace.');
   return {bridgeArgs, profileRoot, demo, hasWorkspace};
 }

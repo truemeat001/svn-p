@@ -9,3 +9,11 @@ test('resources restricted to exact origin, single main page and no subframes',(
 test('explicit absolute CLI options, capability gating and native option separation',()=>{assert.deepEqual(parseOptions(['--demo']),{bridgeArgs:[],profileRoot:null,demo:true,hasWorkspace:false}); const o=parseOptions(['--workspace','C:\\Work\\演示 copy','--enable-commits','--profile-root','C:\\Build\\profile-new'],path.win32); assert.deepEqual(o.bridgeArgs,['--workspace','C:\\Work\\演示 copy','--enable-commits']); assert.equal(o.profileRoot,'C:\\Build\\profile-new');});
 for(const args of [['--evil'],['--workspace'],['--workspace','relative'],['--enable-commits'],['--svn','C:\\svn.exe'],['--demo','--workspace','C:\\wc'],['--demo','--demo'],['--profile-root','C:\\one','--profile-root','C:\\two'],['--workspace','\\\\server\\wc'],['--workspace','C:\\wc\\..\\outside'],['--workspace','C:\\wc:stream'],['--workspace','C:\\wc.']]) test('reject CLI '+JSON.stringify(args),()=>assert.throws(()=>parseOptions(args,path.win32)));
 test('child process receives no Python/Node/Electron injection overrides',()=>{assert.deepEqual(childEnvironment({PATH:'p',HOME:'h',PYTHONPATH:'x',NODE_OPTIONS:'x',ELECTRON_RUN_AS_NODE:'1',WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:'x'}),{PATH:'p',HOME:'h'});});
+test('paired fixed checkout URL and canonical destination accepted without existing workspace',()=>{
+ const args=['--checkout-url','https://example.test/repo','--checkout-destination','C:\\Work\\new'];
+ const result=parseOptions(args,path.win32);assert.deepEqual(result.bridgeArgs,args);assert.equal(result.hasWorkspace,true);
+});
+test('incomplete duplicate demo or unsafe checkout arguments are rejected',()=>{
+ const pair=['--checkout-url','https://example.test/repo','--checkout-destination','C:\\Work\\new'];
+ for(const args of [pair.slice(0,2),pair.slice(2),[...pair,'--checkout-url','https://other.test'],[...pair,'--checkout-destination','C:\\other'],['--demo',...pair],['--checkout-url','bad\nurl',...pair.slice(2)],['--checkout-url','--password',...pair.slice(2)],['--checkout-url','https://example.test/repo','--checkout-destination','relative']]) assert.throws(()=>parseOptions(args,path.win32));
+});

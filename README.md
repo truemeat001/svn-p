@@ -310,3 +310,7 @@ python -m compileall -q svn_client tests benchmarks
 - 安装器、打包 `.exe`、签名、升级流程及完整无障碍/高 DPI 交互验收。
 
 后续能力应在精确范围、确认、失败后可核查和回归测试完整的前提下逐步增加，不用自动扩大操作范围来掩盖不支持的 SVN 语义。
+
+### 现代界面检出源码检查点
+
+现代 Web、WinForms/Electron 配套源码新增固定 URL 与新目录的预检/确认检出工作流，默认关闭。详见 [检出工作流](prototypes/svn-desk-web/docs/CHECKOUT_WORKFLOW.md)。本轮未产出新可执行包，旧试用包不含此改动；真实 SVN 和原生 Windows 仍待验收。

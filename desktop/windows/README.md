@@ -137,3 +137,9 @@ Required acceptance on Windows before delivering another portable package:
 The web CSS contains no page-level zoom/transform workaround for this defect, and this patch does not add one. Browser screenshots or Linux Chromium tests are not evidence that Windows native text is repaired.
 
 References: [Microsoft .NET Framework high-DPI setup](https://learn.microsoft.com/en-us/dotnet/desktop/winforms/high-dpi-support-in-windows-forms), [automatic scaling](https://learn.microsoft.com/en-us/dotnet/desktop/winforms/forms/autoscale), [DPI context comparison](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-aredpiawarenesscontextsequal).
+
+## Checkout source checkpoint
+
+Native argument forwarding and the fixed bridge build allowlist now include the paired `--checkout-url URL --checkout-destination ABSOLUTE_PATH` flow. Startup is local-only; the Web dialog must separately preflight and confirm its fixed URL and new/empty target. Success adds a candidate without selecting it. Both `checkout_ops.py` and `checkout_paths.py` must be in a freshly rebuilt bridge. See [scope, recovery, directory guards and pending validation](../../prototypes/svn-desk-web/docs/CHECKOUT_WORKFLOW.md).
+
+No new Windows package has been built for this change. The Windows directory-handle guard and updated C# protocol tests still require actual Windows execution; Linux source tests and input-manifest validation do not establish native compatibility. Existing delivered trial binaries do not include checkout.

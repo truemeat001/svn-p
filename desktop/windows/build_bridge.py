@@ -17,7 +17,7 @@ BACKEND_MODULES = ('backend', 'status_stream', 'discovery', 'workspaces', 'histo
                    'shelves', 'locks', 'fileops', 'file_identity')
 BRIDGE_MODULES = ('desktop_bridge', 'server', 'workspace_bridge', 'file_reads',
                   'property_reads', 'changelist_ops', 'shelf_ops', 'commit_ops',
-                  'commit_diagnostics', 'lock_ops', 'add_ops', 'file_ops')
+                  'commit_diagnostics', 'lock_ops', 'add_ops', 'file_ops', 'checkout_ops', 'checkout_paths')
 ASSETS = ('index.html', 'app.js', 'model.js', 'demo-data.js', 'styles.css', 'favicon.svg')
 
 

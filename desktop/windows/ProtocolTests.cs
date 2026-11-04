@@ -41,6 +41,12 @@ namespace SVNDeskDesktop {
                 delayed.SetResult(Encoding.UTF8.GetBytes("late readiness"));
                 delayedDrain.GetAwaiter().GetResult(); Check(lateTail.Position == lateTail.Length);
                 Check(Protocol.Arguments(new string[0]).Length == 0);
+                Check(Protocol.Arguments(new[] { "--checkout-url", "https://example.test/repo", "--checkout-destination", @"C:\Work\new" }).Length == 4);
+                Reject(delegate { Protocol.Arguments(new[] { "--checkout-url", "https://example.test/repo" }); });
+                Reject(delegate { Protocol.Arguments(new[] { "--checkout-destination", @"C:\Work\new" }); });
+                Reject(delegate { Protocol.Arguments(new[] { "--checkout-url", "bad\nurl", "--checkout-destination", @"C:\Work\new" }); });
+                Reject(delegate { Protocol.Arguments(new[] { "--checkout-url", "https://example.test/repo", "--checkout-url", "https://other.test", "--checkout-destination", @"C:\Work\new" }); });
+
                 Check(Protocol.Arguments(new[] { "--workspace", "space name", "--workspace", "other", "--enable-commits" }).Length == 5);
                 Reject(delegate { Protocol.Arguments(new[] { "--backend-source", "evil" }); });
                 Reject(delegate { Protocol.Arguments(new[] { "--workspace", "--enable-commits" }); });

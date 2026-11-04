@@ -56,3 +56,9 @@ Before broader use, test Windows demo, folder cancel/retry, Unicode paths, 100/1
 - https://www.electronjs.org/docs/latest/tutorial/application-distribution
 - https://www.electronjs.org/docs/latest/tutorial/fuses
 - https://releases.electronjs.org/release/v45.2.2
+
+## Checkout source checkpoint
+
+The source option parser accepts a paired `--checkout-url URL --checkout-destination ABSOLUTE_PATH` and preserves all existing host policies. The matching current Python bridge/Web source provides explicit local review and one-use checkout confirmation; it is off by default. See [checkout workflow and limits](../../prototypes/svn-desk-web/docs/CHECKOUT_WORKFLOW.md).
+
+This does **not** update the historical package contract above. `build.py` still requires the exact 5298602 bridge and pinned older static assets, so its produced package does not include checkout and must not be combined with these new options. A separate reviewed pairing/build update and native Windows/SVN acceptance are required. No new Electron binary was produced for this source checkpoint.

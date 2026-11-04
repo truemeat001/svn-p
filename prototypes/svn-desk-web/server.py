@@ -19,6 +19,9 @@ from workspace_bridge import WorkspaceCatalog, local_path, working_copy_identity
 from file_reads import (FileReadService, StaleRead, UnsupportedComparison,
                         comparison_revisions, history_module, revision)
 
+from checkout_ops import (CheckoutService, checkout_arguments, checkout_requested,
+                          validate_request as validate_checkout_request)
+
 from property_reads import PropertyReadService
 
 from changelist_ops import (ChangelistService, ChangelistUnavailable, MutationUncertain,
@@ -499,11 +502,12 @@ class ReadOnlyAdapter:
 
 class PrototypeServer(ThreadingHTTPServer):
     daemon_threads = True
-    def __init__(self, port=8765, adapter=None, catalog=None):
+    def __init__(self, port=8765, adapter=None, catalog=None, checkout=None):
         super().__init__(("127.0.0.1", port), Handler)
         self.token = secrets.token_urlsafe(32)
         self.adapter = adapter
         self.catalog = catalog
+        self.checkout = checkout
         self.origin = f"http://127.0.0.1:{self.server_port}"
 
 class HeaderDeadlineReader:
@@ -685,6 +689,9 @@ class Handler(BaseHTTPRequestHandler):
         if url is None:
             return
         if url.path.startswith("/api/"):
+            if url.path == "/api/checkout":
+                service = self.server.checkout
+                return self.respond(200, service.describe() if service else {"enabled": False})
             if url.path == "/api/config":
                 if self.server.catalog:
                     return self.respond(200, self.server.catalog.config())
@@ -724,6 +731,7 @@ class Handler(BaseHTTPRequestHandler):
         url = self.validated_url()
         if url is None:
             return
+        checkout_kind = {'/api/checkout-preflight': 'preflight', '/api/checkout-apply': 'apply'}.get(url.path)
         file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history',
                      '/api/file-properties': 'properties'}.get(url.path)
         changelist_kind = {'/api/changelist-preflight': 'preflight', '/api/changelist-apply': 'apply'}.get(url.path)
@@ -732,7 +740,7 @@ class Handler(BaseHTTPRequestHandler):
         lock_kind = {'/api/lock-preflight': 'preflight', '/api/lock-apply': 'apply'}.get(url.path)
         commit_kind = {'/api/commit-preflight': 'preflight', '/api/commit-apply': 'apply'}.get(url.path)
         shelf_kind = {'/api/shelves-list': 'list', '/api/shelf-preflight': 'preflight', '/api/shelf-apply': 'apply'}.get(url.path)
-        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None and shelf_kind is None and commit_kind is None and lock_kind is None and add_kind is None and fileop_kind is None) or self.server.catalog is None:
+        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None and shelf_kind is None and commit_kind is None and lock_kind is None and add_kind is None and fileop_kind is None and checkout_kind is None) or self.server.catalog is None:
             return self.respond(405, {"error": "SVN writes are not implemented."})
         if (self.headers.get_all("Content-Length") is None
                 or len(self.headers.get_all("Content-Length")) != 1
@@ -754,7 +762,9 @@ class Handler(BaseHTTPRequestHandler):
                     obj[key] = value
                 return obj
             data = json.loads(body, object_pairs_hook=strict_object)
-            if fileop_kind:
+            if checkout_kind:
+                validate_checkout_request(checkout_kind, data)
+            elif fileop_kind:
                 validate_fileop_request(fileop_kind, data)
             elif add_kind:
                 validate_add_request(add_kind, data)
@@ -795,6 +805,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {'error': '不支持 BASE → BASE 比较。查看本地修改请选 BASE → WORKING，或使用明确数字修订；未运行比较。'})
         except (ValueError, OSError, RecursionError):
             return self.respond(400, {"error": "只接受明确工作区、当前状态行与受限修订；不接受任意路径、命令或重复字段。"})
+        if checkout_kind:
+            if self.server.checkout is None:
+                return self.respond(403, {'error': '检出未启用。须由本机启动参数固定仓库 URL 与新目录。'})
+            try:
+                return self.respond(200, self.server.checkout.operation(checkout_kind, data))
+            except StaleRead:
+                return self.respond(409, {'error': '检出确认已过期、目标已改变或本次会话已经尝试检出。未重复执行；请核对保留目录。'})
+            except BlockingIOError:
+                return self.respond(409, {'error': '已有工作区操作正在执行，本次未检出。'})
+            except Exception:
+                if checkout_kind == 'apply':
+                    return self.respond(503, {'error': '检出结果未能确认。目标可能已有部分或完整工作副本，全部文件保留；没有重试、覆盖或清理。请用可信 SVN 客户端检查目标和运行中进程，再决定下一步。'})
+                return self.respond(503, {'error': '检出本地预检未通过；没有访问仓库或创建文件。请核对新/空目录、父目录、链接与配套后端。'})
         if fileop_kind:
             try:
                 return self.respond(200, self.server.catalog.file_operation(fileop_kind, data))
@@ -899,6 +922,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.respond(405, {"error": "Cross-origin access is not supported."})
 
+def checkout_for(args, source, catalog):
+    backend, _, _, _ = trusted_modules(source)
+    history = history_module(source)
+    if not history or not reviewed_commit_backend(backend, history):
+        raise ValueError('The paired reviewed checkout backend is required.')
+    return CheckoutService(url=args.checkout_url, destination=args.checkout_destination,
+                           backend=backend, history=history, catalog=catalog, executable=args.svn)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
@@ -914,8 +946,13 @@ def main():
     parser.add_argument("--enable-shelves", action="store_true", help="Opt in to previewed and confirmed exact-file local Shelf backup/restore; no implicit revert/commit")
     parser.add_argument("--shelf-storage", type=Path, help="Optional original-format Shelf directory outside every workspace and authorized scan parent")
     parser.add_argument("--svn", help="Trusted installed native SVN executable")
+    checkout_arguments(parser)
     args = parser.parse_args()
-    authorized = bool(args.workspace or args.scan_parent)
+    try:
+        wants_checkout = checkout_requested(args)
+    except ValueError:
+        parser.error("--checkout-url and --checkout-destination are required together.")
+    authorized = bool(args.workspace or args.scan_parent or wants_checkout)
     if authorized and not args.backend_source:
         parser.error("--workspace/--scan-parent requires --backend-source; demo is never used as a fallback.")
     if (args.backend_source or args.svn or args.settings_file or args.enable_changelists or args.enable_shelves or args.shelf_storage or args.enable_commits or args.enable_locks or args.enable_adds or args.enable_file_ops) and not authorized:
@@ -930,7 +967,8 @@ def main():
                 discovery=discovery, settings=settings, settings_file=args.settings_file,
                 adapter_factory=lambda path: ReadOnlyAdapter(path, args.backend_source, args.svn, enable_changelists=args.enable_changelists, enable_shelves=args.enable_shelves,
                     shelf_storage=args.shelf_storage, enable_commits=args.enable_commits, enable_locks=args.enable_locks, enable_adds=args.enable_adds, enable_file_ops=args.enable_file_ops))
-        server = PrototypeServer(args.port, catalog=catalog)
+        checkout = checkout_for(args, args.backend_source, catalog) if wants_checkout else None
+        server = PrototypeServer(args.port, catalog=catalog, checkout=checkout)
     except (ValueError, OSError, RuntimeError, ImportError):
         parser.exit(1, "Startup failed. Verify authorized directories, preferences path and trusted backend.\n")
     print(f"SVN Desk {('CONFIRMED REPOSITORY LOCKS' if args.enable_locks else 'CONFIRMED REPOSITORY COMMITS' if args.enable_commits else 'CONFIRMED LOCAL SHELVES' if args.enable_shelves else 'CONFIRMED LOCAL CHANGELISTS' if args.enable_changelists else 'CONFIRMED LOCAL ADDS' if args.enable_adds else 'CONFIRMED LOCAL FILE OPERATIONS' if args.enable_file_ops else 'READ-ONLY WORKSPACES') if catalog else 'DEMO'}: {server.origin}", flush=True)

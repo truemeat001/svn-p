@@ -250,6 +250,20 @@ class WorkspaceCatalog:
             self.scans = scans
             return self.describe()
 
+    def _register_checkout(self, path, expected_identity):
+        """Internal successful-checkout handoff, under the catalog operation lock."""
+        path = local_path(path)
+        identity = working_copy_identity(path)
+        if identity != expected_identity:
+            raise ValueError('Checkout changed before registration.')
+        if path in self.roots or any(c.path == path for c in self.candidates.values()):
+            raise ValueError('Checkout target was already registered.')
+        candidate = Candidate(secrets.token_urlsafe(18), path, identity, 'checkout')
+        self.roots = (*self.roots, path)
+        self.root_identities[path] = identity
+        self.candidates[candidate.id] = candidate
+        return candidate
+
     def describe(self):
         current = self.config()
         return {'enabled': True, 'candidates': [c.public() for c in self.candidates.values()],

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "python3 server.py",
-    "test": "node --test tests/folder_counts.test.js tests/row_keyboard.test.js tests/trial_safety.test.js tests/fileops_model.test.js tests/fileops_controller.test.js tests/fileops_review.test.js tests/property_model.test.js tests/property_controller.test.js tests/property_review.test.js tests/add_model.test.js tests/add_controller.test.js tests/add_review.test.js tests/model.test.js tests/shelf_model.test.js tests/commit_model.test.js tests/lock_model.test.js tests/lock_controller.test.js tests/lock_review.test.js tests/context_menu_model.test.js tests/context_menu_controller.test.js tests/context_menu_review.test.js && python3 -m unittest discover -s tests -p 'test_*.py'",
+    "test": "node --test tests/checkout_controller.test.js tests/folder_counts.test.js tests/row_keyboard.test.js tests/trial_safety.test.js tests/fileops_model.test.js tests/fileops_controller.test.js tests/fileops_review.test.js tests/property_model.test.js tests/property_controller.test.js tests/property_review.test.js tests/add_model.test.js tests/add_controller.test.js tests/add_review.test.js tests/model.test.js tests/shelf_model.test.js tests/commit_model.test.js tests/lock_model.test.js tests/lock_controller.test.js tests/lock_review.test.js tests/context_menu_model.test.js tests/context_menu_controller.test.js tests/context_menu_review.test.js && python3 -m unittest discover -s tests -p 'test_*.py'",
     "test:ui": "node tests/browser.test.cjs",
     "tauri": "tauri",
     "test:workspaces:ui": "node tests/workspaces.browser.test.cjs",
@@ -18,7 +18,8 @@
     "test:locks:ui": "node tests/locks.browser.test.cjs",
     "test:adds:ui": "node tests/adds.browser.test.cjs",
     "test:properties:ui": "node tests/properties.browser.test.cjs",
-    "test:file-ops:ui": "node tests/fileops.browser.test.cjs"
+    "test:file-ops:ui": "node tests/fileops.browser.test.cjs",
+    "test:checkout:ui": "node tests/checkout.browser.test.cjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

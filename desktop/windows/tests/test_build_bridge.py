@@ -14,11 +14,13 @@ ROOT = MODULE.parents[2]
 class BuildInputTests(unittest.TestCase):
     def test_fixed_input_allowlist(self):
         files = build.inputs(ROOT)
-        self.assertEqual(len(files), 27)
+        self.assertEqual(len(files), 29)
         self.assertTrue(all(not any(part in {'.git', '.svn', '__pycache__', '.env'} for part in Path(p).parts) for p in files))
         self.assertNotIn('README.md', files)
         self.assertIn('prototypes/svn-desk-web/desktop_bridge.py', files)
         self.assertIn('svn_client/file_identity.py', files)
+        self.assertIn('prototypes/svn-desk-web/checkout_ops.py', files)
+        self.assertIn('prototypes/svn-desk-web/checkout_paths.py', files)
 
     def test_manifest_covers_exact_inputs(self):
         files = build.inputs(ROOT)

@@ -18,20 +18,27 @@ namespace SVNDeskDesktop {
             return remaining.ToArray();
         }
         internal static string[] Arguments(string[] input) {
-            var output = new List<string>(); bool svnSeen = false;
+            var output = new List<string>(); bool svnSeen = false, checkoutUrlSeen = false, checkoutDestinationSeen = false;
             for (int i = 0; i < input.Length; ++i) {
                 string option = input[i];
                 switch (option) {
-                    case "--workspace": case "--scan-parent": case "--svn":
+                    case "--workspace": case "--scan-parent": case "--svn": case "--checkout-destination":
+                        if (option == "--checkout-destination" && checkoutDestinationSeen) throw new ArgumentException("Duplicate checkout destination");
+                        if (option == "--checkout-destination") checkoutDestinationSeen = true;
                         if (option == "--svn" && svnSeen) throw new ArgumentException("Duplicate SVN option");
                         if (option == "--svn") svnSeen = true;
                         if (++i == input.Length || String.IsNullOrWhiteSpace(input[i]) || input[i].StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException("Missing path");
                         output.Add(option); output.Add(Path.GetFullPath(input[i])); break;
+                    case "--checkout-url":
+                        if (checkoutUrlSeen || ++i == input.Length || String.IsNullOrWhiteSpace(input[i]) || input[i].StartsWith("--", StringComparison.Ordinal) || input[i].Length > 4096) throw new ArgumentException("Invalid checkout URL");
+                        foreach (char c in input[i]) if (Char.IsControl(c)) throw new ArgumentException("Invalid checkout URL");
+                        checkoutUrlSeen = true; output.Add(option); output.Add(input[i]); break;
                     case "--enable-changelists": case "--enable-shelves": case "--enable-commits": case "--enable-locks": case "--enable-adds": case "--enable-file-ops":
                         output.Add(option); break;
                     default: throw new ArgumentException("Unsupported option");
                 }
             }
+            if (checkoutUrlSeen != checkoutDestinationSeen) throw new ArgumentException("Checkout URL and destination are required together");
             return output.ToArray();
         }
         // CommandLineToArgvW quoting: no cmd.exe, no shell interpretation.

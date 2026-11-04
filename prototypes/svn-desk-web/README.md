@@ -187,3 +187,7 @@ SVN_DESK_TEST_WORKSPACE=/path/to/test-wc SVN_DESK_BACKEND_SOURCE=/path/to/origin
 下一轮建议先固定一个 Windows WebView2 / Tauri 原生壳验收，然后逐个接入既有安全服务，不为换 UI 重写或弱化 SVN 安全前置条件。
 
 官方资料：[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)、[capabilities](https://v2.tauri.app/security/capabilities/)、[configuration](https://v2.tauri.app/reference/config/)。
+
+## 固定目标检出（源码预览）
+
+新增「检出…」：启动时成对传入 `--checkout-url` 与 `--checkout-destination`，界面本地预检后单次确认，跳过 externals，保留所有失败/部分结果；核实后加入候选但不自动切换。默认关闭。详见 [检出流程、保护和验证限制](docs/CHECKOUT_WORKFLOW.md)。旧试用包与历史 Electron 装配器不包含本能力，需新桥接和 Windows 验收。
