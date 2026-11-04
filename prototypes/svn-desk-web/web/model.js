@@ -226,3 +226,33 @@ export function lockResultSummary(result,{statusRefreshed=false,stale=false}={})
  if(!statusRefreshed||stale)message+=' 本地状态不可用，请显式刷新；已核实的操作结果不会因此撤销。';
  return message+' 不会自动重试或强制抢锁。';
 }
+
+// Add is local scheduling, never an implicit part of commit or directory traversal.
+export function addScopeRows(rows,selected){
+ const files=reviewSelection(rows,selected);
+ if(!files.length||files.length>100||files.length!==selected.size||new Set(files.map(f=>f.id.toLowerCase())).size!==files.length||files.some(f=>f.item!=='unversioned'||!['none','normal'].includes(f.props)||f.changelist||['switched','file_external','tree_conflicted','wc_locked','copied','moved_from','moved_to'].some(k=>f[k])||f.kind&&!['file','unknown'].includes(f.kind)))throw Error('请选择 1–100 个未版本化普通文件；目录、链接和不安全条目不可用。');
+ return files;
+}
+export function validateAddPlan(data,request,rows){
+ const bad=()=>{throw Error('添加预检身份或完整文件范围不匹配，请重新预检。');};
+ if(data?.mode!=='live'||!sameShelfScope(data,request)||data.localOnly!==true||data.autoProps!==false||data.expiresIn!==120||typeof data.planToken!=='string'||!data.planToken||data.planToken.length>64||/[\u0000-\u001f\u007f-\u009f]/u.test(data.planToken)||!Array.isArray(request.ids)||new Set(request.ids).size!==request.ids.length||!Array.isArray(data.files))bad();
+ const files=addScopeRows(rows,new Set(request.ids)),expected=new Map(files.map(f=>[f.id,f.path]));
+ if(data.files.length!==files.length)bad();
+ for(const file of data.files){if(!file||!expected.has(file.id)||file.path!==expected.get(file.id))bad();expected.delete(file.id);}
+ if(expected.size)bad();return data;
+}
+const ADD_WARNINGS={'status-refresh-failed':'本地状态刷新失败','workspace-changed':'工作区发生变化'};
+export function validateAddResult(payload,request,files){
+ const bad=()=>{throw Error('添加操作响应身份、范围或结果无效。');},result=payload?.addResult;
+ if(payload?.mode!=='live'||payload.workspaceId!==request.workspaceId||payload.selectionVersion!==request.selectionVersion||typeof payload.statusRefreshed!=='boolean'||!result||result.action!=='add'||result.outcome!=='verified'||result.verified!==true||result.autoProps!==false||!Array.isArray(result.files)||result.files.some(p=>typeof p!=='string')||JSON.stringify([...result.files].sort())!==JSON.stringify(files.map(f=>f.path).sort())||!Array.isArray(result.warnings)||result.warnings.some(w=>typeof w!=='string'||!Object.hasOwn(ADD_WARNINGS,w))||new Set(result.warnings).size!==result.warnings.length)bad();
+ if(!Array.isArray(payload.rows)||payload.rows.some(r=>!r||typeof r.id!=='string'||typeof r.path!=='string'))bad();
+ if(payload.statusRefreshed){if(typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===request.snapshotToken||result.warnings.length)bad();}
+ else if(payload.snapshotToken!==null||payload.rows.length||!result.warnings.length)bad();
+ return result;
+}
+export function addResultSummary(result,{statusRefreshed=false,stale=false}={}){
+ let message=`已核实添加 ${result.files.length} 个文件到本地版本控制，尚未提交到仓库。`;
+ if(result.warnings.length)message+=` 警告：${result.warnings.map(w=>ADD_WARNINGS[w]).join('；')}。`;
+ if(!statusRefreshed||stale)message+=' 当前文件列表不可用，请显式刷新；已完成的添加不会因此撤销。';
+ return message+' 未启用 auto-props；提交前请核对文件属性和差异。';
+}

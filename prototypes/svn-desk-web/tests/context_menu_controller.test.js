@@ -12,7 +12,7 @@ function harness(){
  const context=vm.createContext({state,$:element,innerWidth:1440,innerHeight:960,esc:model.safeText,fileName:model.fileName,...model,
   render:()=>calls.push(['render']),displayed:()=>[state.rows[0]],readsAvailable:()=>true,changelistsAvailable:()=>true,shelfCreateAvailable:()=>true,
   showDiff:()=>calls.push(['diff',state.focused]),showHistory:()=>calls.push(['history',state.focused]),review:()=>calls.push(['review',[...state.selected]]),
-  openChangelists:()=>calls.push(['changelist',[...state.selected]]),openCreateShelf:()=>calls.push(['shelf',[...state.selected]]),openCommit:operation=>calls.push(['commit',operation,[...state.selected]])});
+  openAdd:()=>calls.push(['add',[...state.selected]]),openChangelists:()=>calls.push(['changelist',[...state.selected]]),openCreateShelf:()=>calls.push(['shelf',[...state.selected]]),openCommit:operation=>calls.push(['commit',operation,[...state.selected]])});
  vm.runInContext(controller,context);
  return {state,calls,element,run:code=>vm.runInContext(code,context),open:(index=0)=>{context.event={preventDefault(){calls.push(['prevent']);},clientX:1420,clientY:940};context.row=state.rows[index];vm.runInContext('openFileMenu(event,row)',context);}};
 }

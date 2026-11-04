@@ -286,3 +286,29 @@ at process-singleton socket creation. No bypass, real SVN/`svnadmin` operation,
 Windows test, new screenshot or native package is claimed. Read
 [FILE_LOCKS.md](FILE_LOCKS.md) for the disposable-repository acceptance checklist
 and remaining safety/atomicity limitations.
+
+## Exact-file local additions · 2026-11-04
+
+Base `4554f2fbe7c602ec2e8c13897df60f5874504634`. Independent default-off
+`--enable-adds` registers only 1–100 selected unversioned ordinary files. It
+never adds parents, recurses, forces ignored targets, or commits. Existing SVN
+backend source is unchanged; the fixed argv explicitly disables auto-props.
+
+- 84 JavaScript tests passed, including model/controller and independent add
+  result-preservation regression.
+- 334 Python tests ran: 332 passed and 2 existing explicit real-SVN tests skipped.
+- 40 add service/HTTP/catalog/independent tests cover exact scope, root/ancestor
+  safety, content changes with restored mtime, links and alias refusal, strict
+  input, TTL expiry, cross-operation invalidation and partial/unknown outcomes.
+- Self-review fixed equivalent XML attribute order changing parent fingerprints.
+  Independent review found and verified the fix for a frontend snapshot error
+  overwriting an already validated successful add with an unknown outcome.
+- Syntax checks and standalone rebuild passed. No original backend source changed.
+
+All executed tests use synthetic temporary directories, mock SVN and loopback
+HTTP, plus DOM adapters for the actual controller code. `npm run test:adds:ui`
+was attempted with installed Chromium, but the browser aborted at startup with
+`socket() failed: Operation not permitted`; no browser assertions ran and no
+bypass was attempted. No real SVN/`svnadmin`, Windows/native package or new
+screenshot acceptance is claimed. See [LOCAL_ADDS.md](LOCAL_ADDS.md) for limits
+and the disposable-repository Windows acceptance sequence.
