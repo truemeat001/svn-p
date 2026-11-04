@@ -2,9 +2,10 @@
 import base64
 from dataclasses import asdict
 import os
-from pathlib import Path, PosixPath
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import quote
@@ -78,7 +79,8 @@ class PropertyReadTests(unittest.TestCase):
         for call in self.run.call_args_list:
             argv = call.args[0]
             prefix = ['/trusted/svn', 'proplist', '--non-interactive', '--no-auth-cache', '--xml', '--verbose', '--depth', 'empty']
-            self.assertIn(argv, [prefix + ['--', 'src/a.txt'], prefix + ['--revision', 'BASE', '--', 'src/a.txt']])
+            target = str(Path('src/a.txt'))
+            self.assertIn(argv, [prefix + ['--', target], prefix + ['--revision', 'BASE', '--', target]])
             self.assertEqual(call.kwargs['stdout_limit'], XML_BYTES)
             self.assertEqual(call.kwargs['cwd'], self.root)
         self.client.status.assert_called_with(['src/a.txt'], verbose=True)
@@ -90,7 +92,7 @@ class PropertyReadTests(unittest.TestCase):
             self.entry = self.backend.StatusEntry(path, 'normal')
             result = self.read()
             self.assertEqual(result['path'], path)
-            self.assertEqual(self.run.call_args.args[0][-1], path + ('@' if '@' in path else ''))
+            self.assertEqual(self.run.call_args.args[0][-1], str(Path(path)) + ('@' if '@' in path else ''))
             (self.root / path).rename(original)
 
     def test_invalid_paths_and_absent_file_never_read_properties(self):
@@ -200,11 +202,21 @@ class PropertyReadTests(unittest.TestCase):
         path = self.root / 'src/a.txt'
         path.unlink(); path.mkdir()
         with self.assertRaises(ValueError): self.read()
-        path.rmdir(); path.symlink_to(self.root / 'src')
-        with self.assertRaises(ValueError): self.read()
-        path.unlink(); path.write_text('x'); os.link(path, self.root / 'hardlink')
+        path.rmdir(); path.write_text('x'); os.link(path, self.root / 'hardlink')
         with self.assertRaises(ValueError): self.read()
         (self.root / 'hardlink').unlink(); (self.root / 'src/.svn').mkdir()
+        with self.assertRaises(ValueError): self.read()
+        self.run.assert_not_called()
+
+    def test_symlink_rejected(self):
+        path = self.root / 'src/a.txt'
+        path.unlink()
+        try:
+            path.symlink_to(self.root / 'src', target_is_directory=True)
+        except OSError as exc:
+            if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+                self.skipTest('Windows account lacks symlink creation privilege (WinError 1314).')
+            raise
         with self.assertRaises(ValueError): self.read()
         self.run.assert_not_called()
 
@@ -241,17 +253,17 @@ class PropertyParserTests(unittest.TestCase):
                 _properties(raw, Path('src/a.txt'))
 
     def test_windows_separator_only_xml_equivalence(self):
-        relative = PosixPath('src/a.txt')
-        # Preserve this host's concrete path type while exercising the Windows
-        # separator branch in the shared strict_relative_path implementation.
-        with patch('file_reads.os.name', 'nt'), patch('file_reads.Path', PosixPath):
+        relative = PurePosixPath('src/a.txt')
+        # Replace only file_reads' module reference, never the process-wide
+        # os.name used by pathlib. Pure paths work on both Windows and POSIX.
+        with patch('file_reads.os', SimpleNamespace(name='nt')), patch('file_reads.Path', PurePosixPath):
             for name in ['src/a.txt', 'src\\a.txt']:
                 self.assertEqual(_properties(props(name, {'x': b'y'}), relative), {'x': b'y'})
             for name in ['SRC/a.txt', './src/a.txt', 'src/../src/a.txt',
                          'C:\\src\\a.txt', '/src/a.txt', 'src//a.txt']:
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     _properties(props(name, {}), relative)
-        if os.name != 'nt':
+        with patch('file_reads.os', SimpleNamespace(name='posix')), patch('file_reads.Path', PurePosixPath):
             with self.assertRaises(ValueError):
                 _properties(props('src\\a.txt', {}), relative)
 

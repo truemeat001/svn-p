@@ -346,3 +346,23 @@ startup at socket creation. The denied launch was not retried or bypassed. Real
 SVN, Windows/native and browser acceptance remain pending for this slice; the
 prior Windows add result above does not validate these new property reads.
 See [FILE_PROPERTIES.md](FILE_PROPERTIES.md) for exact limits and acceptance steps.
+
+## Property Windows test compatibility repair · 2026-11-04
+
+Base `3a4cb076eb270fa99f5ef02d3b55d7974da78466`. The original Windows
+aggregate reported 2 failures and 2 errors in property test fixtures: native
+path expectations, unsupported concrete PosixPath construction, and missing
+symbolic-link privilege. This is not recorded as a passing full suite.
+
+The patch isolates platform simulation and the symlink test, preserves directory,
+hardlink and nested-WC coverage, and skips only explicit Windows error 1314.
+Production property/backend/UI code is unchanged. The previously reported
+corrected targeted Windows check (4 passed, 1 skipped), 78 real-SVN behaviors
+and one XML audit recheck do not replace a full rerun of this exact patch.
+
+Isolated Linux validation against the original checkpoint plus this test patch:
+104 JavaScript passed; 381 Python ran, 379 passed and 2 existing explicit real-SVN
+tests skipped. Focused property tests: 23 passed. Independent review confirmed
+only Windows error 1314 is skipped; all other simulated link errors propagate.
+Windows full aggregate, GUI and native packaging acceptance remain pending.
+See [PROPERTY_WINDOWS_TEST_FIX.md](PROPERTY_WINDOWS_TEST_FIX.md).
