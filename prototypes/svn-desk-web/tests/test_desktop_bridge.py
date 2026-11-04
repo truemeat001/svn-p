@@ -219,6 +219,7 @@ class DesktopProcessTests(unittest.TestCase):
 
 
 class DesktopDrainTests(unittest.TestCase):
+    @patch('server.REQUEST_HEADER_SECONDS', .1)
     def test_close_waits_for_accepted_request_instead_of_abandoning_it(self):
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         class Adapter:
@@ -251,6 +252,8 @@ class DesktopDrainTests(unittest.TestCase):
             while not server._draining and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertTrue(server._draining)
+            # Accepted backend work may outlast the header budget. It must be
+            # drained, never terminated by the pre-dispatch connection limit.
             service.join(0.2)
             self.assertTrue(service.is_alive(), 'Close must wait for the accepted operation.')
             self.assertFalse(finished.is_set())

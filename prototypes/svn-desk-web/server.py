@@ -43,6 +43,7 @@ ASSETS = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
 MIMES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
 MAX_ROWS = 50000
 MAX_REQUEST_BODY_BYTES = 262144
+REQUEST_HEADER_SECONDS = 5.0
 REQUEST_BODY_SECONDS = 5.0
 REQUEST_BODY_CHUNK = 64 * 1024
 
@@ -505,9 +506,80 @@ class PrototypeServer(ThreadingHTTPServer):
         self.catalog = catalog
         self.origin = f"http://127.0.0.1:{self.server_port}"
 
+class HeaderDeadlineReader:
+    """Bound the entire request-line/header phase, not each arriving byte.
+
+    BufferedReader.readline can restart a socket's idle timeout after each
+    partial read. Peek once per iteration instead, then consume only available
+    bytes through the first newline. No body bytes are consumed or stashed in
+    a second buffer; the existing bounded body reader keeps the same stream.
+    The stdlib parser still owns its request-line, header-line and count limits.
+    """
+    def __init__(self, source, connection, seconds, idle_timeout):
+        self.source = source
+        self.connection = connection
+        self.deadline = time.monotonic() + seconds
+        self.idle_timeout = idle_timeout
+        self.headers_finished = False
+
+    def _remaining(self):
+        seconds = self.deadline - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError('Request headers exceeded the total deadline.')
+        return seconds
+
+    def readline(self, limit=-1):
+        if self.headers_finished:
+            return self.source.readline(limit)
+        chunks, size = [], 0
+        while limit < 0 or size < limit:
+            self.connection.settimeout(min(self.idle_timeout, self._remaining()))
+            available = self.source.peek(1)  # At most one underlying socket read.
+            self._remaining()  # Even a successful late read cannot extend the budget.
+            if not available:
+                break
+            take = len(available) if limit < 0 else min(len(available), limit - size)
+            newline = available.find(b'\n', 0, take)
+            if newline >= 0:
+                take = newline + 1
+            chunk = self.source.read1(take)  # Already buffered; no read beyond the line.
+            self._remaining()
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if chunk.endswith(b'\n'):
+                break
+        return b''.join(chunks)
+
+    def read1(self, size=-1):
+        return self.source.read1(size)
+
+    def finish_headers(self):
+        self.headers_finished = True
+        self.connection.settimeout(self.idle_timeout)
+
+
 class Handler(BaseHTTPRequestHandler):
     server: PrototypeServer
-    timeout = 5.0  # Also bound idle request-line/header reads; body has a total deadline.
+    timeout = 5.0  # Idle bound; header and body phases have separate total deadlines.
+
+    def handle_one_request(self):
+        source = self.rfile
+        self.rfile = HeaderDeadlineReader(source, self.connection, REQUEST_HEADER_SECONDS, self.timeout)
+        try:
+            # Preserve stdlib parsing/error handling; a header timeout closes the
+            # connection before do_* can dispatch any workspace/SVN operation.
+            super().handle_one_request()
+        finally:
+            self.rfile = source
+
+    def parse_request(self):
+        try:
+            return super().parse_request()
+        finally:
+            # Do not turn the header deadline into a timeout for accepted work.
+            self.rfile.finish_headers()
 
     def _request_body_size(self, *, optional=False):
         lengths = self.headers.get_all('Content-Length')

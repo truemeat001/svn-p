@@ -1,6 +1,9 @@
 # Bounded HTTP rejection and Windows fixture repair
 
 Base checkpoint: `ad382ca9bab4a098a5c09b9e48507f6e0278ccb4`.
+The later [HTTP header deadline repair](HTTP_HEADER_DEADLINE.md) adds a total
+request-line/header limit; the uncapped-header note below describes this older
+body-drain checkpoint only.
 The subsequent Windows real-SVN report passed the Shelf core workflow but found
 an HTTP transport defect and two portability errors in the tests. This follow-up
 is a repair checkpoint, **not Windows acceptance** until it is retested there.

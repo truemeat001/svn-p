@@ -1,3 +1,35 @@
+# HTTP header deadline repair · 2026-11-04
+
+Base: `81af9ce4180074fcc53883e3dc21a6d108069a83`. The complete starting tree's
+209 file blobs were verified against GitHub before this repair. See
+[HTTP_HEADER_DEADLINE.md](HTTP_HEADER_DEADLINE.md) for the defect, contract and
+remaining acceptance gates. Earlier validation sections below describe only
+their own checkpoints.
+
+- Linux Python 3.12.14 / Node 24.22.1: Web aggregate **164 Node tests passed**;
+  **536 Python tests ran, 534 passed and 2 real-SVN tests skipped**.
+- Paired original backend: **975 tests ran, 929 passed and 46 skipped**;
+  benchmark tool tests **13 passed**. No backend source changed.
+- Windows packaging source checks: **9 passed**, all 27 fixed build inputs
+  validated, and the source-mode desktop bridge self-check passed. Python
+  compileall passed. This did not build a Windows executable.
+- Independent review: **47 focused tests passed** (9 header, 13 HTTP socket,
+  25 desktop bridge). The original trickle reproduction blocked old shutdown
+  and completed with the fixed total budget, without backend dispatch.
+- The new lifecycle regression deliberately fails under the original stdlib
+  handler methods for both slow request-line and slow-header cases. An independent
+  3,000-case buffered-reader comparison preserved exact lines and unread tails.
+- Accepted-operation drain still waits after the header budget has elapsed;
+  no force-kill, daemon handler, automatic retry or rollback claim was added.
+
+No real user working copy was opened. There is no SVN/svnadmin or Windows runtime
+in this verification environment. Native WebView2 GUI, Windows TCP scheduling,
+a newly frozen bridge/package and real SVN remain unverified for this repair.
+The already-delivered 81af9ce Windows preview does not contain these source changes.
+Modern-UI update, revert, checkout and conflict-resolution parity remain unfinished.
+
+---
+
 # Confirmed local changelist checkpoint · 2026-11-03
 
 Current opt-in local label workflow, safety boundaries and new verification are in [LOCAL_CHANGELISTS.md](LOCAL_CHANGELISTS.md). This supersedes the older "no SVN write endpoints" statements below only when `--enable-changelists` is explicitly enabled. Default startup remains read-only; no commit/revert/Shelf APIs exist. Earlier counts describe their historical checkpoints.
