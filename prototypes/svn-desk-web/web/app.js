@@ -474,7 +474,7 @@ async function openCheckout(){
   if(config.enabled!==true){$('modal-content').innerHTML='<p>检出默认关闭。请在启动可信后端时指定唯一仓库 URL 和新目录目标，再重新打开此窗口。网页不接受任意 URL 或路径。</p>';return;}
   if(!checkoutIdentity(config)||!['ready','completed','uncertain'].includes(config.state))throw Error('检出配置无效。');
   checkoutConfig={...config};
-  $('modal-content').innerHTML=`<p class="workspace-warning">只检出启动时授权的固定目标。确认执行才会访问仓库并创建本地工作副本；跳过 externals，不保存凭据。关闭窗口不等于取消已发送的请求。</p><div class="review-file"><strong>仓库 URL</strong><span>${esc(config.url)}</span></div><div class="review-file"><strong>新工作副本目录</strong><span>${esc(config.destination)}</span></div><p>预检只核对本地目标，不验证远程仓库或登录。每个会话只允许一次检出尝试；结果未知时不要重试或删除目录，请用可信 SVN 客户端核对。</p><button id="checkout-preflight" class="subtle-button" disabled>预检固定检出目标</button><p id="checkout-result" role="status">尚未执行检出。</p>`;
+  $('modal-content').innerHTML=`<p class="workspace-warning">只检出启动时授权的固定目标。确认执行才会访问仓库并创建本地工作副本；跳过 externals，不保存凭据。关闭窗口不等于取消已发送的请求。</p><div class="review-file"><strong>仓库 URL</strong><span>${esc(config.url)}</span></div><div class="review-file"><strong>新工作副本目录</strong><span>${esc(config.destination)}</span></div><p>本轮仅检出执行时 HEAD，不支持指定修订；本地预检不固定远程版本，也不验证仓库或登录。每个会话只允许一次检出尝试；结果未知时不要重试或删除目录，请用可信 SVN 客户端核对。</p><button id="checkout-preflight" class="subtle-button" disabled>预检固定检出目标</button><p id="checkout-result" role="status">尚未执行检出。</p>`;
   if(config.state==='completed'){
    checkoutAttempted=true;if(!checkoutVerified(config.result,config))throw Error('已执行检出，但返回的核实结果无效。');preserveCheckoutResult(checkoutSuccess(config.result));
   }else if(config.state==='uncertain'||checkoutAttempted){checkoutAttempted=true;preserveCheckoutResult('检出结果未知，目标可能已经写入。本会话禁止再次检出；请用可信 SVN 客户端检查目标目录。');}

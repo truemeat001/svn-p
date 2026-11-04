@@ -77,9 +77,12 @@ def _windows_directory(path, expected):
     handles = []
     try:
         for _, _, component in expected:
-            # FILE_READ_ATTRIBUTES; FILE_SHARE_READ only. In particular neither
-            # delete/rename nor reparse-point modification may race child chdir.
-            handle = create(component, 0x80, 0x1, None, 3, 0x02000000 | 0x00200000, None)
+            # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES; FILE_SHARE_READ only.
+            # Attribute-only (0x80) opens do NOT enforce the intended Windows
+            # delete/rename sharing exclusion. Directory read access (0x1)
+            # must be present. Fail closed; never retry with attribute-only
+            # access or broaden sharing when this open is denied.
+            handle = create(component, 0x81, 0x1, None, 3, 0x02000000 | 0x00200000, None)
             if handle in (None, ctypes.c_void_p(-1).value):
                 raise OSError('Could not retain safe checkout directory handles.')
             handles.append(handle)

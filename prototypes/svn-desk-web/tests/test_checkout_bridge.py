@@ -303,7 +303,19 @@ class CheckoutTests(unittest.TestCase):
             with _windows_directory(self.dest,expected) as cwd:self.assertEqual(cwd,self.dest)
         self.assertEqual(create.call_count,len(expected));self.assertEqual(close.call_count,len(expected))
         for call in create.call_args_list:
-            self.assertEqual(call.args[1:3],(0x80,0x1));self.assertEqual(call.args[5],0x02200000)
+            self.assertEqual(call.args[1:3],(0x81,0x1));self.assertEqual(call.args[5],0x02200000)
+
+    def test_windows_directory_open_failure_never_falls_back_or_leaks_handles(self):
+        import ctypes
+        from checkout_paths import _windows_directory
+        self.dest.mkdir();expected=directory_identity(self.dest)
+        for failure in [None,ctypes.c_void_p(-1).value]:
+            create=Mock(side_effect=[1,failure]);close=Mock(return_value=True)
+            kernel=Mock(CreateFileW=create,CloseHandle=close)
+            with patch.object(ctypes,'WinDLL',return_value=kernel,create=True),self.assertRaises(OSError):
+                with _windows_directory(self.dest,expected):self.fail('Unsafe guard admitted execution')
+            self.assertEqual(create.call_count,2);close.assert_called_once_with(1)
+            for call in create.call_args_list:self.assertEqual(call.args[1:3],(0x81,0x1))
 
     def test_failed_directory_anchor_never_launches_and_preserves_target(self):
         with patch('checkout_ops.pinned_directory',side_effect=OSError('unsupported')):
