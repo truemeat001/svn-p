@@ -8,6 +8,15 @@ using System.Web.Script.Serialization;
 namespace SVNDeskDesktop {
     internal static class Protocol {
         internal const int MaximumHandshakeBytes = 4096;
+        internal static string[] NativeArguments(string[] input, out string profileRoot) {
+            profileRoot = null; var remaining = new List<string>();
+            for (int i = 0; i < input.Length; ++i) {
+                if (input[i] != "--profile-root") { remaining.Add(input[i]); continue; }
+                if (profileRoot != null || ++i == input.Length) throw new ArgumentException("Duplicate or missing profile root.");
+                profileRoot = ProfilePolicy.Syntax(input[i]);
+            }
+            return remaining.ToArray();
+        }
         internal static string[] Arguments(string[] input) {
             var output = new List<string>(); bool svnSeen = false;
             for (int i = 0; i < input.Length; ++i) {

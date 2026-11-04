@@ -26,6 +26,8 @@ namespace SVNDeskDesktop {
         private Uri origin;
         private bool closing, closeAfterDrain, exited, starting, started;
         private string profileDirectory;
+        private string explicitProfileRoot;
+        private ProfilePolicy profilePolicy;
 
         internal DeskWindow(string[] args) {
             launchArgs = args;
@@ -36,7 +38,7 @@ namespace SVNDeskDesktop {
             detail.Font = new Font("Segoe UI",12); detail.ForeColor = Color.FromArgb(82,97,122); detail.Dock = DockStyle.Top; detail.Height = 160;
             choices.Dock = DockStyle.Top; choices.Height = 70;
             status.Controls.Add(choices); status.Controls.Add(detail); status.Controls.Add(heading); Controls.Add(status);
-            FormClosing += Closing; Shown += Open;
+            FormClosing += OnClosingRequested; Shown += Open;
         }
         private void ShowStatus(string title, string text) {
             // Disposing the WebView removes stale controls and in-flight page scripting.
@@ -45,7 +47,13 @@ namespace SVNDeskDesktop {
             choices.Visible = false;
         }
         private async void Open(object sender, EventArgs e) {
-            if (launchArgs.Length > 0) { await Start(launchArgs); return; }
+            string[] bridgeArgs;
+            try {
+                bridgeArgs = Protocol.NativeArguments(launchArgs, out explicitProfileRoot);
+                Protocol.Arguments(bridgeArgs);
+                if (explicitProfileRoot != null) ProfilePolicy.ValidateFresh(explicitProfileRoot);
+            } catch { ShowStatus("Check the launch options", "The native profile root must be a new local directory with an existing safe parent, outside working copies. No service or browser profile was started."); return; }
+            if (bridgeArgs.Length > 0) { await Start(bridgeArgs); return; }
             heading.Text = "A clearer view of your working copy";
             detail.Text = "Choose an existing SVN working-copy folder to open it read-only, or explore the demo.\nWrite features remain off unless explicitly enabled with launch options.";
             choices.Visible = true;
@@ -66,6 +74,10 @@ namespace SVNDeskDesktop {
             catch { starting = false; ShowStatus("Check the launch options", "Only documented workspace paths, an SVN executable path, and feature flags are accepted. No local service was started."); return; }
             ShowStatus("Opening your workspace", "Starting the packaged local service. Your working copy stays on this computer.");
             try {
+                if (explicitProfileRoot != null) {
+                    profilePolicy = ProfilePolicy.Create(explicitProfileRoot);
+                    profileDirectory = profilePolicy.ProfileDirectory;
+                }
                 string executable = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Bridge", "SVNDeskBridge.exe");
                 if (!File.Exists(executable)) throw new FileNotFoundException();
                 var info = new ProcessStartInfo(executable, Protocol.CommandLine(validated)) {
@@ -86,11 +98,13 @@ namespace SVNDeskDesktop {
                 if (await Task.WhenAny(handshake, Task.Delay(30000)) != handshake) throw new TimeoutException();
                 origin = Protocol.ReadyOrigin(await handshake, bridge.Id);
                 if (closing || exited || bridge.HasExited) { if (bridge.HasExited) BridgeExited(); return; }
-                profileDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SVNDesk", "WebView2", Guid.NewGuid().ToString("N"));
+                if (profilePolicy != null) profilePolicy.Recheck();
+                else profileDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SVNDesk", "WebView2", Guid.NewGuid().ToString("N"));
                 view = new WebView2 { Dock = DockStyle.Fill, Visible = false, AllowExternalDrop = false };
                 Controls.Add(view);
                 // Process-local only: never inherit a real browser profile or debug switches.
                 foreach (string variable in new[] { "WEBVIEW2_USER_DATA_FOLDER", "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE", "WEBVIEW2_CHANNEL_SEARCH_KIND", "WEBVIEW2_RELEASE_CHANNELS", "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER" }) Environment.SetEnvironmentVariable(variable, null, EnvironmentVariableTarget.Process);
+                if (profilePolicy != null) profilePolicy.Recheck();
                 var environment = await CoreWebView2Environment.CreateAsync(null, profileDirectory);
                 if (closing || exited || view == null) return;
                 await view.EnsureCoreWebView2Async(environment);
@@ -124,7 +138,7 @@ namespace SVNDeskDesktop {
             try { byte[] buffer = new byte[4096]; while (await stream.ReadAsync(buffer,0,buffer.Length).ConfigureAwait(false) != 0) {} }
             catch (IOException) {} catch (ObjectDisposedException) {}
         }
-        private void Closing(object sender, FormClosingEventArgs e) {
+        private void OnClosingRequested(object sender, FormClosingEventArgs e) {
             if (!started || exited || (bridge != null && bridge.HasExited)) return;
             e.Cancel = true;
             if (!closing) {
@@ -150,6 +164,7 @@ namespace SVNDeskDesktop {
             if (disposing) {
                 if (view != null) view.Dispose();
                 if (bridge != null) { try { bridge.StandardInput.Close(); } catch (IOException) {} catch (InvalidOperationException) {} bridge.Dispose(); }
+                if (profilePolicy != null) profilePolicy.Dispose();
                 // WebView2 may retain files briefly. Leave its cache rather than broad cleanup/retries.
             }
             base.Dispose(disposing);

@@ -88,7 +88,7 @@
   "tests/test_commit_xml.py": "04e8207b1335acdd6e637ce9e13f4af8840894dd67b3eda4e26e0738b3bde563",
   "tests/test_commit_xml_review.py": "e924ff6175f94c2528fbdb90cf35f4ff9cb5387b03d15384956fe63725a82ce0",
   "tests/test_commits.py": "f6dd23b3bc82d962b9b3307a51d8a06750bbfaf0111c8d908ba583ba20d4d79f",
-  "tests/test_desktop_bridge.py": "db225d5a57f3ab41d39997301b5b1ade784cf1fcc32d43fdde08681f2bf6e246",
+  "tests/test_desktop_bridge.py": "b2c85531f895519b8e39ff36817619dfb1f3973171dc193c529d43c6abb0b598",
   "tests/test_file_ops.py": "f9bedcbd8d61be1b8a0aaee364fb46c23c4dea148543437b6252b7ce46324f04",
   "tests/test_file_reads.py": "efd173afa8d5183d584ccc3e3db09d3a0a1a8f9f49fe316921cf779bc9b1498e",
   "tests/test_fileops_bridge.py": "935b14f44196602dcce179decbe674a53158e7be57c76346da59d20eaaf58840",

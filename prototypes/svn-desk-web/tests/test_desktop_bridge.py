@@ -16,6 +16,40 @@ sys.path.insert(0, str(WEB))
 import desktop_bridge as desktop
 
 
+def direct_python():
+    """Keep PID checks strict while avoiding Windows venv's redirector process.
+
+    The subprocess fixture uses only the standard library and fixed repo source.
+    Other tests still execute in their selected venv. A missing base executable
+    is a test failure, not permission to accept an unverified readiness PID.
+    """
+    if sys.platform == 'win32' and sys.prefix != sys.base_prefix:
+        executable = getattr(sys, '_base_executable', None)
+        if not executable or not Path(executable).is_absolute() or not Path(executable).is_file():
+            raise RuntimeError('Windows source-process tests require the direct base Python executable.')
+        return executable
+    return sys.executable
+
+
+class DesktopProcessFixtureTests(unittest.TestCase):
+    def test_windows_venv_uses_direct_base_interpreter(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            executable = str(Path(directory) / 'python.exe'); Path(executable).write_bytes(b'fixture')
+            with patch.object(sys, 'platform', 'win32'), patch.object(sys, 'prefix', 'venv'), patch.object(sys, 'base_prefix', 'base'), patch.object(sys, '_base_executable', executable, create=True):
+                self.assertEqual(direct_python(), executable)
+
+    def test_missing_windows_base_executable_is_a_failure(self):
+        with patch.object(sys, 'platform', 'win32'), patch.object(sys, 'prefix', 'venv'), patch.object(sys, 'base_prefix', 'base'), patch.object(sys, '_base_executable', None, create=True), self.assertRaises(RuntimeError):
+            direct_python()
+
+    def test_non_venv_keeps_current_executable(self):
+        with patch.object(sys, 'platform', 'win32'), patch.object(sys, 'prefix', 'base'), patch.object(sys, 'base_prefix', 'base'):
+            self.assertEqual(direct_python(), sys.executable)
+        with patch.object(sys, 'platform', 'linux'), patch.object(sys, 'prefix', 'venv'), patch.object(sys, 'base_prefix', 'base'):
+            self.assertEqual(direct_python(), sys.executable)
+
+
 class DesktopConfigurationTests(unittest.TestCase):
     def args(self, *args):
         return desktop.parser().parse_args(list(args))
@@ -123,7 +157,7 @@ class DesktopConfigurationTests(unittest.TestCase):
 
 class DesktopProcessTests(unittest.TestCase):
     def start(self):
-        proc = subprocess.Popen([sys.executable, str(WEB / 'desktop_bridge.py')], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([direct_python(), str(WEB / 'desktop_bridge.py')], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.cleanup, proc)
         result = queue.Queue()
@@ -178,7 +212,7 @@ class DesktopProcessTests(unittest.TestCase):
         self.assertEqual(second.communicate('shutdown\n', timeout=5), ('', ''))
 
     def test_self_check_is_source_only_no_listener_or_svn(self):
-        completed = subprocess.run([sys.executable, str(WEB / 'desktop_bridge.py'), '--self-check'],
+        completed = subprocess.run([direct_python(), str(WEB / 'desktop_bridge.py'), '--self-check'],
                                    capture_output=True, text=True, timeout=5)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout), {'protocol': desktop.PROTOCOL, 'status': 'ok', 'backendVerified': True})

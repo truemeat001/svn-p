@@ -9,6 +9,12 @@ namespace SVNDeskDesktop {
         private static byte[] Ready(string origin, int pid) { return Encoding.UTF8.GetBytes("{\"protocol\":\"svn-desk-desktop/1\",\"origin\":\"" + origin + "\",\"pid\":" + pid + "}"); }
         public static int Main() {
             try {
+                string profile;
+                Check(Protocol.NativeArguments(new[] { "--profile-root", @"C:\isolated\fresh" }, out profile).Length == 0 && profile == @"C:\isolated\fresh");
+                Check(Protocol.NativeArguments(new[] { "--profile-root", @"C:\isolated\fresh", "--workspace", "sample" }, out profile).Length == 2);
+                Reject(delegate { string ignored; Protocol.NativeArguments(new[] { "--profile-root" }, out ignored); });
+                Reject(delegate { string ignored; Protocol.NativeArguments(new[] { "--profile-root", @"C:\one", "--profile-root", @"C:\two" }, out ignored); });
+                foreach (string invalid in new[] { "relative", @"C:relative", @"\rooted", @"\\server\share\new", @"\\?\C:\new", @"\\.\C:\new", @"C:\parent\..\new", @"C:\parent\new.", @"C:\parent\NUL", @"C:\parent\.git", @"C:\parent\x:y", @"C:\parent\" }) Reject(delegate { ProfilePolicy.Syntax(invalid); });
                 Uri own = Protocol.ReadyOrigin(Ready("http://127.0.0.1:49152", 7), 7);
                 Check(Protocol.SameOrigin("http://127.0.0.1:49152/path", own));
                 foreach (string bad in new[] { "http://localhost:49152", "http://127.1:49152", "https://127.0.0.1:49152", "http://127.0.0.1", "http://127.0.0.1:0", "http://127.0.0.1:49152/", "http://127.0.0.1:49152/path", "http://user@127.0.0.1:49152", "http://127.0.0.1:49152?x" }) Reject(delegate { Protocol.ReadyOrigin(Ready(bad,7),7); });

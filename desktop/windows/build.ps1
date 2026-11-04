@@ -47,13 +47,19 @@ function Invoke-Compiler([string]$Name, [string[]]$Arguments) {
     $output | Write-Output
     if ($code -ne 0) { throw "$Name compilation failed; see diagnostics." }
 }
-Invoke-Compiler 'ProtocolTests' ($common + @('/target:exe',"/out:$diag\ProtocolTests.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProtocolTests.cs"))
+Invoke-Compiler 'ProtocolTests' ($common + @('/target:exe',"/out:$diag\ProtocolTests.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\ProtocolTests.cs"))
 $testOutput = & "$diag\ProtocolTests.exe" 2>&1
 $testExit = $LASTEXITCODE
 $testOutput | Set-Content -LiteralPath "$diag\ProtocolTests.log" -Encoding UTF8
 $testOutput | Write-Output
 if ($testExit -ne 0) { throw 'Protocol checks failed' }
-Invoke-Compiler 'SVNDesk' ($common + @('/target:winexe','/r:System.Drawing.dll','/r:System.Windows.Forms.dll',"/r:$core","/r:$forms","/out:$out\SVNDesk.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\Program.cs"))
+Invoke-Compiler 'ProfilePolicyTests' ($common + @('/target:exe',"/out:$diag\ProfilePolicyTests.exe","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\ProfilePolicyTests.cs"))
+$profileOutput = & "$diag\ProfilePolicyTests.exe" $diag 2>&1
+$profileExit = $LASTEXITCODE
+$profileOutput | Set-Content -LiteralPath "$diag\ProfilePolicyTests.log" -Encoding UTF8
+$profileOutput | Write-Output
+if ($profileExit -ne 0) { throw 'Windows profile-policy checks failed' }
+Invoke-Compiler 'SVNDesk' ($common + @('/target:winexe','/r:System.Drawing.dll','/r:System.Windows.Forms.dll',"/r:$core","/r:$forms","/out:$out\SVNDesk.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs"))
 foreach ($file in @($core,$forms,$loader)) { Copy-Item -LiteralPath $file -Destination $out }
 Copy-Item -LiteralPath "$PSScriptRoot\SVNDesk.exe.config" -Destination $out
 $licenseOut = Join-Path $out 'Licenses'
@@ -65,8 +71,8 @@ foreach ($file in ($licenseInputs + $noticeInputs)) {
     $legalOutputs += $destination
 }
 $hashes = @()
-foreach ($file in @($compiler,$nuspecPath,"$PSScriptRoot\Protocol.cs","$PSScriptRoot\Program.cs","$PSScriptRoot\ProtocolTests.cs","$PSScriptRoot\build.ps1") + @(Get-ChildItem -File -LiteralPath $out | ForEach-Object FullName) + $legalOutputs) {
+foreach ($file in @($compiler,$nuspecPath,"$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs","$PSScriptRoot\ProtocolTests.cs","$PSScriptRoot\ProfilePolicyTests.cs","$PSScriptRoot\build.ps1") + @(Get-ChildItem -File -LiteralPath $out | ForEach-Object FullName) + $legalOutputs) {
     $hashes += [ordered]@{ name = [IO.Path]::GetFileName($file); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() }
 }
-[ordered]@{ schema = 'svn-desk-native-build/1'; utc = [DateTime]::UtcNow.ToString('o'); architecture = 'x64'; compilerVersion = (Get-Item $compiler).VersionInfo.FileVersion; webView2Package = "$id/$version"; protocolTests = 'passed'; nativeGuiTest = 'not_run'; separateWebView2NoticeAbsent = $missingNotices; redistributedLegalFiles = @($legalOutputs | ForEach-Object { 'Licenses/' + [IO.Path]::GetFileName($_) }); hashes = $hashes } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$diag\build-manifest.json" -Encoding UTF8
+[ordered]@{ schema = 'svn-desk-native-build/1'; utc = [DateTime]::UtcNow.ToString('o'); architecture = 'x64'; compilerVersion = (Get-Item $compiler).VersionInfo.FileVersion; webView2Package = "$id/$version"; protocolTests = 'passed'; profilePolicyTests = 'passed'; nativeGuiTest = 'not_run'; separateWebView2NoticeAbsent = $missingNotices; redistributedLegalFiles = @($legalOutputs | ForEach-Object { 'Licenses/' + [IO.Path]::GetFileName($_) }); hashes = $hashes } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$diag\build-manifest.json" -Encoding UTF8
 Write-Output "Compiled host and passed protocol checks at $out. Diagnostics: $diag. GUI/lifecycle tests are separate."
