@@ -18,6 +18,25 @@ export function filteredRows(rows, {query='', filter='all', folder=''}={}) {
     && (!folder || row.path === folder || row.path.startsWith(`${folder}/`))
     && (filter === 'all' || (filter === 'conflicted' ? stateFor(row) === STATES.conflicted : filter === 'modified' ? row.item === 'modified' || row.props === 'modified' : row.item === filter)));
 }
+// Match the folder filter exactly without rescanning every row for every folder.
+// Only ancestors belong in the navigation tree. A status row for an ancestor
+// itself still contributes to that folder, alongside its descendants.
+export function folderCountsFor(rows) {
+  const counts = new Map([['', rows.length]]);
+  for (const row of rows) {
+    const parts = row.path.split('/');
+    let folder = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      folder = i === 0 ? parts[i] : `${folder}/${parts[i]}`;
+      if (folder) counts.set(folder, (counts.get(folder) || 0) + 1);
+    }
+  }
+  for (const row of rows) {
+    const path = row.path;
+    if (path && counts.has(path)) counts.set(path, counts.get(path) + 1);
+  }
+  return counts;
+}
 export function groupsFor(rows) {
   const groups = new Map();
   for (const row of rows) { const key=row.changelist || ''; if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(row); }

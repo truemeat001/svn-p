@@ -144,6 +144,25 @@ function filteredRows(rows, {query='', filter='all', folder=''}={}) {
     && (!folder || row.path === folder || row.path.startsWith(`${folder}/`))
     && (filter === 'all' || (filter === 'conflicted' ? stateFor(row) === STATES.conflicted : filter === 'modified' ? row.item === 'modified' || row.props === 'modified' : row.item === filter)));
 }
+// Match the folder filter exactly without rescanning every row for every folder.
+// Only ancestors belong in the navigation tree. A status row for an ancestor
+// itself still contributes to that folder, alongside its descendants.
+function folderCountsFor(rows) {
+  const counts = new Map([['', rows.length]]);
+  for (const row of rows) {
+    const parts = row.path.split('/');
+    let folder = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      folder = i === 0 ? parts[i] : `${folder}/${parts[i]}`;
+      if (folder) counts.set(folder, (counts.get(folder) || 0) + 1);
+    }
+  }
+  for (const row of rows) {
+    const path = row.path;
+    if (path && counts.has(path)) counts.set(path, counts.get(path) + 1);
+  }
+  return counts;
+}
 function groupsFor(rows) {
   const groups = new Map();
   for (const row of rows) { const key=row.changelist || ''; if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(row); }
@@ -590,9 +609,9 @@ const displayed=()=>matches().filter(r=>!state.collapsed.has(r.changelist||''));
 const statusTag=row=>{const s=stateFor(row);return `<span class="status-tag ${s.tone}"><b>${esc(s.short)}</b>${esc(s.label)}</span>`;};
 const fileIcon=row=>/\.(png|jpg|jpeg|svg)$/i.test(row.path)?`<span class="file-icon">${icon('image')}</span>`:/\.cs$/i.test(row.path)?'<span class="file-type">C#</span>':`<span class="file-icon">${icon('file')}</span>`;
 function renderTree(){
- const folders=new Set(['']);for(const row of state.rows){const parts=row.path.split('/');for(let i=1;i<parts.length;i++)folders.add(parts.slice(0,i).join('/'));}
- const sorted=[...folders].sort((a,b)=>a.localeCompare(b));
- $('folder-tree').innerHTML=sorted.map((folder,i)=>{const depth=folder?folder.split('/').length:0;const count=filteredRows(state.rows,{folder}).length;return `<button class="folder-item ${folder===state.folder?'selected':''}" data-folder-index="${i}" aria-label="筛选目录 ${esc(folder||'全部目录')}"><span class="tree-arrow">${folder?'›':'⌄'}</span>${icon(folder?'folder':'computer')}<span class="folder-label">${esc(folder?fileName(folder):state.workspace)}</span><span class="folder-count">${count}</span></button>`;}).join('');
+ const counts=folderCountsFor(state.rows);
+ const sorted=[...counts.keys()].sort((a,b)=>a.localeCompare(b));
+ $('folder-tree').innerHTML=sorted.map((folder,i)=>{const depth=folder?folder.split('/').length:0;const count=counts.get(folder);return `<button class="folder-item ${folder===state.folder?'selected':''}" data-folder-index="${i}" aria-label="筛选目录 ${esc(folder||'全部目录')}"><span class="tree-arrow">${folder?'›':'⌄'}</span>${icon(folder?'folder':'computer')}<span class="folder-label">${esc(folder?fileName(folder):state.workspace)}</span><span class="folder-count">${count}</span></button>`;}).join('');
  // No inline style is needed under strict CSP: depth encoded with finite classes.
  $('folder-tree').querySelectorAll('button').forEach((button,i)=>{button.removeAttribute('style');button.classList.add(`depth-${Math.min(4,sorted[i]?sorted[i].split('/').length:0)}`);button.onclick=()=>{state.folder=sorted[i];state.collapsed.clear();render();};});
 }
@@ -613,7 +632,7 @@ function render(){
   tr.oncontextmenu=event=>openFileMenu(event,row);
   tr.addEventListener('keydown',event=>{if(event.key==='ContextMenu'||event.shiftKey&&event.key==='F10'){event.stopImmediatePropagation();openFileMenu(event,row,true);}});
   tr.ondblclick=()=>{showDiff();};
-  tr.onkeydown=e=>{if(!['ArrowDown','ArrowUp',' '].includes(e.key))return;e.preventDefault();if(e.key===' '){state.selected.has(row.id)?state.selected.delete(row.id):state.selected.add(row.id);}else{const idx=visible.findIndex(r=>r.id===row.id),target=visible[Math.max(0,Math.min(visible.length-1,idx+(e.key==='ArrowDown'?1:-1)))];state.focused=target.id;}render();const focusIndex=state.rows.findIndex(r=>r.id===state.focused);$('file-body').querySelector(`[data-row-index="${focusIndex}"]`)?.focus();};
+  tr.onkeydown=e=>{if(!['ArrowDown','ArrowUp',' '].includes(e.key))return;e.preventDefault();state.focused=row.id;if(e.key===' '){state.selected.has(row.id)?state.selected.delete(row.id):state.selected.add(row.id);}else{const idx=visible.findIndex(r=>r.id===row.id),target=visible[Math.max(0,Math.min(visible.length-1,idx+(e.key==='ArrowDown'?1:-1)))];state.focused=target.id;}render();const focusIndex=state.rows.findIndex(r=>r.id===state.focused);$('file-body').querySelector(`[data-row-index="${focusIndex}"]`)?.focus();};
  });
  const allCollapsed=groups.length>0 && groups.every(([name])=>state.collapsed.has(name));$('collapse-all').innerHTML=`${icon('collapse')}${allCollapsed?'展开分组':'折叠分组'}`;
  const selectedVisible=visible.filter(r=>state.selected.has(r.id)).length,hiddenCount=state.selected.size-selectedVisible;
