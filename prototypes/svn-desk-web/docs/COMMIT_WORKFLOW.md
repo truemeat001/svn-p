@@ -1,6 +1,7 @@
 # Confirmed exact-scope repository commits
 
-Base: `ca75b71d9a4f9a1a17470407b69452423fb64eeb`. This is another opt-in
+Original slice base: `ca75b71d9a4f9a1a17470407b69452423fb64eeb`. The XML-order
+repair follows `68bae524950675ccdd21353b778456363022a322`. This is another opt-in
 modern web slice, not a released client or complete migration. The original
 `svn_client` implementation is unchanged.
 
@@ -65,6 +66,9 @@ scope, a one-use token, and literal `confirmed: true`; it cannot change the plan
 - Canonical property values and local `info` bind BASE revision, repository UUID/URL,
   schedule and copy metadata. This catches property edits even when status remains
   `props=modified`, and repository/base replacement with otherwise identical rows.
+  The full parsed info structure is serialized deterministically: attribute keys
+  are sorted at every node, while all attributes/values, tags, text/tails and child
+  order are retained. Equivalent XML attribute order alone does not expire a plan.
   Values and digests remain local; neither is exposed as repository browsing.
 - Exact files, state, membership, file identity/content and metadata are checked
   again during apply. A changed plan is consumed and rejected. Plans expire after
@@ -121,6 +125,24 @@ execution environment Chromium cannot create its process-singleton socket
 (`Operation not permitted`), so no browser assertions or screenshots were produced.
 `svn` and `svnadmin` are absent. Windows execution, real SVN commit behavior, UI
 layout/interaction acceptance and native Tauri packaging remain **not run**.
+
+### XML attribute-order repair · 2026-11-04
+
+Windows real-SVN testing of `68bae52` reported an unchanged-file confirmation
+failing with HTTP 409: eight `info` reads yielded three raw XML hashes with the
+same semantic data. `ElementTree.tostring` preserves attribute insertion order,
+which SVN can vary. The fingerprint now uses one structured JSON document with
+sorted property entries and a recursive full XML representation. Only attribute
+ordering is ignored. No BASE, UUID, URL, schedule, copy metadata, unknown attribute,
+text or child is dropped; real changes still invalidate the reviewed plan.
+
+New synthetic regressions reproduce unstable raw serialization, verify all attribute
+permutations and eight equivalent reads, run selected and complete-changelist
+confirmation while order alternates, and reject real metadata/property changes.
+Independent review verified the old order-sensitive behavior fails the regression.
+This repair has not yet been retested with Windows real SVN. Update the complete
+checkpoint and restart the bridge before testing; old in-memory plans are not
+reused or migrated. Counts are recorded in `VALIDATION.md`.
 
 Before acceptance, use only a self-created disposable repository and working copy:
 

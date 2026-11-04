@@ -188,3 +188,29 @@ results, native EXE/MSI or Tauri packaging are claimed.
 
 See [COMMIT_WORKFLOW.md](COMMIT_WORKFLOW.md) for limits, failure semantics and the
 required disposable-repository Windows/browser acceptance checklist.
+
+
+## Commit XML attribute-order repair · 2026-11-04
+
+Base `68bae524950675ccdd21353b778456363022a322`. Subsequent Windows real-SVN
+testing found a false 409 on unchanged reviewed files: repeated semantically equal
+`info` XML had differing attribute order, producing three hashes in eight reads.
+This is a reproducible metadata-serialization defect, not changed file contents.
+
+- Fingerprinting now uses deterministic structured JSON, sorting only XML
+  attribute entries recursively and retaining every other parsed XML component.
+- 11 new XML regressions passed (8 implementation tests and 3 independent tests).
+  They cover reordered attributes, repeated reads, selected/full-group apply,
+  added/removed/changed attributes and elements, BASE/UUID/schedule/copy fields,
+  text/tail/child-order changes and real same-status property edits.
+- Full Linux suite: 34 JavaScript tests passed; 237 Python tests ran, with 235
+  passed and 2 existing explicit real-SVN skips. Compilation checks passed.
+- Independent review confirmed the order regressions fail before the fix and
+  pass after it. Original SVN backend, exact targets, one-use confirmation,
+  content hashing and workspace isolation are unchanged.
+
+Only synthetic temporary fixtures were used for this repair. The reported Windows
+run diagnosed the base commit; it does not validate the new repair. Windows real-SVN
+retest, browser execution and native packaging remain pending. Restart the bridge
+on the new full checkpoint, then repeat unchanged-file and real-change rejection
+checks in a self-created disposable repository before acceptance.

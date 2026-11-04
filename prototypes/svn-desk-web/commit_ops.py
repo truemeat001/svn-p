@@ -32,6 +32,19 @@ class CommitUnavailable(ValueError):
     pass
 
 
+def _xml_identity(node):
+    """Preserve parsed XML content while ignoring only attribute insertion order.
+
+    SVN may emit equivalent info attributes in a different order on each call.
+    ElementTree serialization preserves that order, so raw XML bytes are not a
+    stable identity. Keep every attribute/value, tag, text, tail and ordered child
+    in a deterministic structure instead; do not allowlist away BASE/repository
+    fields or normalize actual values.
+    """
+    return [node.tag, sorted(node.attrib.items()), node.text, node.tail,
+            [_xml_identity(child) for child in node]]
+
+
 def validate_request(kind, data):
     identity_fields(data)
     if kind == 'apply':
@@ -147,7 +160,8 @@ class CommitService:
             info, _ = self.manager._info(target)
             # Bind BASE revision, repository UUID/URL and schedule/copy metadata.
             # Values never leave this process or appear in browser diagnostics.
-            payload = json.dumps(sorted(props), ensure_ascii=True).encode() + ET.tostring(info)
+            payload = json.dumps([sorted(props), _xml_identity(info)],
+                                 ensure_ascii=True, separators=(',', ':')).encode('utf-8')
             if file_identity(self.client.working_copy, relative) != before:
                 raise StaleRead('File changed during local metadata read.')
             result[identifier] = hashlib.sha256(payload).hexdigest()

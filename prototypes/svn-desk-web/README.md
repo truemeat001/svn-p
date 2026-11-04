@@ -83,7 +83,7 @@ python3 server.py --workspace "/path/to/disposable-test-wc" \
 
 发生超时、错误或关闭执行窗口时，仓库可能已接受提交。不会自动重试或回滚；先用可信客户端核对仓库历史，再明确刷新。成功只报告命令完成和新本地状态，不猜测修订号。
 
-**当前仅完成 Linux 合成/临时文件与 HTTP 回归，尚未完成真实 SVN、Windows 或浏览器执行验收。** Chromium 启动被本环境的 socket 限制阻止；本机没有 SVN / svnadmin。请先在自建可丢弃仓库验证，不能据此宣称可发布。完整范围与验证清单见 [安全提交工作流](docs/COMMIT_WORKFLOW.md)。
+**68bae52 的 Windows 真实 SVN 测试发现：等价 info XML 的属性顺序变化会导致提交计划误报 409。** 本轮已改用确定性元数据序列化，保留全部属性与 BASE / 仓库字段校验；Linux 回归通过，仍需 Windows 真实 SVN 重测。浏览器执行验收尚未完成：Chromium 启动被本环境的 socket 限制阻止，本机没有 SVN / svnadmin。请先在自建可丢弃仓库验证，不能据此宣称可发布。完整范围与验证清单见 [安全提交工作流](docs/COMMIT_WORKFLOW.md)。
 
 ### 单文件差异与历史
 
