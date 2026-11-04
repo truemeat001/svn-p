@@ -61,8 +61,10 @@ namespace SVNDeskDesktop {
                 var config = new XmlDocument { XmlResolver = null }; config.Load(args[0] + ".config");
                 Check(config.SelectSingleNode("/configuration/System.Windows.Forms.ApplicationConfigurationSection/add[@key='DpiAwareness' and @value='PerMonitorV2']") != null, "Packaged host config does not opt in to PerMonitorV2.");
                 Check(AppDomain.CurrentDomain.SetupInformation.TargetFrameworkName == ".NETFramework,Version=v4.8", "DPI test must target .NET Framework 4.8.");
-                Check(AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), PerMonitorV2), "WinForms startup did not activate PerMonitorV2. Check config, manifest and compatibility overrides.");
                 using (var window = new DeskWindow(new string[0])) {
+                    // .NET Framework applies configured DPI awareness lazily during
+                    // the first control construction, not EnableVisualStyles alone.
+                    Check(AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), PerMonitorV2), "WinForms startup did not activate PerMonitorV2. Check config, manifest and compatibility overrides.");
                     Check(window.AutoScaleMode == AutoScaleMode.Dpi, "Host must use DPI-based control scaling.");
                     Check(window.Font.Name == "Segoe UI" && Math.Abs(window.Font.SizeInPoints - 10F) < 0.01F, "Native controls must inherit Segoe UI 10pt.");
                     IntPtr handle = window.Handle;

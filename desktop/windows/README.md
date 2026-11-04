@@ -124,6 +124,8 @@ This patch embeds `SVNDesk.manifest` with Windows 10 compatibility and non-eleva
 
 Cross-platform source guard: `python -m unittest discover -s desktop/windows/tests -p 'test_*.py'`. This can validate XML, source/build wiring and build inputs on Linux. It cannot establish Windows font sharpness or native compilation.
 
+The first Windows build of d283bc7 exposed a test initialization-order defect: .NET Framework applied the configured DPI mode during the first `DeskWindow` construction, after `EnableVisualStyles()`. The test had checked thread awareness before that lazy initialization. The unchanged thread assertion now runs immediately after constructing the hidden host window, before requesting its handle; the existing native window/context, DPI, font and bounds assertions remain mandatory. A source guard prevents the assertion from moving back before construction. An isolated Windows experiment with this ordering passed all 21 native checks at 144 DPI, with PerMonitorV2, Segoe UI 10pt and no visible window. That experiment is evidence for the fix, not a rebuilt-package or visual acceptance claim. The repaired source passes 18 cross-platform desktop tests; rerun the complete Windows build on the committed repair before packaging.
+
 Required acceptance on Windows before delivering another portable package:
 
 1. Build both host and bridge from this exact source; require protocol, profile-policy, DPI and bridge tests to pass. Record the compiled EXE/config/source hashes and `DpiTests.log`.

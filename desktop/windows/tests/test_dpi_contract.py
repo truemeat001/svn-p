@@ -79,6 +79,16 @@ class DpiContractTests(unittest.TestCase):
         self.assertNotIn('.Show(', probe)
         self.assertNotIn('Process.Start(', probe)
 
+    def test_probe_checks_thread_awareness_after_first_control_initialization(self):
+        probe = (WINDOWS / "DpiTests.cs").read_text(encoding="utf-8")
+        construction = probe.index('using (var window = new DeskWindow(new string[0])) {')
+        thread_check = probe.index('Check(AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), PerMonitorV2)')
+        handle = probe.index('IntPtr handle = window.Handle;')
+        window_check = probe.index('Check(AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(handle), PerMonitorV2)')
+        self.assertLess(construction, thread_check)
+        self.assertLess(thread_check, handle)
+        self.assertLess(handle, window_check)
+
 
 if __name__ == '__main__':
     unittest.main()

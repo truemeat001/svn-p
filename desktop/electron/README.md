@@ -32,7 +32,11 @@ The build result is a portable Windows x64 directory and ZIP. It is **unsigned**
 
 ## Verification and limits
 
-41 Node host tests and 6 Python package tests passed. Merged web suite: 176 Node tests passed; 536 Python tests ran, 534 passed and two existing optional real-working-copy tests skipped. Existing bridge build-input tests: 9 passed. Source bridge self-check and real source-process demo readiness/HTTP/CSP/graceful close passed without a workspace.
+The original Linux checkpoint passed 41 Node host tests and 6 Python package tests. A later Windows run of the same source exposed two failures: creating the test directory symlink required an unavailable privilege, and Python's ZIP reader normalized a raw backslash before the archive-path check. The repaired suite passes 43 Node host tests and 10 Python package tests on Linux, without skips. Its exact Windows rerun remains required.
+
+The real linked-parent fixture uses an NTFS junction on Windows and a directory symlink elsewhere; fixture failures are not skipped. A separate injected-filesystem test requires rejection of symbolic-link metadata even when the canonical path matches. Production profile rejection is unchanged. ZIP validation now checks `orig_filename` before trusting `filename`, including raw backslashes, NUL truncation and normalization within a selected prefix. Unsafe fixtures preserve their raw ZIP names on Windows too. Every selected file name and case collision is validated before extraction writes any member; existing files are still never overwritten.
+
+Merged web suite: 176 Node tests passed; 536 Python tests ran, 534 passed and two existing optional real-working-copy tests skipped. Existing bridge build-input tests: 9 passed. Source bridge self-check and real source-process demo readiness/HTTP/CSP/graceful close passed without a workspace.
 
 The unconfigured web test command initially failed because `SVN_DESK_BACKEND_SOURCE` was unset. It passed when rerun using the documented source setting, without changing tests:
 

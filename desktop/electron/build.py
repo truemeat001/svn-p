@@ -27,15 +27,28 @@ def plain_file(path):
 
 def unzip_checked(source, target, prefix=''):
     with zipfile.ZipFile(source) as archive:
-        selected = [item for item in archive.infolist() if item.filename.startswith(prefix) and not item.is_dir()]
+        selected = []
+        for item in archive.infolist():
+            if not (item.filename.startswith(prefix) or item.orig_filename.startswith(prefix)):
+                continue
+            # ZipInfo normalizes backslashes on Windows and truncates NULs.
+            # Validate the original decoded archive name before trusting either
+            # the normalized path, directory classification or selected prefix.
+            original = item.orig_filename
+            if original != item.filename or '\\' in original or '\x00' in original:
+                raise ValueError('Unsafe archive member.')
+            if not item.is_dir():
+                selected.append(item)
         if sum(item.file_size for item in selected) > 2*1024**3: raise ValueError('Unexpectedly large archive.')
-        seen = set()
+        seen = set(); planned = []
         for item in selected:
             name = item.filename[len(prefix):]
             posix = PurePosixPath(name)
             if not name or posix.is_absolute() or '..' in posix.parts or '\\' in name or ':' in name or str(posix) != name or stat.S_ISLNK(item.external_attr >> 16): raise ValueError('Unsafe archive member.')
             if name.casefold() in seen: raise ValueError('Duplicate archive destination.')
-            seen.add(name.casefold()); destination=target.joinpath(*posix.parts)
+            seen.add(name.casefold()); planned.append((item, target.joinpath(*posix.parts)))
+        # Reject every selected unsafe name/collision before writing any member.
+        for item, destination in planned:
             destination.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(item) as src, destination.open('xb') as dst: shutil.copyfileobj(src,dst)
         return seen
