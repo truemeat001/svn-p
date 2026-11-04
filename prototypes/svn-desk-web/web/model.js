@@ -113,3 +113,24 @@ export function validateShelfPlan(data,request,files){
  for(const f of data.files){const old=expected.get(f.path);if(!old||request.operation==='restore'&&['state','kind','size'].some(k=>f[k]!==old[k]))throw Error('Shelf 文件范围不匹配。');expected.delete(f.path);}
  if(expected.size)throw Error('Shelf 文件范围不完整。');return data;
 }
+
+// Repository commits never expand an explicit selection into its whole changelist.
+export function commitScopeRows(rows,selectedIds,operation='selected',name=null){
+ if(!['selected','changelist'].includes(operation)||operation==='selected'&&name!==null||operation==='changelist'&&(typeof name!=='string'||!name))throw Error('提交范围无效。');
+ const files=operation==='selected'?reviewSelection(rows,selectedIds):rows.filter(row=>row.changelist===name);
+ if(!files.length||files.length>100||operation==='selected'&&files.length!==selectedIds.size||new Set(files.map(f=>f.id)).size!==files.length)throw Error('提交范围必须包含 1–100 个明确文件；完整变更列表不能截取子集。');
+ return files;
+}
+export function parseCommitMessage(value){
+ if(typeof value!=='string'||!value.trim()||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value)||new TextEncoder().encode(value).length>8192)throw Error('提交说明不能为空，须为有效文本且不超过 8192 UTF-8 字节。');
+ return value;
+}
+export function validateCommitPlan(data,request,rows){
+ const bad=()=>{throw Error('提交预检身份、选区或文件状态不匹配，请重新预检。');};
+ parseCommitMessage(request.message);
+ if(data?.mode!=='live'||!sameShelfScope(data,request)||!['operation','name','keepChangelist'].every(k=>data[k]===request[k])||typeof request.keepChangelist!=='boolean'||typeof data.planToken!=='string'||!data.planToken||data.planToken.length>128||/[\u0000-\u001f\u007f-\u009f]/u.test(data.planToken)||data.expiresIn!==120||!Array.isArray(data.files)||!Array.isArray(request.ids)||new Set(request.ids).size!==request.ids.length)bad();
+ const files=commitScopeRows(rows,new Set(request.ids),request.operation,request.name),expected=new Map(files.map(f=>[f.id,f]));
+ if(files.length!==request.ids.length||files.some(f=>!request.ids.includes(f.id))||data.files.length!==files.length)bad();
+ for(const file of data.files){const row=expected.get(file?.id);if(!row||file.path!==row.path||file.fromChangelist!==(row.changelist||null)||file.item!==row.item||file.props!==row.props)bad();expected.delete(file.id);}
+ if(expected.size)bad();return data;
+}

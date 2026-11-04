@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Loopback SVN Desk bridge; optional confirmed local labels and Shelf operations."""
+"""Loopback SVN Desk bridge; optional confirmed labels, Shelf and repository commits."""
 from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import hashlib
 import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +22,8 @@ from file_reads import (FileReadService, StaleRead, UnsupportedComparison,
 from changelist_ops import (ChangelistService, ChangelistUnavailable, MutationUncertain,
                             validate_request, status_rows, visible_rows)
 
+from commit_ops import (CommitService, CommitUnavailable, validate_request as validate_commit_request)
+
 from shelf_ops import (ShelfService, ShelfUnavailable, guarded_manager, shelf_module,
                        validate_request as validate_shelf_request)
 
@@ -33,9 +36,25 @@ MAX_REQUEST_BODY_BYTES = 262144
 REQUEST_BODY_SECONDS = 5.0
 REQUEST_BODY_CHUNK = 64 * 1024
 
+COMMIT_BACKEND_SHA256 = '4ba9cf1ce8973dd8473db2d7732b83152e6ce63e1ea124b601ac6cf27c55997d'
+COMMIT_HISTORY_SHA256 = '6b8614308da1e978837518da9feb32f9694c57559dd368f3eca1e654abdf29fc'
+
+
+def reviewed_commit_backend(backend, history):
+    """Unknown paired semantics disable commits; CRLF checkouts retain Python semantics."""
+    try:
+        for module, expected in ((backend, COMMIT_BACKEND_SHA256), (history, COMMIT_HISTORY_SHA256)):
+            source = Path(module.__file__)
+            if source.stat().st_size > 1024 * 1024 or hashlib.sha256(source.read_bytes().replace(b'\r\n', b'\n')).hexdigest() != expected:
+                return False
+        return True
+    except (AttributeError, TypeError, ValueError, OSError):
+        return False
+
+
 class ReadOnlyAdapter:
     """Imports trusted bounded services. Never exposes a generic SVN command."""
-    def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None, *, enable_changelists=False, enable_shelves=False, shelf_storage=None):
+    def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None, *, enable_changelists=False, enable_shelves=False, shelf_storage=None, enable_commits=False):
         self.workspace = local_path(workspace)
         self._identity = working_copy_identity(self.workspace)
         backend, status_stream, _, _ = trusted_modules(backend_source)
@@ -47,6 +66,8 @@ class ReadOnlyAdapter:
         self._file_service = FileReadService(self.client, history) if history else None
         self._changelist_service = (ChangelistService(self.client, self._file_service.manager, self._check_workspace)
                                    if enable_changelists and self._file_service else None)
+        self._commit_service = (CommitService(self.client, self._file_service.manager, self._check_workspace)
+                                if enable_commits and self._file_service and reviewed_commit_backend(backend, history) else None)
         shelves = shelf_module(backend_source) if enable_shelves and history else None
         self._shelf_service = (ShelfService(guarded_manager(shelves, history, self.client,
                                 self._check_workspace, shelf_storage), self._check_workspace)
@@ -66,6 +87,9 @@ class ReadOnlyAdapter:
             raise BlockingIOError("A status read is already running.")
         try:
             self._read_snapshot = None  # Refresh invalidates old capabilities even on failure.
+            commit_service = getattr(self, '_commit_service', None)
+            if commit_service:
+                commit_service.invalidate()
             service = getattr(self, '_changelist_service', None)
             if service:
                 service.invalidate()
@@ -74,7 +98,7 @@ class ReadOnlyAdapter:
                 shelf_service.invalidate()
             self._check_workspace()
             # No --show-updates, remote info/list/log, shell, diff or writes.
-            if service:
+            if service or commit_service:
                 rows = visible_rows(status_rows(self.client))
                 self._check_workspace()
                 return self._publish_snapshot(rows)
@@ -104,6 +128,7 @@ class ReadOnlyAdapter:
                 "snapshotToken": token, "fileReadsEnabled": getattr(self, '_file_service', None) is not None,
                 "changelistWritesEnabled": getattr(self, '_changelist_service', None) is not None,
                 "shelfWritesEnabled": getattr(self, '_shelf_service', None) is not None,
+                "commitsEnabled": getattr(self, '_commit_service', None) is not None,
                 "readAt": datetime.now(timezone.utc).isoformat(),
                 "scope": "Local status only; repository connectivity not tested."}
 
@@ -125,6 +150,8 @@ class ReadOnlyAdapter:
                 return payload
             def invalidate():
                 self._read_snapshot = None
+                if getattr(self, '_commit_service', None):
+                    self._commit_service.invalidate()
                 if getattr(self, '_shelf_service', None):
                     self._shelf_service.invalidate()
             result, rows = service.apply(data, self._read_snapshot, invalidate)
@@ -156,6 +183,8 @@ class ReadOnlyAdapter:
                 return result
             def invalidate():
                 self._read_snapshot = None
+                if getattr(self, '_commit_service', None):
+                    self._commit_service.invalidate()
                 if getattr(self, '_changelist_service', None):
                     self._changelist_service.invalidate()
             result = service.apply(data, self._read_snapshot, invalidate)
@@ -166,6 +195,39 @@ class ReadOnlyAdapter:
             except Exception as error:
                 self._read_snapshot = None
                 raise MutationUncertain('Post-Shelf status could not be verified.') from error
+        finally:
+            self._busy.release()
+
+    def commit_operation(self, kind, data):
+        if not self._busy.acquire(blocking=False):
+            raise BlockingIOError('A workspace operation is already running.')
+        try:
+            service = getattr(self, '_commit_service', None)
+            if service is None:
+                raise CommitUnavailable('Repository commits are not enabled.')
+            self._check_workspace()
+            if kind == 'preflight':
+                payload = service.preflight(data, self._read_snapshot)
+                try:
+                    self._check_workspace()
+                except Exception:
+                    service.invalidate()
+                    raise
+                return payload
+            def invalidate():
+                self._read_snapshot = None
+                for name in ('_changelist_service', '_shelf_service', '_commit_service'):
+                    current = getattr(self, name, None)
+                    if current:
+                        current.invalidate()
+            result = service.apply(data, self._read_snapshot, invalidate)
+            try:
+                rows = visible_rows(status_rows(self.client))
+                self._check_workspace()
+                return {**self._publish_snapshot(rows), 'commitResult': result}
+            except Exception as error:
+                invalidate()
+                raise MutationUncertain('Post-commit status could not be verified.') from error
         finally:
             self._busy.release()
 
@@ -346,8 +408,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history'}.get(url.path)
         changelist_kind = {'/api/changelist-preflight': 'preflight', '/api/changelist-apply': 'apply'}.get(url.path)
+        commit_kind = {'/api/commit-preflight': 'preflight', '/api/commit-apply': 'apply'}.get(url.path)
         shelf_kind = {'/api/shelves-list': 'list', '/api/shelf-preflight': 'preflight', '/api/shelf-apply': 'apply'}.get(url.path)
-        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None and shelf_kind is None) or self.server.catalog is None:
+        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None and shelf_kind is None and commit_kind is None) or self.server.catalog is None:
             return self.respond(405, {"error": "SVN writes are not implemented."})
         if (self.headers.get_all("Content-Length") is None
                 or len(self.headers.get_all("Content-Length")) != 1
@@ -356,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {"error": "A bounded JSON request is required."})
         try:
             size = self._request_body_size()
-            limit = MAX_REQUEST_BODY_BYTES if changelist_kind or shelf_kind else 4096
+            limit = MAX_REQUEST_BODY_BYTES if changelist_kind or shelf_kind or commit_kind else 4096
             if not 1 <= size <= limit:
                 self._body_attempted = True  # Oversized/empty input is not drained.
                 return self.respond(413, {"error": "Selection request is too large or empty."})
@@ -369,7 +432,9 @@ class Handler(BaseHTTPRequestHandler):
                     obj[key] = value
                 return obj
             data = json.loads(body, object_pairs_hook=strict_object)
-            if shelf_kind:
+            if commit_kind:
+                validate_commit_request(commit_kind, data)
+            elif shelf_kind:
                 validate_shelf_request(shelf_kind, data)
             elif changelist_kind:
                 validate_request(changelist_kind, data)
@@ -399,6 +464,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {'error': '不支持 BASE → BASE 比较。查看本地修改请选 BASE → WORKING，或使用明确数字修订；未运行比较。'})
         except (ValueError, OSError, RecursionError):
             return self.respond(400, {"error": "只接受明确工作区、当前状态行与受限修订；不接受任意路径、命令或重复字段。"})
+        if commit_kind:
+            try:
+                return self.respond(200, self.server.catalog.commit_operation(commit_kind, data))
+            except CommitUnavailable:
+                return self.respond(403, {'error': '仓库提交未启用或配套后端不匹配。须由本机启动参数明确启用。'})
+            except StaleRead:
+                return self.respond(409, {'error': '提交计划、完整成员、内容或状态已改变；未执行此确认。请刷新并重新预检确认。'})
+            except BlockingIOError:
+                return self.respond(409, {'error': '已有工作区操作正在运行；本次未执行提交。'})
+            except Exception:
+                if commit_kind == 'apply':
+                    return self.respond(503, {'error': '提交结果未能确认，仓库可能已经接受提交。没有自动重试或回滚；请先通过可信客户端核对仓库历史，再明确刷新状态和重新审查。'})
+                return self.respond(503, {'error': '本地提交预检未通过；未运行提交。请检查完整成员、文件/目录依赖、移动/冲突、内容上限和配套安全后端。'})
         if shelf_kind:
             try:
                 return self.respond(200, self.server.catalog.shelf_operation(shelf_kind, data))
@@ -457,6 +535,7 @@ def main():
     parser.add_argument("--settings-file", type=Path, help="Opt in to selection preferences outside all scan/WC directories; parent must exist")
     parser.add_argument("--backend-source", type=Path)
     parser.add_argument("--enable-changelists", action="store_true", help="Opt in to confirmed exact-file local SVN label assignment/removal; no commit/revert")
+    parser.add_argument("--enable-commits", action="store_true", help="Opt in to exact-file or complete named-changelist repository commits after separate one-use confirmation")
     parser.add_argument("--enable-shelves", action="store_true", help="Opt in to previewed and confirmed exact-file local Shelf backup/restore; no implicit revert/commit")
     parser.add_argument("--shelf-storage", type=Path, help="Optional original-format Shelf directory outside every workspace and authorized scan parent")
     parser.add_argument("--svn", help="Trusted installed native SVN executable")
@@ -464,7 +543,7 @@ def main():
     authorized = bool(args.workspace or args.scan_parent)
     if authorized and not args.backend_source:
         parser.error("--workspace/--scan-parent requires --backend-source; demo is never used as a fallback.")
-    if (args.backend_source or args.svn or args.settings_file or args.enable_changelists or args.enable_shelves or args.shelf_storage) and not authorized:
+    if (args.backend_source or args.svn or args.settings_file or args.enable_changelists or args.enable_shelves or args.shelf_storage or args.enable_commits) and not authorized:
         parser.error("Backend, SVN and preferences require --workspace or --scan-parent.")
     if args.shelf_storage and not args.enable_shelves:
         parser.error("--shelf-storage requires --enable-shelves.")
@@ -475,11 +554,11 @@ def main():
             catalog = WorkspaceCatalog(roots=args.workspace, parents=args.scan_parent,
                 discovery=discovery, settings=settings, settings_file=args.settings_file,
                 adapter_factory=lambda path: ReadOnlyAdapter(path, args.backend_source, args.svn, enable_changelists=args.enable_changelists, enable_shelves=args.enable_shelves,
-                    shelf_storage=args.shelf_storage))
+                    shelf_storage=args.shelf_storage, enable_commits=args.enable_commits))
         server = PrototypeServer(args.port, catalog=catalog)
     except (ValueError, OSError, RuntimeError, ImportError):
         parser.exit(1, "Startup failed. Verify authorized directories, preferences path and trusted backend.\n")
-    print(f"SVN Desk {('CONFIRMED LOCAL SHELVES' if args.enable_shelves else 'CONFIRMED LOCAL CHANGELISTS' if args.enable_changelists else 'READ-ONLY WORKSPACES') if catalog else 'DEMO'}: {server.origin}", flush=True)
+    print(f"SVN Desk {('CONFIRMED REPOSITORY COMMITS' if args.enable_commits else 'CONFIRMED LOCAL SHELVES' if args.enable_shelves else 'CONFIRMED LOCAL CHANGELISTS' if args.enable_changelists else 'READ-ONLY WORKSPACES') if catalog else 'DEMO'}: {server.origin}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

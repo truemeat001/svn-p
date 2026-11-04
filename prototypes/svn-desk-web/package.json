@@ -5,14 +5,15 @@
   "type": "module",
   "scripts": {
     "start": "python3 server.py",
-    "test": "node --test tests/model.test.js tests/shelf_model.test.js && python3 -m unittest discover -s tests -p 'test_*.py'",
+    "test": "node --test tests/model.test.js tests/shelf_model.test.js tests/commit_model.test.js && python3 -m unittest discover -s tests -p 'test_*.py'",
     "test:ui": "node tests/browser.test.cjs",
     "tauri": "tauri",
     "test:workspaces:ui": "node tests/workspaces.browser.test.cjs",
     "test:readonly:ui": "node tests/readonly.browser.test.cjs",
     "test:changelists:ui": "node tests/changelists.browser.test.cjs",
     "test:changelists:integration:ui": "node tests/changelists.integration.browser.test.cjs",
-    "test:shelves:ui": "node tests/shelves.browser.test.cjs"
+    "test:shelves:ui": "node tests/shelves.browser.test.cjs",
+    "test:commits:ui": "node tests/commits.browser.test.cjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

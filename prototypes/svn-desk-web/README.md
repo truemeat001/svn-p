@@ -19,11 +19,11 @@ python3 server.py
 
 - 搜索文件/变更列表，状态与目录范围筛选；目录只筛选，不会扩大选区。
 - 本地 changelist 分组/折叠、文件多选、当前可见项选择、隐藏选中项计数、完整只读审查。
-- 可选本地 changelist 标签移动与移回默认组：启动时明确启用，完整选区预检，再单独确认；没有提交或还原 API；本地 Shelf 另行显式启用。
+- 可选本地 changelist 标签移动与移回默认组：启动时明确启用，完整选区预检，再单独确认；归组不触发提交或还原；本地 Shelf 与仓库提交分别显式启用。
 - 选中行详情、diff / properties、分页文件历史和独立有界操作日志；离线模式仍明确使用示例数据。
 - F5 刷新、Ctrl/Cmd K 搜索、方向键浏览、空格切换选择、Esc 关闭弹窗。
 - 详情/差异/日志面板显示切换，窄桌面视口布局；**最低布局宽度 520px，非手机产品。**
-- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库。默认没有 SVN 写能力；可选写入口是经过预检和确认的本地 changelist 标签，以及单独启用的本地 Shelf 备份/恢复。
+- 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库。默认没有 SVN 写能力；可选写入口是经过预检和确认的本地 changelist 标签、本地 Shelf 备份/恢复，以及单独启用、另行确认的明确范围仓库提交。
 
 ## 真实工作区流程
 
@@ -47,7 +47,7 @@ python3 server.py --workspace "/path/to/test-working-copy" \
   --backend-source "/path/to/original-svn-desk" --enable-changelists
 ```
 
-`--enable-changelists` 必须由本机启动时显式设置。网页不能开启它、改授权目录、提交或调用任意 SVN 命令；旧的默认启动方式仍是只读。配套严格 history 后端不可用时归组不可用。
+`--enable-changelists` 必须由本机启动时显式设置。网页不能开启它、改授权目录或调用任意 SVN 命令；仅此标志不启用提交，旧的默认启动方式仍是只读。配套严格 history 后端不可用时归组不可用。
 
 选择最多 100 个明确文件，点击「移动到变更列表」，输入已有或新名称，或选择「移除标签，回到默认变更列表」。对话框包含被筛选/折叠隐藏的选中路径和来源组。点击「预检明确选区」读取本地状态、info 和所选文件的有界内容摘要，成功后仍需单独「确认修改本地标签」。原始内容和摘要均不发送到网页或仓库。名称 1–128 字符，去除前后空白、拒绝控制字符；不持久化空组。
 
@@ -69,6 +69,21 @@ python3 server.py --workspace "/path/to/disposable-test-wc" \
 复用经校验的原版 Shelf 核心，新建 format 2，兼容上限以内的 format 1/2，不迁移或改写旧备份。此 Web 切片不支持目录、超过 32 MiB 的单文件或超过 64 MiB 的总内容；没有服务器 Shelf 或删除入口。默认使用原版按工作区区分的本地存储，也可显式设置 `--shelf-storage`，位置必须在所有工作副本与授权扫描范围之外。状态、内容、目标或 Shelf 改变需重新预检；确认只用一次，有效期 120 秒。
 
 **ad382ca 的 Windows 真实 SVN 验证已通过 Shelf 核心流程，但发现延迟请求体的 HTTP 拒绝缺陷及测试夹具问题；本轮修复仍待 Windows 复测，浏览器验收尚未完成**。请先用可丢弃副本验证。参见 [HTTP 与 Windows 夹具修复](docs/HTTP_REJECTION_FIX.md)。详细边界、限额及失败语义见 [本地 Shelf 工作流](docs/LOCAL_SHELVES.md)。
+
+### 明确选区 / 完整变更列表提交（独立启用）
+
+```sh
+python3 server.py --workspace "/path/to/disposable-test-wc" \
+  --backend-source "/path/to/paired-original" --enable-commits
+```
+
+仅在本机启动时显式启用且配套后端通过版本核对后可提交。可提交 1–100 个明确选中文件，或单独点击「提交完整变更列表…」审查命名组全部成员（包括干净、筛选隐藏和折叠成员）。完整组缺少任何成员即拒绝；文件选区不会自动扩大为整个组。没有自动 add、目录、移动、还原或提交重试。
+
+必填提交说明（最多 8192 UTF-8 字节），明确选择是否保留标签，先「预检」再单独「确认提交到仓库」。计划绑定工作副本、状态快照、精确成员、内容摘要、属性与 BASE / 仓库元数据、说明和保留标签选项，120 秒内一次有效。变化、刷新、切换或关闭后重新预检。提交使用现有 SVN 配置与凭据，预检只查本地，不保证远端未过期或钩子接受。
+
+发生超时、错误或关闭执行窗口时，仓库可能已接受提交。不会自动重试或回滚；先用可信客户端核对仓库历史，再明确刷新。成功只报告命令完成和新本地状态，不猜测修订号。
+
+**当前仅完成 Linux 合成/临时文件与 HTTP 回归，尚未完成真实 SVN、Windows 或浏览器执行验收。** Chromium 启动被本环境的 socket 限制阻止；本机没有 SVN / svnadmin。请先在自建可丢弃仓库验证，不能据此宣称可发布。完整范围与验证清单见 [安全提交工作流](docs/COMMIT_WORKFLOW.md)。
 
 ### 单文件差异与历史
 
@@ -101,7 +116,7 @@ python3 server.py --scan-parent "/path/to/projects" \
 ## 安全边界
 
 - 仅监听 `127.0.0.1`；精确 Host、Origin / Fetch Metadata、每次启动临时 session token、无 CORS、no-store、CSP、iframe 禁止。
-- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`，以及独立启用的 `/api/shelves-list`、`/api/shelf-preflight` 与 `/api/shelf-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。无通用命令、任意文件读取、上传、提交、还原、Shelf 删除或服务器 Shelf 入口。
+- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`，以及独立启用的 `/api/shelves-list`、`/api/shelf-preflight` 与 `/api/shelf-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。独立启用的提交仅提供 `/api/commit-preflight` 与 `/api/commit-apply`，接受明确范围与单次确认。无通用命令、任意文件读取、上传、还原、Shelf 删除或服务器 Shelf 入口。
 - 原始 SVN 错误输出不会返回网页或记录到日志；动态路径/标签按文本转义。
 - 这是本机应用桥接，不是对不可信本机进程的安全沙箱，不应暴露到局域网或互联网。
 - Python 标准库服务用于原型，不是生产 HTTP 部署方案。

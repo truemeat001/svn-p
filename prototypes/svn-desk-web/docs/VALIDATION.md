@@ -156,3 +156,35 @@ Final Linux repair checks:
 
 Details and limits: [HTTP_REJECTION_FIX.md](HTTP_REJECTION_FIX.md). New Windows
 real-SVN/HTTP rerun remains required; the Linux results are not that acceptance.
+
+
+## Exact-scope commit slice · 2026-11-03
+
+Base `ca75b71d9a4f9a1a17470407b69452423fb64eeb`. Original backend/history
+and Shelf implementation remain unchanged. This is a development checkpoint,
+not real SVN or Windows acceptance.
+
+- 34 JavaScript model tests passed.
+- 226 Python tests ran: 224 passed and 2 existing opt-in real-SVN tests skipped.
+- 51 commit-specific Python tests passed: 23 core, 23 HTTP/adapter/catalog,
+  and 5 independent adversarial-review regressions. The HTTP coverage includes
+  actual loopback routing through the service and original target-command
+  construction, with only SVN process/XML responses mocked.
+- Python compilation and JavaScript syntax checks passed; offline demo rebuilt
+  from the same web sources. Offline mode cannot dispatch repository commits.
+- Independent review found and verified fixes for Windows native-ID versus
+  display-path result mismatch and property-read ordering before path guards.
+  Review also checked same-status property/BASE/UUID changes, one-use replay,
+  incomplete membership, exact targets, expiry and uncertain-result semantics.
+- Commit source compatibility accepts CRLF-to-LF equivalence only, rejects
+  unknown changes, and leaves safe status/file reads available when disabled.
+
+All data was synthetic or self-created temporary filesystem content. No user
+project, actual SVN repository or credential was touched. `svn` and `svnadmin`
+are not installed here. The new browser test source could not execute because
+Chromium's process-singleton socket creation was denied by the environment
+(`Operation not permitted`). No browser assertions, screenshot, Windows real-SVN
+results, native EXE/MSI or Tauri packaging are claimed.
+
+See [COMMIT_WORKFLOW.md](COMMIT_WORKFLOW.md) for limits, failure semantics and the
+required disposable-repository Windows/browser acceptance checklist.

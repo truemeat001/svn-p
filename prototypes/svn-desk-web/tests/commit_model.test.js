@@ -1,0 +1,9 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {commitScopeRows,parseCommitMessage,validateCommitPlan} from '../web/model.js';
+const rows=[{id:'a',path:'visible/a',item:'modified',props:'none',changelist:'work'},{id:'b',path:'hidden/b',item:'normal',props:'none',changelist:'work'}];
+const request={workspaceId:'w',selectionVersion:1,snapshotToken:'s',operation:'selected',ids:['a'],name:null,message:'fix',keepChangelist:false};
+const result={...request,mode:'live',planToken:'p',expiresIn:120,files:[{...rows[0],fromChangelist:'work'}]};
+test('selected exact versus named complete scope includes clean hidden members',()=>{assert.deepEqual(commitScopeRows(rows,new Set(['a'])),[rows[0]]);assert.deepEqual(commitScopeRows(rows,new Set(['a']),'changelist','work'),rows);assert.throws(()=>commitScopeRows(Array.from({length:101},(_,i)=>({...rows[0],id:String(i)})),new Set(),'changelist','work'));assert.throws(()=>commitScopeRows(rows,new Set(['unknown'])));});
+test('message UTF-8 bound and invalid Unicode',()=>{assert.equal(parseCommitMessage('中'.repeat(2730)).length,2730);for(const m of ['', '  ', '中'.repeat(2731), '\u0000', '\u0001', '\u007f', '\u0085', '\ud800'])assert.throws(()=>parseCommitMessage(m));assert.equal(parseCommitMessage('😀'),'😀');});
+test('plan exact identity and immutable scope',()=>{assert.equal(validateCommitPlan(result,request,rows),result);for(const patch of [{keepChangelist:true},{operation:'changelist'},{name:'work'},{snapshotToken:'wrong'},{expiresIn:999},{files:[...result.files,...result.files]},{files:[{...result.files[0],props:'modified'}]}])assert.throws(()=>validateCommitPlan({...result,...patch},request,rows));assert.throws(()=>validateCommitPlan({...result,operation:'changelist',name:'work'},{...request,operation:'changelist',name:'work'},rows));});
