@@ -167,3 +167,25 @@ export function commitResultSummary(result,{statusRefreshed=false,stale=false}={
  message+=stale?' 窗口或工作范围已改变，未采用返回状态；请显式刷新本地状态并检查仓库历史。':statusRefreshed?' 已重新读取本地状态。':' 本地状态不可用；请显式刷新本地状态并检查仓库历史。';
  return message+' 不会自动重试。';
 }
+
+
+// Context menus act on one explicit focus target and the existing exact selection.
+// Opening a menu is not an operation and must never expand a changelist/folder.
+export function contextMenuSelection(rows,selected,targetId){
+ if(!rows.some(row=>row.id===targetId))throw Error('菜单目标已不在当前状态中。');
+ const ids=new Set(rows.map(row=>row.id));
+ return selected.has(targetId)?new Set([...selected].filter(id=>ids.has(id))):new Set([targetId]);
+}
+export function captureContextMenuScope(state){
+ return {rows:state.rows,mode:state.mode,workspaceId:state.workspaceId,selectionVersion:state.selectionVersion,
+  snapshotToken:state.snapshotToken,focused:state.focused,ids:JSON.stringify([...state.selected].sort())};
+}
+export function sameContextMenuScope(scope,state){
+ return !!scope&&!state.busy&&!state.failed&&['rows','mode','workspaceId','selectionVersion','snapshotToken','focused']
+  .every(key=>scope[key]===state[key])&&scope.ids===JSON.stringify([...state.selected].sort());
+}
+export function contextMenuPosition(x,y,width,height,viewportWidth,viewportHeight){
+ const inset=8;
+ return {left:Math.max(inset,Math.min(Number.isFinite(x)?x:inset,viewportWidth-width-inset)),
+  top:Math.max(inset,Math.min(Number.isFinite(y)?y:inset,viewportHeight-height-inset))};
+}

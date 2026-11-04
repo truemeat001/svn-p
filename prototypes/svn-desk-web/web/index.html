@@ -34,7 +34,7 @@
       <div id="live-error" class="error-banner hidden" role="alert"></div>
       <div id="folder-scope" class="scope-banner hidden"></div>
       <div class="table-area" id="table-area"><table class="file-table"><thead><tr><th class="check-cell"><input id="select-visible" type="checkbox" aria-label="选择当前可见文件"></th><th>文件名</th><th>状态</th><th class="path-column">所在目录</th><th class="revision-column">BASE</th></tr></thead><tbody id="file-body"></tbody></table><div class="empty-state hidden" id="empty-state"><span data-icon="search"></span><strong>没有匹配的更改</strong><p>试试其他关键词，或清除目录和状态筛选。</p><button class="subtle-button" id="empty-reset">清除筛选</button></div></div>
-      <div class="list-footer"><span id="visible-count">显示 12 项</span><span id="selection-summary">已选择 1 项</span><span class="footer-hint">空格选择 · ↑ ↓ 浏览</span></div>
+      <div class="list-footer"><span id="visible-count">显示 12 项</span><span id="selection-summary">已选择 1 项</span><span class="footer-hint">空格选择 · ↑ ↓ 浏览 · 右键菜单</span></div>
       <section class="preview-panel" id="preview-panel"><div class="preview-tabs"><button class="active" data-preview="diff">差异预览</button><button data-preview="properties">属性</button><div class="tab-filler"></div><span class="preview-kind" id="preview-kind">示例内容 · 非真实文件</span><button class="icon-button" id="toggle-preview" aria-label="折叠差异面板" data-icon="chevron-down"></button></div><div class="diff-toolbar"><span data-icon="code"></span><strong id="diff-filename">PlayerController.cs</strong><span class="diff-endpoints">BASE <span>→</span> WORKING</span><span class="diff-stats" id="diff-stats">+5 <span>−2</span></span></div><div class="diff-content" id="diff-content"></div></section>
     </section>
     <aside class="details-panel" id="details-panel"><div class="details-heading">文件详情<button class="icon-button" id="close-detail" aria-label="关闭文件详情" data-icon="close"></button></div><div id="detail-content"></div></aside>
@@ -43,6 +43,7 @@
   <footer class="statusbar"><span><span class="dot"></span><span id="status-text">演示数据，未连接仓库</span></span><span class="status-right"><span id="status-summary">12 项更改 · 1 个冲突</span><span class="separator">|</span><span id="read-time">就绪</span><span class="separator">|</span><span>Web UI 原型 0.1</span></span></footer>
 </div>
 <dialog id="modal"><div class="modal-header"><h2 id="modal-title"></h2><button class="icon-button" id="modal-close" aria-label="关闭对话框" data-icon="close"></button></div><div id="modal-content"></div><div class="modal-footer"><button id="commit-confirm" class="primary-button hidden" disabled>确认提交到仓库</button><button id="shelf-confirm" class="primary-button hidden" disabled>确认 Shelf 操作</button><button id="changelist-confirm" class="primary-button hidden" disabled>确认修改本地标签</button><button id="modal-done" class="primary-button">关闭</button></div></dialog>
+<div id="file-context-menu" class="file-context-menu hidden" role="menu" aria-label="文件操作菜单"></div>
 <div id="toast" class="toast hidden" role="status"></div>
 <script type="module" src="./app.js"></script>
 </body></html>

@@ -1,4 +1,4 @@
-import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse,parseChangelistTarget,validateChangelistPlan,canRelabelFile,canShelfFile,parseShelfName,sameShelfScope,validateShelfFiles,validateShelfPlan,commitScopeRows,parseCommitMessage,validateCommitPlan,validateCommitResult,commitResultSummary} from './model.js';
+import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse,parseChangelistTarget,validateChangelistPlan,canRelabelFile,canShelfFile,parseShelfName,sameShelfScope,validateShelfFiles,validateShelfPlan,commitScopeRows,parseCommitMessage,validateCommitPlan,validateCommitResult,commitResultSummary,contextMenuSelection,captureContextMenuScope,sameContextMenuScope,contextMenuPosition} from './model.js';
 import {demoRows,demoDiff,demoHistory} from './demo-data.js';
 const $=id=>document.getElementById(id);
 const paths={
@@ -25,6 +25,47 @@ const token=document.querySelector('meta[name="svn-session"]').content;
 const standalone=token==='__SESSION_TOKEN__';
 const state={mode:standalone?'demo':'loading',rows:[],query:'',filter:'all',folder:'',selected:new Set(),focused:null,collapsed:new Set(),preview:'diff',logs:[],busy:false,failed:false,workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas',workspaceId:null,selectionVersion:0};
 let toastTimer;
+let fileMenuScope=null,fileMenuRow=null;
+function focusFileRow(id){const index=state.rows.findIndex(row=>row.id===id);if(index>=0)$('file-body').querySelector(`[data-row-index="${index}"]`)?.focus({preventScroll:true});}
+function closeFileMenu(restoreFocus=false){
+ const id=fileMenuRow;fileMenuScope=null;fileMenuRow=null;
+ const menu=$('file-context-menu');if(!menu)return;
+ menu.classList.add('hidden');menu.replaceChildren();
+ if(restoreFocus&&id!==null)focusFileRow(id);
+}
+function fileMenuActions(){
+ const read=state.mode==='demo'||readsAvailable();
+ return [
+  {id:'diff',label:'查看此文件差异…',hint:'仅焦点文件；真实模式仍需点击读取',enabled:read,run:showDiff},
+  {id:'history',label:'查看此文件历史…',hint:'仅焦点文件；不会立即访问仓库',enabled:read,run:showHistory},
+  {id:'review',label:'审查完整选区…',hint:'包含被筛选或折叠隐藏的选中项',enabled:state.selected.size>0,run:review},
+  {id:'changelist',label:'移动选区到变更列表…',hint:state.mode==='demo'?'仅演示模拟；仍需预检并确认':'需启用本地归组；仍需预检并确认',enabled:changelistsAvailable(),run:openChangelists},
+  {id:'shelf',label:'从选区创建本地 Shelf…',hint:'需真实模式及 Shelf 启用；仍需预检并确认',enabled:shelfCreateAvailable(),run:openCreateShelf},
+  {id:'commit',label:'提交明确选区…',hint:'不扩大到整个组；仍需预检并确认',enabled:!$('commit-selected').disabled,run:()=>openCommit('selected')},
+ ];
+}
+function openFileMenu(event,row,keyboard=false){
+ event.preventDefault();
+ if(state.busy||state.failed||$('modal').open||!state.rows.includes(row))return;
+ state.selected=contextMenuSelection(state.rows,state.selected,row.id);state.focused=row.id;render();
+ fileMenuRow=row.id;fileMenuScope=captureContextMenuScope(state);
+ const menu=$('file-context-menu'),visible=new Set(displayed().map(item=>item.id));
+ const hidden=[...state.selected].filter(id=>!visible.has(id)).length;
+ menu.innerHTML=`<div class="file-menu-heading" role="presentation"><strong>${esc(fileName(row.path))}</strong><span>${esc(row.path)}</span><span>完整选区 ${state.selected.size} 项${hidden?` · 含 ${hidden} 项不可见`:''}</span></div>${fileMenuActions().map(action=>`<button type="button" role="menuitem" tabindex="-1" data-file-action="${action.id}" ${action.enabled?'':'disabled'}><strong>${esc(action.label)}</strong><small>${esc(action.hint)}</small></button>`).join('')}`;
+ menu.classList.remove('hidden');
+ const anchor=$('file-body').querySelector(`[data-row-index="${state.rows.indexOf(row)}"]`).getBoundingClientRect();
+ const pos=contextMenuPosition(keyboard?anchor.left+36:event.clientX,keyboard?anchor.top+anchor.height:event.clientY,menu.offsetWidth,menu.offsetHeight,innerWidth,innerHeight);
+ // Setting individual CSSOM properties is compatible with the bridge's no-inline-style CSP.
+ menu.style.left=`${pos.left}px`;menu.style.top=`${pos.top}px`;
+ menu.querySelector('button:not(:disabled)')?.focus({preventScroll:true});
+}
+function runFileMenuAction(id){
+ if(!sameContextMenuScope(fileMenuScope,state)||$('modal').open){closeFileMenu();return;}
+ const action=fileMenuActions().find(item=>item.id===id);
+ if(!action?.enabled)return;
+ closeFileMenu(true);action.run();
+}
+
 let diffFrom='BASE',diffTo='WORKING';
 let readGeneration=0,readPending=false,diffResult=null,diffError='',historyResult=null,historyStarts=[],historyStart='HEAD',historySelected=null,historyError='',lastFocus=null;
 function invalidateReads(closeHistory=true){diffFrom='BASE';diffTo='WORKING';readGeneration++;readPending=false;diffResult=null;diffError='';historyResult=null;historyStarts=[];historyStart='HEAD';historySelected=null;historyError='';if(closeHistory&&modalView==='history'&&$('modal').open)$('modal').close();}
@@ -50,6 +91,7 @@ function renderTree(){
  $('folder-tree').querySelectorAll('button').forEach((button,i)=>{button.removeAttribute('style');button.classList.add(`depth-${Math.min(4,sorted[i]?sorted[i].split('/').length:0)}`);button.onclick=()=>{state.folder=sorted[i];state.collapsed.clear();render();};});
 }
 function render(){
+ closeFileMenu();
  if(changelistSelection!==selectionKey()){changelistSelection=selectionKey();invalidateChangelist();invalidateShelf();invalidateCommit();}
  updateShelfButtons();updateCommitButtons();
  $('move-changelist').disabled=!changelistsAvailable();
@@ -62,6 +104,8 @@ function render(){
  $('file-body').querySelectorAll('[data-row-index]').forEach(tr=>{
   const row=state.rows[Number(tr.dataset.rowIndex)];
   tr.onclick=event=>{state.focused=row.id;if(event.target.type==='checkbox'||event.ctrlKey||event.metaKey){state.selected.has(row.id)?state.selected.delete(row.id):state.selected.add(row.id);}else{state.selected=new Set([row.id]);}render();};
+  tr.oncontextmenu=event=>openFileMenu(event,row);
+  tr.addEventListener('keydown',event=>{if(event.key==='ContextMenu'||event.shiftKey&&event.key==='F10'){event.stopImmediatePropagation();openFileMenu(event,row,true);}});
   tr.ondblclick=()=>{showDiff();};
   tr.onkeydown=e=>{if(!['ArrowDown','ArrowUp',' '].includes(e.key))return;e.preventDefault();if(e.key===' '){state.selected.has(row.id)?state.selected.delete(row.id):state.selected.add(row.id);}else{const idx=visible.findIndex(r=>r.id===row.id),target=visible[Math.max(0,Math.min(visible.length-1,idx+(e.key==='ArrowDown'?1:-1)))];state.focused=target.id;}render();const focusIndex=state.rows.findIndex(r=>r.id===state.focused);$('file-body').querySelector(`[data-row-index="${focusIndex}"]`)?.focus();};
  });
@@ -104,7 +148,7 @@ function renderPreview(){
   $('diff-content').innerHTML=demoDiff.map(([kind,code])=>{const oldNo=kind==='h'||kind==='+'?'':old++,newNo=kind==='h'||kind==='-'?'':working++;return `<div class="diff-line ${kind==='+'?'add':kind==='-'?'remove':kind==='h'?'hunk':''}"><span class="line-no">${oldNo}</span><span class="line-no">${newNo}</span><span class="line-sign">${kind==='h'?'':esc(kind)}</span><span class="line-code">${esc(code)}</span></div>`;}).join('');
  }else{$('diff-content').innerHTML=`<div class="diff-empty">${demo?'该示例没有内置差异内容。选择 PlayerController.cs 可体验文本差异预览。':'此原型只接入本地 status 元数据，未读取真实文件内容或执行 diff。'}<br>文件：${esc(row.path)}</div>`;}
 }
-function modal(title,content){invalidateCommit();$('commit-confirm').classList.add('hidden');invalidateShelf();$('shelf-confirm').classList.add('hidden');$('changelist-confirm').classList.add('hidden');invalidateChangelist();invalidateReads();renderPreview();modalView='generic';workspaceRequest++;$('modal-title').textContent=title;$('modal-content').innerHTML=content;if(!$('modal').open)$('modal').showModal();}
+function modal(title,content){closeFileMenu();invalidateCommit();$('commit-confirm').classList.add('hidden');invalidateShelf();$('shelf-confirm').classList.add('hidden');$('changelist-confirm').classList.add('hidden');invalidateChangelist();invalidateReads();renderPreview();modalView='generic';workspaceRequest++;$('modal-title').textContent=title;$('modal-content').innerHTML=content;if(!$('modal').open)$('modal').showModal();}
 function showHistory(){
  const row=state.rows.find(r=>r.id===state.focused);
  if(!row)return notify('先选择一个文件。');
@@ -165,7 +209,7 @@ async function requestHistory(startRevision,back){
  finally{if(generation===readGeneration){readPending=false;renderHistory();}}
 }
 
-function review(){const rows=reviewSelection(state.rows,state.selected);modal(`审查选中项 · ${rows.length} 个文件`,`<p>这是只读审查，不会提交。列表包含已选择但被筛选或折叠隐藏的文件；不会自动扩展目录范围。</p><div>${rows.map(r=>`<div class="review-file">${statusTag(r)}<span>${esc(r.path)}</span></div>`).join('')}</div><p class="history-disclaimer">${state.mode==='demo'?'当前为演示数据。':'当前为真实本地状态。'} 提交与还原未接入；本地归组与 Shelf 需分别启用、预检并确认。</p>`);log(`打开只读审查：${rows.length} 项明确选择；未发送写操作。`);}
+function review(){const rows=reviewSelection(state.rows,state.selected);modal(`审查选中项 · ${rows.length} 个文件`,`<p>这是只读审查，不会提交。列表包含已选择但被筛选或折叠隐藏的文件；不会自动扩展目录范围。</p><div>${rows.map(r=>`<div class="review-file">${statusTag(r)}<span>${esc(r.path)}</span></div>`).join('')}</div><p class="history-disclaimer">${state.mode==='demo'?'当前为演示数据。':'当前为真实本地状态。'} 普通还原未接入；本地归组、Shelf 与仓库提交需分别启用、预检并独立确认。</p>`);log(`打开只读审查：${rows.length} 项明确选择；未发送写操作。`);}
 function changelistFiles(rows){return rows.map(row=>`<li><span class="changelist-path">${esc(row.path)}</span><span>来源：${esc(row.changelist||'默认变更列表（未分组）')}</span></li>`).join('');}
 function openChangelists(){
  if(!changelistsAvailable())return;
@@ -365,7 +409,7 @@ function applySnapshot(payload,initial=false){
  updateMode();render();$('read-time').textContent=state.mode==='select'?'等候选择':`已读取 ${new Date().toLocaleTimeString('en-GB')}`;
 }
 function failSnapshot(message){invalidateCommit();state.commitsEnabled=false;invalidateShelf();state.shelfWritesEnabled=false;invalidateChangelist();invalidateReads();state.changelistWritesEnabled=false;state.snapshotToken=null;state.fileReadsEnabled=false;state.failed=true;state.rows=[];state.selected.clear();state.focused=null;if(state.mode==='loading')state.mode='error';$('live-error').textContent=message;$('live-error').classList.remove('hidden');updateMode();render();$('read-time').textContent='状态未知';}
-function setBusy(busy){state.busy=busy;updateShelfButtons();updateCommitButtons();$('move-changelist').disabled=!changelistsAvailable();$('refresh').disabled=busy;$('open-workspace').disabled=busy;}
+function setBusy(busy){if(busy)closeFileMenu();state.busy=busy;updateShelfButtons();updateCommitButtons();$('move-changelist').disabled=!changelistsAvailable();$('refresh').disabled=busy;$('open-workspace').disabled=busy;}
 async function refresh(initial=false){
  if(state.busy)return;invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();setBusy(true);renderPreview();$('read-time').textContent='正在读取…';
  try{
@@ -423,6 +467,20 @@ async function selectWorkspace(id){
 }
 function clearFilters(){state.query='';state.filter='all';state.folder='';$('search').value='';render();}
 paintIcons();
+$('file-context-menu').addEventListener('click',event=>{const button=event.target.closest('[data-file-action]');if(button&&!button.disabled)runFileMenuAction(button.dataset.fileAction);});
+$('file-context-menu').addEventListener('keydown',event=>{
+ const buttons=[...$('file-context-menu').querySelectorAll('button:not(:disabled)')];
+ if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)){
+  event.preventDefault();event.stopPropagation();
+  const index=buttons.indexOf(document.activeElement),next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;
+  buttons[next]?.focus();
+ }else if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeFileMenu(true);}
+ else if(event.key==='Tab'){closeFileMenu(true);}
+});
+document.addEventListener('pointerdown',event=>{if(!$('file-context-menu').contains(event.target))closeFileMenu();},true);
+document.addEventListener('focusin',event=>{if(fileMenuScope&&!$('file-context-menu').contains(event.target))closeFileMenu();});
+document.addEventListener('scroll',event=>{if(! $('file-context-menu').contains(event.target))closeFileMenu();},true);
+window.addEventListener('resize',()=>closeFileMenu());window.addEventListener('blur',()=>closeFileMenu());
 $('refresh').onclick=()=>refresh();$('search').addEventListener('input',e=>{state.query=e.target.value;state.collapsed.clear();render();});
 document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;state.collapsed.clear();render();});
 $('pending-nav').onclick=clearFilters;$('pending-tab').onclick=clearFilters;$('conflict-nav').onclick=()=>{state.filter='conflicted';state.collapsed.clear();state.folder='';state.query='';$('search').value='';render();};
@@ -442,7 +500,7 @@ $('workspace-tab').onclick=()=>{$('workspace-tab').classList.add('active');$('re
 $('repository-tab').onclick=()=>{$('repository-tab').classList.add('active');$('workspace-tab').classList.remove('active');$('repository-notice').classList.remove('hidden');$('folder-tree').classList.add('hidden');};
 $('history-tab').onclick=showHistory;
 $('open-workspace').onclick=openWorkspaces;
-$('help').onclick=()=>modal('SVN Desk · Web 原型',`<p>现代 Web 视觉，保留工作区树、原生 changelist 分组、选中项审查、详情与独立日志的桌面工作流。</p><ul><li>真实可用：筛选、选中、折叠分组、目录范围、只读审查与布局切换。</li><li>演示：选定示例文件的差异、历史与工作副本身份。</li><li>可选桥接：真实本地 status、显式只读 diff 与仓库历史。</li><li>本地归组：需显式启用，预检后单独确认；演示模式仅模拟。Shelf：显式启用后支持真实本地备份与完整恢复；无演示模拟。仓库提交：需显式启用，完整范围预检后另行确认。未实现：普通还原、远程仓库浏览。</li></ul><p>快捷键：Ctrl/Cmd K 搜索 · F5 刷新 · ↑ ↓ 浏览 · 空格选择 · Esc 关闭弹窗</p><p>运行方式：浏览器原型。Tauri 壳仅提供源码，尚未编译或完成 Windows 验收。</p>`);
+$('help').onclick=()=>modal('SVN Desk · Web 原型',`<p>现代 Web 视觉，保留工作区树、原生 changelist 分组、选中项审查、详情与独立日志的桌面工作流。</p><ul><li>真实可用：筛选、选中、折叠分组、目录范围、只读审查与布局切换。</li><li>演示：选定示例文件的差异、历史与工作副本身份。</li><li>可选桥接：真实本地 status、显式只读 diff 与仓库历史。</li><li>本地归组：需显式启用，预检后单独确认；演示模式仅模拟。Shelf：显式启用后支持真实本地备份与完整恢复；无演示模拟。仓库提交：需显式启用，完整范围预检后另行确认。未实现：普通还原、远程仓库浏览。</li></ul><p>快捷键：Ctrl/Cmd K 搜索 · F5 刷新 · ↑ ↓ 浏览 · 空格选择 · Shift+F10 / 菜单键打开文件菜单 · Esc 关闭菜单或弹窗</p><p>运行方式：浏览器原型。Tauri 壳仅提供源码，尚未编译或完成 Windows 验收。</p>`);
 $('modal').addEventListener('cancel',()=>{invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads(false);$('modal-content').innerHTML='';renderPreview();});
 $('modal').addEventListener('close',()=>{invalidateCommit();$('commit-confirm').classList.add('hidden');if(commitApplying)failSnapshot('提交请求已发送；关闭不等于取消，仓库可能已写入。请等待请求结束后显式刷新并检查仓库历史，切勿直接重试。');invalidateShelf();$('shelf-confirm').classList.add('hidden');if(shelfApplying)failSnapshot('Shelf 请求已发送；关闭不等于取消，可能已部分或全部生效。请等待请求结束后显式刷新并重新审查。');$('changelist-confirm').classList.add('hidden');invalidateChangelist();if(changelistApplying)failSnapshot('归组请求仍在执行，关闭窗口不等于取消。结果返回前状态未知；请查看操作日志。');workspaceRequest++;modalView='';invalidateReads(false);$('modal-content').innerHTML='';renderPreview();});
 $('modal-close').onclick=$('modal-done').onclick=()=>$('modal').close();$('modal').addEventListener('click',e=>{if(e.target===$('modal')){const r=$('modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('modal').close();}});

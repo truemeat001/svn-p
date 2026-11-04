@@ -243,3 +243,20 @@ because of the existing Chromium socket restriction. Windows real-SVN and native
 packaging retests remain pending. No user project or credentials were accessed.
 See [COMMIT_DIAGNOSTICS.md](COMMIT_DIAGNOSTICS.md) for the result contract and the
 required disposable-repository retest sequence.
+
+## Exact-selection file menu · 2026-11-04
+
+Base `d9f3a342f81ba7195e803d1b4b84a9311a02a584`. The right-click and keyboard
+menu reuses existing exact-scope workflows; no Python service, SVN backend or
+Shelf format changed. It adds no API endpoint or implicit repository request.
+
+- 55 JavaScript tests passed, including 16 new model/controller/listener tests.
+- 261 Python tests ran: 259 passed and 2 existing real-SVN tests skipped.
+- Independent source review and 5 separately written listener regressions passed.
+- JavaScript syntax checks and standalone rebuild passed.
+
+These new controller/listener tests use DOM adapters, not a browser. Actual Linux
+Chromium launch was blocked by the environment's process-singleton socket
+restriction. The browser acceptance script is provided but did not execute its
+assertions. No new screenshot, real SVN, Windows, WebView2 or native packaging
+result is claimed. Details and outstanding checks: [FILE_CONTEXT_MENU.md](FILE_CONTEXT_MENU.md).
