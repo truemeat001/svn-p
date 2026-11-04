@@ -4,7 +4,7 @@ A real Windows Forms window hosting Microsoft Edge WebView2, not a browser launc
 
 ## Existing prerequisites
 
-- Windows x64 with .NET Framework 4.8 and its existing C# compiler (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`).
+- Windows 10 Creators Update (1703) or later / Windows 11 x64 with .NET Framework 4.8 and its existing C# compiler (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`).
 - Installed Microsoft Edge WebView2 Runtime.
 - Extracted official `Microsoft.Web.WebView2` NuGet 1.0.3537.50 (https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3537.50). Build consumes `lib/net462` Core/WinForms assemblies and the x64 native loader. Package restore is a project-local dependency, not a system installation.
 - SVN executable installed separately for real working copies. Demo does not require a working copy.
@@ -112,3 +112,26 @@ Without `--profile-root`, ordinary user launches retain the standard isolated ra
 
 
 Source-process PID fixture: Windows venv `python.exe` is a redirector and can have a different PID from the actual Python process. For these standard-library-only source subprocess fixtures, Windows venv runs now select the existing absolute `sys._base_executable` directly. The exact readiness PID equality check is retained, not skipped or relaxed; a missing base interpreter fails the test. Other tests still run in their selected interpreter. Actual packaged onedir PID checks remain separate. See [Python venv documentation](https://docs.python.org/3/library/venv.html).
+
+
+## Native welcome-page DPI repair (source only)
+
+The user report and screenshot show blurred text on the native welcome page before WebView2 starts. The 5298602 source configured `PerMonitorV2` in `SVNDesk.exe.config`, but `build.ps1` did not embed a Windows 10 compatibility manifest. That omits a documented prerequisite for .NET Framework high-DPI support. The buttons also inherited the legacy WinForms default font. These are confirmed source defects; the screenshot alone does not establish the target computer's effective DPI, display scaling, compatibility overrides or every cause of blur.
+
+This patch embeds `SVNDesk.manifest` with Windows 10 compatibility and non-elevated `asInvoker` execution. DPI awareness stays in the existing app.config, rather than competing manifest DPI tags. The manually compiled assembly now declares .NET Framework 4.8 explicitly. The native form uses a 96-DPI layout baseline with `AutoScaleMode.Dpi`, and controls inherit Segoe UI 10pt. Native welcome/error/status text is Chinese. Auto-sized labels and a wrapping button row replace the fixed-height gaps, within a centered width capped at 720 logical pixels and the current available window width. The preferred workbench size is retained, with its initial bounds and minimum dimensions capped to the current monitor working area so high-DPI scaling cannot force it below the taskbar. Buttons are created before the first scaling pass, not in `Shown`. Default read-only mode, feature opt-ins, bridge arguments, profile isolation and shutdown behavior are unchanged.
+
+`build.ps1` explicitly compiles UTF-8 source and now runs `DpiTests.exe` from the sibling diagnostics directory. The test executable uses the same host source, application config and embedded manifest. It checks the actual packaged EXE's `RT_MANIFEST`, its packaged app.config, effective thread/window PerMonitorV2 context, native/WinForms DPI agreement, inherited UI/button font, initial button presence and window bounds within the monitor working area. It creates a hidden native window only; it never shows the launcher, opens a working copy, starts the bridge or creates a browser profile. A failing native check blocks a successful build. `nativeGuiTest` remains `not_run` regardless of those checks.
+
+Cross-platform source guard: `python -m unittest discover -s desktop/windows/tests -p 'test_*.py'`. This can validate XML, source/build wiring and build inputs on Linux. It cannot establish Windows font sharpness or native compilation.
+
+Required acceptance on Windows before delivering another portable package:
+
+1. Build both host and bridge from this exact source; require protocol, profile-policy, DPI and bridge tests to pass. Record the compiled EXE/config/source hashes and `DpiTests.log`.
+2. Launch from a fresh isolated profile at 100%, 125%, 150% and 200% display scaling. Verify the Chinese welcome heading, body and both buttons are sharp, fully visible and comfortably spaced. Resize narrow/wide and maximize/restore; text and buttons must not overlap or be clipped. Capture native screenshots with each display scale recorded.
+3. Move the same window between monitors with different DPI, then back. Check welcome/status controls and WebView2 content after entering demo. No repeated enlargement, blur or stale viewport sizes is allowed.
+4. Cancel the folder picker, reopen it, return to the chooser, then open demo. Confirm the real project remains untouched and all write features stay off. Repeat startup-error and orderly-shutdown status screens to verify wrapped Chinese warnings remain readable.
+5. Inspect application-specific Windows compatibility DPI overrides if effective runtime DPI does not match the expected mode. Do not silently change user/OS display, compatibility or font settings.
+
+The web CSS contains no page-level zoom/transform workaround for this defect, and this patch does not add one. Browser screenshots or Linux Chromium tests are not evidence that Windows native text is repaired.
+
+References: [Microsoft .NET Framework high-DPI setup](https://learn.microsoft.com/en-us/dotnet/desktop/winforms/high-dpi-support-in-windows-forms), [automatic scaling](https://learn.microsoft.com/en-us/dotnet/desktop/winforms/forms/autoscale), [DPI context comparison](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-aredpiawarenesscontextsequal).

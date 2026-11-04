@@ -39,7 +39,9 @@ New-Item -ItemType Directory -Path $OutDir | Out-Null
 New-Item -ItemType Directory -Path $diagnostics | Out-Null
 $out = (Resolve-Path $OutDir).Path
 $diag = (Resolve-Path $diagnostics).Path
-$common = @('/nologo','/langversion:5','/platform:x64','/optimize+','/r:System.dll','/r:System.Core.dll','/r:System.Web.Extensions.dll')
+$manifest = Join-Path $PSScriptRoot 'SVNDesk.manifest'
+if (!(Test-Path -LiteralPath $manifest -PathType Leaf)) { throw 'Required Windows compatibility manifest is missing.' }
+$common = @('/nologo','/langversion:5','/codepage:65001','/platform:x64','/optimize+','/r:System.dll','/r:System.Core.dll','/r:System.Web.Extensions.dll')
 function Invoke-Compiler([string]$Name, [string[]]$Arguments) {
     $output = & $compiler @Arguments 2>&1
     $code = $LASTEXITCODE
@@ -59,9 +61,19 @@ $profileExit = $LASTEXITCODE
 $profileOutput | Set-Content -LiteralPath "$diag\ProfilePolicyTests.log" -Encoding UTF8
 $profileOutput | Write-Output
 if ($profileExit -ne 0) { throw 'Windows profile-policy checks failed' }
-Invoke-Compiler 'SVNDesk' ($common + @('/target:winexe','/r:System.Drawing.dll','/r:System.Windows.Forms.dll',"/r:$core","/r:$forms","/out:$out\SVNDesk.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs"))
+Invoke-Compiler 'SVNDesk' ($common + @('/target:winexe',"/win32manifest:$manifest",'/r:System.Drawing.dll','/r:System.Windows.Forms.dll',"/r:$core","/r:$forms","/out:$out\SVNDesk.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs"))
 foreach ($file in @($core,$forms,$loader)) { Copy-Item -LiteralPath $file -Destination $out }
 Copy-Item -LiteralPath "$PSScriptRoot\SVNDesk.exe.config" -Destination $out
+# Use the identical host source, embedded manifest and application config in the
+# DPI probe. It creates only a hidden window, never starts the bridge or WebView.
+Invoke-Compiler 'DpiTests' ($common + @('/target:exe','/main:SVNDeskDesktop.DpiTests',"/win32manifest:$manifest",'/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Xml.dll',"/r:$core","/r:$forms","/out:$diag\DpiTests.exe","$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs","$PSScriptRoot\DpiTests.cs"))
+Copy-Item -LiteralPath "$PSScriptRoot\SVNDesk.exe.config" -Destination "$diag\DpiTests.exe.config"
+foreach ($file in @($core,$forms,$loader)) { Copy-Item -LiteralPath $file -Destination $diag }
+$dpiOutput = & "$diag\DpiTests.exe" "$out\SVNDesk.exe" 2>&1
+$dpiExit = $LASTEXITCODE
+$dpiOutput | Set-Content -LiteralPath "$diag\DpiTests.log" -Encoding UTF8
+$dpiOutput | Write-Output
+if ($dpiExit -ne 0) { throw 'Native DPI/build checks failed; do not distribute this host.' }
 $licenseOut = Join-Path $out 'Licenses'
 New-Item -ItemType Directory -Path $licenseOut | Out-Null
 $legalOutputs = @()
@@ -71,8 +83,8 @@ foreach ($file in ($licenseInputs + $noticeInputs)) {
     $legalOutputs += $destination
 }
 $hashes = @()
-foreach ($file in @($compiler,$nuspecPath,"$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs","$PSScriptRoot\ProtocolTests.cs","$PSScriptRoot\ProfilePolicyTests.cs","$PSScriptRoot\build.ps1") + @(Get-ChildItem -File -LiteralPath $out | ForEach-Object FullName) + $legalOutputs) {
+foreach ($file in @($compiler,$nuspecPath,"$PSScriptRoot\Protocol.cs","$PSScriptRoot\ProfilePolicy.cs","$PSScriptRoot\Program.cs","$PSScriptRoot\ProtocolTests.cs","$PSScriptRoot\ProfilePolicyTests.cs","$PSScriptRoot\DpiTests.cs",$manifest,"$PSScriptRoot\build.ps1") + @(Get-ChildItem -File -LiteralPath $out | ForEach-Object FullName) + $legalOutputs) {
     $hashes += [ordered]@{ name = [IO.Path]::GetFileName($file); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() }
 }
-[ordered]@{ schema = 'svn-desk-native-build/1'; utc = [DateTime]::UtcNow.ToString('o'); architecture = 'x64'; compilerVersion = (Get-Item $compiler).VersionInfo.FileVersion; webView2Package = "$id/$version"; protocolTests = 'passed'; profilePolicyTests = 'passed'; nativeGuiTest = 'not_run'; separateWebView2NoticeAbsent = $missingNotices; redistributedLegalFiles = @($legalOutputs | ForEach-Object { 'Licenses/' + [IO.Path]::GetFileName($_) }); hashes = $hashes } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$diag\build-manifest.json" -Encoding UTF8
-Write-Output "Compiled host and passed protocol checks at $out. Diagnostics: $diag. GUI/lifecycle tests are separate."
+[ordered]@{ schema = 'svn-desk-native-build/1'; utc = [DateTime]::UtcNow.ToString('o'); architecture = 'x64'; compilerVersion = (Get-Item $compiler).VersionInfo.FileVersion; webView2Package = "$id/$version"; protocolTests = 'passed'; profilePolicyTests = 'passed'; nativeDpiTests = 'passed'; dpiMode = 'PerMonitorV2'; nativeGuiTest = 'not_run'; separateWebView2NoticeAbsent = $missingNotices; redistributedLegalFiles = @($legalOutputs | ForEach-Object { 'Licenses/' + [IO.Path]::GetFileName($_) }); hashes = $hashes } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$diag\build-manifest.json" -Encoding UTF8
+Write-Output "Compiled host and passed protocol, profile and native DPI checks at $out. Diagnostics: $diag. GUI/lifecycle tests are separate."
