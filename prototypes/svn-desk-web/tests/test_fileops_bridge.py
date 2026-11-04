@@ -109,7 +109,10 @@ class FileOperationHTTPTests(unittest.TestCase):
         auth = {'Content-Type': 'application/json', 'X-SVN-Desk-Token': self.server.token}
         self.assertEqual(self.request(headers={**auth, 'Transfer-Encoding': 'chunked'})[0], 400)
         self.assertEqual(self.request(headers={**auth, 'Content-Type': 'text/plain'})[0], 400)
-        self.assertEqual(self.request(raw=' ' * 262145)[0], 413)
+        from http_body_test_helpers import assert_oversized_body_rejected
+        assert_oversized_body_rejected(self, self.server, '/api/file-op-preflight',
+            body=' ' * 262145, limit=262144,
+            assert_no_dispatch=lambda: self.assertEqual(self.catalog.mock_calls, []))
         self.assertEqual(self.request(raw='')[0], 413)
         self.assertEqual(self.request(raw='[]')[0], 400)
         self.catalog.file_operation.assert_not_called()

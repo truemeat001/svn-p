@@ -352,7 +352,10 @@ class SelectionHttpTests(unittest.TestCase):
             self.assertEqual(self.request(body=body)[0], 400)
         self.assertEqual(self.request(headers={'Content-Type': 'text/plain'})[0], 400)
         self.assertEqual(self.request(path='/api/workspace-selection?path=/tmp')[0], 400)
-        self.assertEqual(self.request(body='x' * 4097)[0], 413)
+        from http_body_test_helpers import assert_oversized_body_rejected
+        assert_oversized_body_rejected(self, self.server, '/api/workspace-selection',
+            body='x' * 4097, limit=4096,
+            assert_no_dispatch=lambda: self.assertEqual(self.catalog.mock_calls, []))
         self.catalog.select.assert_not_called()
 
     def test_selection_errors_are_sanitized_and_not_retried(self):

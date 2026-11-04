@@ -323,7 +323,10 @@ class FileReadHttpTests(unittest.TestCase):
             with self.subTest(change=change): self.assertEqual(self.request({**self.data, **change})[0], 400)
         self.assertEqual(self.request(raw=json.dumps(self.data)[:-1] + ',"id":"other"}')[0], 400)
         self.assertEqual(self.request(raw='[' * 1500 + ']' * 1500)[0], 400)
-        self.assertEqual(self.request(raw='x' * 4097)[0], 413)
+        from http_body_test_helpers import assert_oversized_body_rejected
+        assert_oversized_body_rejected(self, self.server, '/api/file-diff',
+            body='x' * 4097, limit=4096,
+            assert_no_dispatch=lambda: self.assertEqual(self.catalog.mock_calls, []))
         self.catalog.file_read.assert_not_called()
 
     def test_base_to_base_has_clear_400_without_backend_call(self):

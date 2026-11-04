@@ -468,7 +468,11 @@ class ChangelistTests(unittest.TestCase):
         self.assertEqual(post('/api/changelist-preflight',self.data,**{'X-SVN-Desk-Token':'bad'})[0],403)
         self.assertEqual(post('/api/changelist-preflight',json.dumps(self.data)[:-1]+',"name":"duplicate"}')[0],400)
         self.assertEqual(post('/api/changelist-preflight',{**self.data,'command':'commit'})[0],400)
-        self.assertEqual(post('/api/changelist-preflight',' ' * 262145)[0],413)
+        from http_body_test_helpers import assert_oversized_body_rejected
+        with patch.object(self.catalog, 'changelist_operation', wraps=self.catalog.changelist_operation) as dispatch:
+            assert_oversized_body_rejected(self, server, '/api/changelist-preflight',
+                body=' ' * 262145, limit=262144, assert_no_dispatch=dispatch.assert_not_called)
+        self.client.command.assert_not_called()
         self.assertEqual(post('/api/changelist-preflight',{**self.data,'ids':[native('src/a.txt')]*101})[0],400)
         status, plan=post('/api/changelist-preflight',self.data); self.assertEqual(status,200)
         self.assertEqual(post('/api/changelist-apply',{**self.apply_data(plan),'confirmed':1})[0],400)

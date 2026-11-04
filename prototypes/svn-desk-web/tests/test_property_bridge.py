@@ -75,7 +75,10 @@ class PropertyHTTPTests(unittest.TestCase):
         valid = {'Content-Type': 'application/json', 'X-SVN-Desk-Token': self.server.token}
         for raw in ('{', '{"id":"a","id":"a"}', json.dumps(request_data())[:-1] + ',"workspaceId":"w"}'):
             self.assertEqual(self.request(raw=raw)[0], 400)
-        self.assertEqual(self.request(raw=' ' * 4097)[0], 413)
+        from http_body_test_helpers import assert_oversized_body_rejected
+        assert_oversized_body_rejected(self, self.server, '/api/file-properties',
+            body=' ' * 4097, limit=4096,
+            assert_no_dispatch=lambda: self.assertEqual(self.catalog.mock_calls, []))
         self.assertEqual(self.request(headers={**valid, 'Content-Type': 'text/plain'})[0], 400)
         self.assertEqual(self.request(headers={**valid, 'Transfer-Encoding': 'chunked'})[0], 400)
         self.catalog.file_read.assert_not_called()

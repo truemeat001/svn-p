@@ -1,8 +1,10 @@
 """Synthetic files and mocked bounded transport; never a real SVN working copy."""
 from dataclasses import replace
 import importlib
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import shutil
 import sys
 import tempfile
@@ -58,6 +60,63 @@ class RequestTests(unittest.TestCase):
         with self.assertRaises(FileOperationUnavailable): FileOperationService(object(), lambda:None)
 
 
+class MetadataPathTests(unittest.TestCase):
+    def test_windows_wc_root_only_normalizes_separators(self):
+        workspace = r'C:\fixture\authorized\工作区甲'
+        for actual in (workspace, 'C:/fixture/authorized/工作区甲', r'C:/fixture\authorized/工作区甲'):
+            with self.subTest(actual=actual):
+                self.assertTrue(file_ops._svn_path_matches(actual, workspace, pathmod=ntpath))
+        for actual in (None, '', '.', 'C:fixture/authorized/工作区甲',
+                       r'\fixture\authorized\工作区甲', r'D:\fixture\authorized\工作区甲',
+                       workspace + r'\nested', workspace + r'\..\工作区甲',
+                       r'C:\fixture\authorized\other\..\工作区甲',
+                       workspace.upper(), workspace + '.', workspace + ' ',
+                       '\\\\?\\' + workspace, r'\\server\fixture\authorized\工作区甲'):
+            with self.subTest(actual=actual):
+                self.assertFalse(file_ops._svn_path_matches(actual, workspace, pathmod=ntpath))
+
+    def test_posix_wc_root_keeps_literal_separators_and_case(self):
+        workspace = '/fixture/authorized/工作区甲'
+        self.assertTrue(file_ops._svn_path_matches(workspace, workspace, pathmod=posixpath))
+        for actual in (workspace.replace('/', '\\'), workspace.upper(), workspace + '/.',
+                       workspace + '/../工作区甲', workspace + '/', workspace + '/nested'):
+            with self.subTest(actual=actual):
+                self.assertFalse(file_ops._svn_path_matches(actual, workspace, pathmod=posixpath))
+
+    def test_native_windows_exact_status_move_examples_both_directions(self):
+        # Captured from the real Windows SVN diagnostic: the base is the exact
+        # status target INCLUDING its filename, not that file's parent.
+        examples = [
+            (r'src\other.txt', r'src\renamed.txt', r'..\renamed.txt', r'..\other.txt'),
+            (r'src\clean.txt', 'moved-clean.txt', r'..\..\moved-clean.txt', r'..\src\clean.txt'),
+            (r'src\中文 @.txt', r'dest\复制 @.txt', r'..\..\dest\复制 @.txt', r'..\..\src\中文 @.txt'),
+        ]
+        for source, destination, moved_to, moved_from in examples:
+            for target, counterpart, actual in ((source, destination, moved_to), (destination, source, moved_from)):
+                for spelling in (actual, actual.replace('\\', '/')):
+                    with self.subTest(target=target, actual=spelling):
+                        self.assertTrue(file_ops._status_move_matches(spelling, target, counterpart, pathmod=ntpath))
+                        self.assertTrue(file_ops._status_move_matches(spelling.replace('\\', '/'),
+                            target.replace('\\', '/'), counterpart.replace('\\', '/'), pathmod=posixpath))
+
+    def test_move_metadata_cannot_match_wrong_base_or_ambiguous_paths(self):
+        for pathmod in (ntpath, posixpath):
+            source, destination = 'src/other.txt', 'dest/renamed.txt'
+            good = '../../dest/renamed.txt'
+            bad = [None, '', destination, '../dest/renamed.txt', '../renamed.txt',
+                   '../../dest/other.txt', '../../DEST/renamed.txt',
+                   '../../dest/renamed.txt.', '../../dest/renamed.txt ',
+                   '../../dest/junction/../renamed.txt', '../../dest/.svn/../renamed.txt',
+                   '../../../other-wc/dest/renamed.txt', '../../../wc/dest/renamed.txt',
+                   '../../dest/./renamed.txt', '../../dest//renamed.txt',
+                   '/wc/dest/renamed.txt', 'C:/wc/dest/renamed.txt',
+                   'C:dest/renamed.txt', '//host/share/dest/renamed.txt',
+                   'file:///wc/dest/renamed.txt', good + '\x00']
+            for actual in bad:
+                with self.subTest(platform=pathmod.__name__, actual=actual):
+                    self.assertFalse(file_ops._status_move_matches(actual, source, destination, pathmod=pathmod))
+
+
 @unittest.skipUnless((BACKEND / 'svn_client/fileops.py').is_file(), 'Trusted paired backend required.')
 class FileOperationTests(unittest.TestCase):
     def setUp(self):
@@ -95,7 +154,8 @@ class FileOperationTests(unittest.TestCase):
         root = ET.Element('info'); entry = ET.SubElement(root, 'entry', path=path, kind='dir' if path in {'.','src','dest'} else 'file', revision='7')
         ET.SubElement(entry, 'url').text = self.url(path)
         repo = ET.SubElement(entry, 'repository'); ET.SubElement(repo, 'root').text = 'https://example.test/repo'; ET.SubElement(repo, 'uuid').text = 'fixture'
-        wc = ET.SubElement(entry, 'wc-info'); ET.SubElement(wc, 'wcroot-abspath').text = str(self.root)
+        # SVN info uses forward slashes even on native Windows.
+        wc = ET.SubElement(entry, 'wc-info'); ET.SubElement(wc, 'wcroot-abspath').text = self.root.as_posix()
         ET.SubElement(wc, 'schedule').text = 'add' if status.item == 'added' else 'normal'
         if status.copied:
             ET.SubElement(wc, 'copy-from-url').text = self.url(self.source)
@@ -120,6 +180,10 @@ class FileOperationTests(unittest.TestCase):
             if value.revision is not None: attrs['revision'] = str(value.revision)
             for name in ('tree_conflicted', 'copied', 'switched', 'wc_locked', 'file_external', 'moved_from', 'moved_to'):
                 val = getattr(value, name)
+                if val and name in {'moved_from', 'moved_to'}:
+                    # Full-WC status uses root-relative counterparts; exact
+                    # status XML instead uses the file target itself as base.
+                    val = os.path.relpath(val, start=path)
                 if val: attrs[name.replace('_','-')] = 'true' if val is True else val
             wc = ET.SubElement(entry, 'wc-status', attrs)
             if self.status_changes.get(path) == 'lock': ET.SubElement(wc,'lock')
@@ -190,6 +254,66 @@ class FileOperationTests(unittest.TestCase):
         self.assertTrue((self.root/self.destination).is_file()); self.assertFalse((self.root/self.source).exists())
         with self.assertRaises(StaleRead): self.apply(plan)
         self.assertEqual(len(self.commands),1)
+
+    def test_move_same_directory_uses_target_relative_metadata(self):
+        self.destination = native('src/renamed.txt'); self.data['destination'] = self.destination
+        result, _ = self.apply(self.preflight())
+        self.assertTrue(result['verified'])
+        self.service._start(); self.addCleanup(self.service._finish)
+        self.assertEqual(self.manager._status(self.source).moved_to, native('../renamed.txt'))
+        self.assertEqual(self.manager._status(self.destination).moved_from, native('../a @.txt'))
+
+    def test_move_to_root_uses_target_relative_metadata(self):
+        self.destination = 'moved-clean.txt'; self.data['destination'] = self.destination
+        result, _ = self.apply(self.preflight())
+        self.assertTrue(result['verified'])
+        self.service._start(); self.addCleanup(self.service._finish)
+        self.assertEqual(self.manager._status(self.source).moved_to, native('../../moved-clean.txt'))
+        self.assertEqual(self.manager._status(self.destination).moved_from, native('../src/a @.txt'))
+
+    def test_post_move_rejects_wrong_counterparts_and_noncanonical_traversals(self):
+        plan = self.preflight(); native_plan = self.service.plan['native']
+        self.apply(plan)
+        self.service._start(); self.addCleanup(self.service._finish)
+        for target, attribute, counterpart in ((self.source, 'moved-to', self.destination),
+                                               (self.destination, 'moved-from', self.source)):
+            expected = os.path.relpath(counterpart, start=target)
+            bad_values = [counterpart, str(self.root / counterpart), expected.upper(),
+                          os.path.relpath('other.txt', start=target),
+                          native('../../other-wc/') + '/' + counterpart,
+                          expected.replace('..', '.', 1),
+                          expected.rsplit(os.sep, 1)[0] + os.sep + 'junction' + os.sep + '..' + os.sep + Path(counterpart).name,
+                          expected.rsplit(os.sep, 1)[0] + os.sep + '.svn' + os.sep + '..' + os.sep + Path(counterpart).name]
+            for value in bad_values:
+                def corrupt(cmd, path, raw):
+                    root = ET.fromstring(raw)
+                    if cmd == 'status' and path == target:
+                        root.find('.//wc-status').set(attribute, value)
+                    return ET.tostring(root)
+                self.raw_hook = corrupt
+                with self.subTest(attribute=attribute, value=value), self.assertRaises(ValueError):
+                    self.manager._verify_result(native_plan)
+        self.assertEqual(len(self.commands), 1)
+
+    def assert_bad_move_metadata_is_uncertain(self, target, attribute, value):
+        def corrupt(cmd, path, raw):
+            if cmd == 'status' and path == target and self.commands:
+                root = ET.fromstring(raw); root.find('.//wc-status').set(attribute, value)
+                return ET.tostring(root)
+            return raw
+        self.raw_hook = corrupt
+        plan = self.preflight()
+        with self.assertRaises(MutationUncertain): self.apply(plan)
+        with self.assertRaises(StaleRead): self.apply(plan)
+        self.assertEqual(len(self.commands), 1)
+        self.assertFalse((self.root / self.source).exists())
+        self.assertTrue((self.root / self.destination).is_file())
+
+    def test_wrong_moved_to_remains_uncertain_and_single_attempt(self):
+        self.assert_bad_move_metadata_is_uncertain(self.source, 'moved-to', self.destination)
+
+    def test_wrong_moved_from_remains_uncertain_and_single_attempt(self):
+        self.assert_bad_move_metadata_is_uncertain(self.destination, 'moved-from', self.source)
 
     def test_copy_preserves_source_and_escapes_destination_peg(self):
         plan = self.preflight(action='copy')
@@ -356,6 +480,27 @@ class FileOperationTests(unittest.TestCase):
     def test_bad_copy_provenance_is_uncertain(self):
         self.after_command=lambda:self.info_changes.update({self.destination:{'wc-info/copy-from-rev':'8'}})
         with self.assertRaises(MutationUncertain): self.apply(self.preflight())
+
+    def test_copy_foreign_wc_root_remains_uncertain(self):
+        self.after_command=lambda:self.info_changes.update({self.destination:{'wc-info/wcroot-abspath':str(self.root/'other-wc')}})
+        with self.assertRaises(MutationUncertain): self.apply(self.preflight(action='copy'))
+        self.assertEqual(len(self.commands), 1)
+
+    def test_copy_wc_root_traversal_alias_remains_uncertain(self):
+        alias = str(self.root) + '/nested/..'
+        self.after_command=lambda:self.info_changes.update({self.destination:{'wc-info/wcroot-abspath':alias}})
+        with self.assertRaises(MutationUncertain): self.apply(self.preflight(action='copy'))
+
+    def test_post_move_nested_working_copy_parent_remains_uncertain(self):
+        self.after_command=lambda:(self.root/'dest'/'.svn').mkdir()
+        with self.assertRaises(MutationUncertain): self.apply(self.preflight())
+        self.assertEqual(len(self.commands), 1)
+
+    def test_post_move_case_alias_parent_remains_uncertain(self):
+        if os.name == 'nt': self.skipTest('Case-sensitive synthetic collision tested on POSIX.')
+        self.after_command=lambda:(self.root/'DEST').mkdir()
+        with self.assertRaises(MutationUncertain): self.apply(self.preflight())
+        self.assertEqual(len(self.commands), 1)
 
     def test_copy_source_change_is_uncertain(self):
         self.after_command=lambda:(self.root/self.source).write_bytes(b'changed after dispatch')

@@ -422,3 +422,28 @@ These now retain the completed fact while revoking stale state and capabilities.
 
 See [TRIAL_RESULT_RETENTION.md](TRIAL_RESULT_RETENTION.md). The separate Windows
 and desktop-package validation remain necessary for the exact final bundle.
+
+## Windows move/copy postcondition compatibility · 2026-11-04
+
+The real Windows SVN diagnostic for `2a25d94` found three product failures after
+native move/copy had actually run. The wrapper now compares Windows WC-root
+separator spellings consistently and interprets moved-from/moved-to relative
+to the exact status target itself. It still requires exact counterpart paths,
+provenance, parent identities, content/properties and one-time execution.
+
+- Local integrated canonical-repository checks: 164 JavaScript passed;
+  524 Python ran, 522 passed, two existing native-SVN tests skipped.
+- File-operation tests: 53 passed, including 13 new tests; independent exact-file
+  operation review: 11 passed. Corrected native-XML fixtures reproduce the old
+  move failures and pass the repaired implementation.
+- Oversized-body compatibility: 27 focused tests passed, including nine strict
+  error-whitelist tests. Five endpoint tests permit only the observed Windows
+  10053 response-read abort and always verify zero backend dispatch. Production
+  HTTP body bounds and rejection behavior are unchanged.
+- Desktop bridge source: 22 tests included in the integrated aggregate; its
+  source-only self-check needs the canonical repository layout. An initial run
+  from the detached prototype folder failed only that layout-dependent test.
+- No new Windows real-SVN, native executable, WebView2, browser or GUI acceptance
+  is claimed. Those gates must use the final exact source checkpoint.
+
+See [WINDOWS_FILEOPS_PATH_FIX.md](WINDOWS_FILEOPS_PATH_FIX.md).

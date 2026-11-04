@@ -67,7 +67,8 @@ class IndependentFileOperationReview(unittest.TestCase):
         ET.SubElement(repo, 'root').text = 'https://example.test/repo'
         ET.SubElement(repo, 'uuid').text = 'synthetic-review'
         wc = ET.SubElement(entry, 'wc-info')
-        ET.SubElement(wc, 'wcroot-abspath').text = str(self.root)
+        # Native SVN info XML uses forward slashes on Windows as well.
+        ET.SubElement(wc, 'wcroot-abspath').text = self.root.as_posix()
         ET.SubElement(wc, 'schedule').text = 'add' if status.item == 'added' else 'normal'
         ET.SubElement(wc, 'depth').text = 'infinity'
         ET.SubElement(wc, 'checksum').text = 'original-metadata'
@@ -88,6 +89,10 @@ class IndependentFileOperationReview(unittest.TestCase):
             node = ET.SubElement(entry, 'wc-status', item=status.item, props=status.props, revision='7')
             for key in ('copied', 'switched', 'file_external', 'wc_locked', 'tree_conflicted', 'moved_from', 'moved_to'):
                 value = getattr(status, key)
+                if value and key in {'moved_from', 'moved_to'}:
+                    # Exact status is relative to its target, including the
+                    # filename; the full-WC fixture above is root-relative.
+                    value = os.path.relpath(value, start=path)
                 if value:
                     node.set(key.replace('_', '-'), 'true' if value is True else value)
         return ET.tostring(root)

@@ -118,6 +118,30 @@ def _argv(action, source, destination):
             destination + '@' if action == 'copy' and '@' in destination else destination]
 
 
+def _svn_path_matches(actual, expected, *, pathmod=os.path):
+    """Compare SVN's local spelling, allowing only native separator variants.
+
+    In Windows info XML, wcroot-abspath uses '/', while our pinned workspace
+    uses '\\'. Do not resolve paths, fold case, or collapse dot components:
+    those transformations could hide an alias or a different traversal.
+    """
+    if not isinstance(actual, str):
+        return False
+    expected = os.fspath(expected)
+    if pathmod.altsep:
+        actual = actual.replace(pathmod.altsep, pathmod.sep)
+        expected = expected.replace(pathmod.altsep, pathmod.sep)
+    return actual == expected
+
+
+def _status_move_matches(actual, target, counterpart, *, pathmod=os.path):
+    # Exact `svn status TARGET` expresses moved-* relative to TARGET itself,
+    # even when TARGET is a file, not relative to its parent or to the WC root.
+    # Construct the one expected spelling instead of resolving untrusted '..'.
+    expected = pathmod.relpath(counterpart, start=target)
+    return _svn_path_matches(actual, expected, pathmod=pathmod)
+
+
 def guarded_manager(module, history, client):
     """Reuse original execute semantics with bounded local reads and dispatch.
 
@@ -363,7 +387,7 @@ def guarded_manager(module, history, client):
                 status = self._status(source.path)
                 if status is None or status.item != 'deleted' or os.path.lexists(self.working_copy / source.path):
                     raise ValueError('Source removal could not be verified.')
-                if ((status.moved_to and str(Path(status.moved_to)) != plan.destination)
+                if ((status.moved_to and not _status_move_matches(status.moved_to, source.path, plan.destination))
                         or status.moved_from or status.copied or status.conflicted or status.switched
                         or status.file_external or status.wc_locked or status.props not in {'none', 'normal', 'modified'}):
                     raise ValueError('Source move metadata differs.')
@@ -378,7 +402,8 @@ def guarded_manager(module, history, client):
             if (status is None or status.item != 'added' or not status.copied or status.conflicted
                     or status.switched or status.file_external or status.wc_locked or status.moved_to
                     or status.props not in {'none', 'normal', 'modified'}
-                    or status.moved_from and (plan.operation != 'move' or str(Path(status.moved_from)) != source.path)):
+                    or status.moved_from and (plan.operation != 'move'
+                        or not _status_move_matches(status.moved_from, plan.destination, source.path))):
                 raise ValueError('History-preserving destination could not be verified.')
             digest, size, _ = self._snapshot(plan.destination)
             if (digest != source.content_sha256 or size != source.size_bytes
@@ -387,7 +412,8 @@ def guarded_manager(module, history, client):
             # Verify same-root provenance, not merely an arbitrary copied node.
             root = self.client._xml(['info', '--xml', '--', self._target(plan.destination)])
             entry = root[0]
-            if (entry.get('kind') != 'file' or entry.findtext('wc-info/wcroot-abspath') != str(self.working_copy)
+            if (entry.get('kind') != 'file'
+                    or not _svn_path_matches(entry.findtext('wc-info/wcroot-abspath'), self.working_copy)
                     or entry.findtext('wc-info/schedule') != 'add'
                     or entry.findtext('repository/uuid') != source.info['repository_uuid']
                     or entry.findtext('wc-info/copy-from-url') != source.info['url']
