@@ -1,8 +1,9 @@
 """CLI-bounded workspace catalog and local selection preferences.
 
-Endpoints never accept filesystem paths; optional label mutations are separately gated. Discovery
-candidates are observations, not proof of repository identity. Persistence is
-explicitly opt-in and stores preferences outside the working copies.
+Requests never authorize workspace paths or arbitrary commands. Separately gated
+file moves/copies accept only strict relative destinations. Discovery candidates
+are observations, not proof of repository identity. Persistence is explicitly
+opt-in and stores preferences outside the working copies.
 """
 from __future__ import annotations
 from contextlib import contextmanager
@@ -148,13 +149,29 @@ class WorkspaceCatalog:
         finally:
             self._busy.release()
 
+    @staticmethod
+    def _invalidate_snapshot(adapter):
+        if adapter is None:
+            return
+        adapter._read_snapshot = None
+        for name in ('_changelist_service', '_shelf_service', '_commit_service',
+                     '_lock_service', '_add_service', '_fileop_service'):
+            service = getattr(adapter, name, None)
+            if service:
+                service.invalidate()
+
     def _check(self, candidate):
-        if working_copy_identity(candidate.path) != candidate.identity:
-            raise ValueError('Working copy changed since discovery.')
-        for parent, identity in self.parent_identities.items():
-            if candidate.path == parent or parent in candidate.path.parents:
-                if directory_identity(parent) != identity:
-                    raise ValueError('Authorized scan parent changed.')
+        try:
+            if working_copy_identity(candidate.path) != candidate.identity:
+                raise ValueError('Working copy changed since discovery.')
+            for parent, identity in self.parent_identities.items():
+                if candidate.path == parent or parent in candidate.path.parents:
+                    if directory_identity(parent) != identity:
+                        raise ValueError('Authorized scan parent changed.')
+        except Exception:
+            if self.selected is not None and candidate.id == self.selected.id:
+                self._invalidate_snapshot(self.adapter)
+            raise
 
     def _validate_settings_path(self, initial=False):
         path = self.settings_file
@@ -244,16 +261,25 @@ class WorkspaceCatalog:
 
     def config(self):
         selected, adapter, generation = self._selection
-        changelists = bool(adapter is not None and getattr(adapter, '_changelist_service', None) is not None)
-        shelves = bool(adapter is not None and getattr(adapter, '_shelf_service', None) is not None)
-        commits = bool(adapter is not None and getattr(adapter, '_commit_service', None) is not None)
-        adds = bool(adapter is not None and getattr(adapter, '_add_service', None) is not None)
-        locks = bool(adapter is not None and getattr(adapter, '_lock_service', None) is not None)
+        snapshot = getattr(adapter, '_read_snapshot', None) if adapter is not None else None
+        has_snapshot = snapshot is not None
+        fileops = bool(isinstance(snapshot, tuple) and len(snapshot) == 2
+                       and isinstance(snapshot[0], str) and snapshot[0]
+                       and isinstance(snapshot[1], dict)
+                       and getattr(adapter, '_fileop_service', None) is not None)
+        changelists = bool(has_snapshot and getattr(adapter, '_changelist_service', None) is not None)
+        shelves = bool(has_snapshot and getattr(adapter, '_shelf_service', None) is not None)
+        commits = bool(has_snapshot and getattr(adapter, '_commit_service', None) is not None)
+        adds = bool(has_snapshot and getattr(adapter, '_add_service', None) is not None)
+        locks = bool(has_snapshot and getattr(adapter, '_lock_service', None) is not None)
         return {'mode': 'live' if selected else 'select',
                 'workspace': selected.path.name if selected else '尚未选择工作区',
                 'root': str(selected.path) if selected else '请从已授权候选中选择',
                 'workspaceId': selected.id if selected else None,
-                'selectionVersion': generation, 'writesEnabled': changelists or shelves or commits or locks or adds,
+                'selectionVersion': generation, 'writesEnabled': changelists or shelves or commits or locks or adds or fileops,
+                'fileOpsEnabled': fileops,
+                'fileReadsEnabled': bool(has_snapshot and getattr(adapter, '_file_service', None) is not None),
+                'propertyReadsEnabled': bool(has_snapshot and getattr(adapter, '_property_service', None) is not None),
                 'addsEnabled': adds,
                 'locksEnabled': locks,
                 'commitsEnabled': commits,
@@ -263,12 +289,16 @@ class WorkspaceCatalog:
                 'persistenceEnabled': bool(self.settings_file) and not self.settings_warning}
 
     def _snapshot(self, candidate, adapter):
-        self._check(candidate)
-        payload = adapter.snapshot()
-        self._check(candidate)
-        if payload.get('mode') != 'live' or not isinstance(payload.get('rows'), list):
-            raise ValueError('Invalid status snapshot.')
-        return payload
+        try:
+            self._check(candidate)
+            payload = adapter.snapshot()
+            self._check(candidate)
+            if payload.get('mode') != 'live' or not isinstance(payload.get('rows'), list):
+                raise ValueError('Invalid status snapshot.')
+            return payload
+        except Exception:
+            self._invalidate_snapshot(adapter)
+            raise
 
     def snapshot(self):
         with self.operation():
@@ -307,9 +337,6 @@ class WorkspaceCatalog:
             try:
                 self._check(candidate)
             except Exception as error:
-                adapter._read_snapshot = None
-                if getattr(adapter, '_changelist_service', None):
-                    adapter._changelist_service.invalidate()
                 if kind == 'apply':
                     raise MutationUncertain('Workspace changed after label execution.') from error
                 raise
@@ -333,9 +360,6 @@ class WorkspaceCatalog:
             try:
                 self._check(candidate)
             except Exception as error:
-                adapter._read_snapshot = None
-                if service:
-                    service.invalidate()
                 if kind == 'apply':
                     raise MutationUncertain('Workspace changed after Shelf execution.') from error
                 raise
@@ -354,11 +378,6 @@ class WorkspaceCatalog:
             try:
                 self._check(candidate)
             except Exception as error:
-                adapter._read_snapshot = None
-                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
-                    service = getattr(adapter, name, None)
-                    if service:
-                        service.invalidate()
                 if kind == 'apply':
                     result = payload.get('commitResult')
                     if isinstance(result, dict) and result.get('commandCompleted') is True:
@@ -381,10 +400,6 @@ class WorkspaceCatalog:
             try:
                 self._check(candidate)
             except Exception:
-                adapter._read_snapshot = None
-                service = getattr(adapter, '_lock_service', None)
-                if service:
-                    service.invalidate()
                 if kind == 'apply' and isinstance(payload.get('lockResult'), dict):
                     return {**self.config(), **adapter._lock_status_unknown(payload['lockResult'], 'workspace-changed')}
                 raise
@@ -404,14 +419,29 @@ class WorkspaceCatalog:
             try:
                 self._check(candidate)
             except Exception:
-                adapter._read_snapshot = None
-                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
-                    service = getattr(adapter, name, None)
-                    if service:
-                        service.invalidate()
                 result = payload.get('addResult')
                 if kind == 'apply' and isinstance(result, dict) and result.get('verified') is True:
                     return {**self.config(), **adapter._add_status_unknown(result, 'workspace-changed')}
+                raise
+            if payload.get('statusRefreshed') is False:
+                return {**self.config(), **payload}
+            return {**payload, **self.config()}
+
+    def file_operation(self, kind, data):
+        from file_reads import StaleRead
+        with self.operation():
+            candidate, adapter, generation = self._selection
+            if (candidate is None or adapter is None or data['workspaceId'] != candidate.id
+                    or data['selectionVersion'] != generation):
+                raise StaleRead('Workspace selection changed.')
+            self._check(candidate)
+            payload = adapter.file_operation(kind, data)
+            try:
+                self._check(candidate)
+            except Exception:
+                result = payload.get('fileOpResult')
+                if kind == 'apply' and isinstance(result, dict) and result.get('verified') is True:
+                    return {**self.config(), **adapter._fileop_status_unknown(result, 'workspace-changed')}
                 raise
             if payload.get('statusRefreshed') is False:
                 return {**self.config(), **payload}
@@ -438,5 +468,7 @@ class WorkspaceCatalog:
                     saved = True
                 except (OSError, ValueError):
                     warning = '状态已读取，但偏好保存失败；下次启动可能无法恢复本次选择。'
+            if self.adapter is not adapter:
+                self._invalidate_snapshot(self.adapter)
             self._selection = (candidate, adapter, self.generation + 1)
             return {**payload, **self.config(), 'selectionSaved': saved, 'warning': warning}

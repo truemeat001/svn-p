@@ -68,3 +68,5 @@
 .property-value-text{font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;margin:8px 0}
 .property-absent{font-size:11px;color:#7688a3;font-style:italic}
 @media(max-width:700px){.property-values{grid-template-columns:minmax(0,1fr)}.property-values>div+div{border-left:0;border-top:1px solid var(--border)}.property-heading{align-items:flex-start}.property-heading span{white-space:normal}}
+
+.file-op-destination{display:grid;gap:8px;margin:16px 0}.file-op-destination input{width:100%;min-width:0;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font:inherit;color:inherit;background:var(--panel)}

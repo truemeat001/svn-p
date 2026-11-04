@@ -1,4 +1,4 @@
-import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse,parseChangelistTarget,validateChangelistPlan,canRelabelFile,canShelfFile,parseShelfName,sameShelfScope,validateShelfFiles,validateShelfPlan,commitScopeRows,parseCommitMessage,validateCommitPlan,validateCommitResult,commitResultSummary,contextMenuSelection,captureContextMenuScope,sameContextMenuScope,contextMenuPosition,lockScopeRows,parseLockComment,validateLockPlan,validateLockResult,lockResultSummary,addScopeRows,validateAddPlan,validateAddResult,addResultSummary,canReadProperties,validatePropertyResponse} from './model.js';
+import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse,parseChangelistTarget,validateChangelistPlan,canRelabelFile,canShelfFile,parseShelfName,sameShelfScope,validateShelfFiles,validateShelfPlan,commitScopeRows,parseCommitMessage,validateCommitPlan,validateCommitResult,commitResultSummary,contextMenuSelection,captureContextMenuScope,sameContextMenuScope,contextMenuPosition,lockScopeRows,parseLockComment,validateLockPlan,validateLockResult,lockResultSummary,addScopeRows,validateAddPlan,validateAddResult,addResultSummary,canReadProperties,validatePropertyResponse,fileOpSource,parseFileDestination,validateFileOpPlan,validateFileOpResult,fileOpResultSummary} from './model.js';
 import {demoRows,demoDiff,demoHistory} from './demo-data.js';
 const $=id=>document.getElementById(id);
 const paths={
@@ -42,6 +42,8 @@ function fileMenuActions(){
   {id:'review',label:'审查完整选区…',hint:'包含被筛选或折叠隐藏的选中项',enabled:state.selected.size>0,run:review},
   {id:'changelist',label:'移动选区到变更列表…',hint:state.mode==='demo'?'仅演示模拟；仍需预检并确认':'需启用本地归组；仍需预检并确认',enabled:changelistsAvailable(),run:openChangelists},
   {id:'add',label:'添加选区到版本控制…',hint:'仅未版本化普通文件；不添加目录、不提交',enabled:!$('add-selected').disabled,run:openAdd},
+  {id:'file-move',label:'移动／重命名此选中文件…',hint:'完整选区必须只有一个文件；目标必须不存在',enabled:!$('move-file').disabled,run:()=>openFileOp('move')},
+  {id:'file-copy',label:'带历史复制此选中文件…',hint:'保留源文件；不创建父目录、不提交',enabled:!$('copy-file').disabled,run:()=>openFileOp('copy')},
   {id:'shelf',label:'从选区创建本地 Shelf…',hint:'需真实模式及 Shelf 启用；仍需预检并确认',enabled:shelfCreateAvailable(),run:openCreateShelf},
   {id:'lock',label:'锁定明确选区…',hint:'需启用仓库锁；预检会访问仓库',enabled:!$('lock-selected').disabled,run:()=>openLock('lock')},
   {id:'unlock',label:'解锁明确选区…',hint:'仅本工作副本持有的锁；不强制解锁',enabled:!$('unlock-selected').disabled,run:()=>openLock('unlock')},
@@ -96,8 +98,8 @@ function renderTree(){
 }
 function render(){
  closeFileMenu();
- if(changelistSelection!==selectionKey()){changelistSelection=selectionKey();invalidateAdd();invalidateChangelist();invalidateShelf();invalidateLock();invalidateCommit();}
- updateShelfButtons();updateCommitButtons();updateLockButtons();updateAddButton();
+ if(changelistSelection!==selectionKey()){changelistSelection=selectionKey();invalidateAdd();invalidateFileOp();invalidateChangelist();invalidateShelf();invalidateLock();invalidateCommit();}
+ updateShelfButtons();updateCommitButtons();updateLockButtons();updateAddButton();updateFileOpButtons();
  $('move-changelist').disabled=!changelistsAvailable();
  $('move-changelist').title=state.mode==='live'&&!state.changelistWritesEnabled?'需由启动参数显式启用本地 changelist 写入':'仅支持最多 100 个已版本化普通文件；冲突、缺失、外部引用、切换或锁定项不可用，目录与链接由预检拒绝';
  if(lastFocus!==state.focused){invalidateReads();lastFocus=state.focused;}
@@ -153,7 +155,7 @@ function renderPreview(){
   $('diff-content').innerHTML=demoDiff.map(([kind,code])=>{const oldNo=kind==='h'||kind==='+'?'':old++,newNo=kind==='h'||kind==='-'?'':working++;return `<div class="diff-line ${kind==='+'?'add':kind==='-'?'remove':kind==='h'?'hunk':''}"><span class="line-no">${oldNo}</span><span class="line-no">${newNo}</span><span class="line-sign">${kind==='h'?'':esc(kind)}</span><span class="line-code">${esc(code)}</span></div>`;}).join('');
  }else{$('diff-content').innerHTML=`<div class="diff-empty">${demo?'该示例没有内置差异内容。选择 PlayerController.cs 可体验文本差异预览。':'此原型只接入本地 status 元数据，未读取真实文件内容或执行 diff。'}<br>文件：${esc(row.path)}</div>`;}
 }
-function modal(title,content){closeFileMenu();$('add-confirm').classList.add('hidden');invalidateAdd();$('lock-confirm').classList.add('hidden');invalidateLock();invalidateCommit();$('commit-confirm').classList.add('hidden');invalidateShelf();$('shelf-confirm').classList.add('hidden');$('changelist-confirm').classList.add('hidden');invalidateChangelist();invalidateReads();renderPreview();modalView='generic';workspaceRequest++;$('modal-title').textContent=title;$('modal-content').innerHTML=content;if(!$('modal').open)$('modal').showModal();}
+function modal(title,content){closeFileMenu();$('file-op-confirm').classList.add('hidden');$('add-confirm').classList.add('hidden');invalidateAdd();invalidateFileOp();$('lock-confirm').classList.add('hidden');invalidateLock();invalidateCommit();$('commit-confirm').classList.add('hidden');invalidateShelf();$('shelf-confirm').classList.add('hidden');$('changelist-confirm').classList.add('hidden');invalidateChangelist();invalidateReads();renderPreview();modalView='generic';workspaceRequest++;$('modal-title').textContent=title;$('modal-content').innerHTML=content;if(!$('modal').open)$('modal').showModal();}
 function showHistory(){
  const row=state.rows.find(r=>r.id===state.focused);
  if(!row)return notify('先选择一个文件。');
@@ -446,6 +448,48 @@ async function applyLock(){
  }finally{lockApplying=false;setBusy(false);render();}
 }
 
+
+let fileOpGeneration=0,fileOpPlan=null,fileOpApplying=false,fileOpAction='move';
+function invalidateFileOp(message='源文件、目标或状态已改变，请重新预检。'){fileOpGeneration++;fileOpPlan=null;if($('file-op-confirm'))$('file-op-confirm').disabled=true;if($('file-op-result'))$('file-op-result').textContent=message;}
+function fileOpsAvailable(){return state.mode==='live'&&state.fileOpsEnabled===true&&!state.busy&&!state.failed&&typeof state.snapshotToken==='string'&&!!state.snapshotToken;}
+function updateFileOpButtons(){let valid=false;try{fileOpSource(state.rows,state.selected);valid=true;}catch{}for(const id of ['move-file','copy-file'])if($(id))$(id).disabled=!fileOpsAvailable()||!valid;}
+function openFileOp(action){
+ if(!fileOpsAvailable()||!['move','copy'].includes(action))return;let row;try{row=fileOpSource(state.rows,state.selected);}catch(error){notify(error.message);return;}
+ modal(action==='move'?'移动／重命名一个明确文件':'带历史复制一个明确文件',`<p class="workspace-warning">${action==='move'?'源文件会从原路径移走并登记待删除，目标带历史待新增。':'源文件保持原状，目标使用当前工作内容和属性带历史待新增。'} 仅本地操作，不上传、不提交、不覆盖、不创建父目录。移动、复制后的结构变更暂不支持本原型提交入口，请用原版可信 SVN 客户端审查${action==='move'?'移动两端':'复制目标'}后提交；标签不保证转移。失败可能已部分完成，不会自动重试或回滚。</p><div class="review-file"><strong>源文件</strong><span>${esc(row.path)}</span></div><label class="file-op-destination">精确目标文件路径（相对于工作副本根；目录分隔使用 /）<input id="file-op-destination" autocomplete="off" spellcheck="false" placeholder="existing-folder/new-name.txt" maxlength="2048"></label><p>只处理完整选区中的这一个文件，不使用多选中的焦点代替完整选区。目标父目录必须已存在且版本化；不能只改大小写。预检会读取本地身份、内容摘要和属性，不访问仓库。</p><button id="file-op-preflight" class="subtle-button">预检源文件与精确目标</button><div id="file-op-paths"></div><p id="file-op-result" role="status">尚未执行；请勿同时编辑文件或运行其他 SVN 操作。</p>`);
+ fileOpAction=action;modalView='file-op';$('file-op-confirm').classList.remove('hidden');$('file-op-confirm').textContent=action==='move'?'确认移动／重命名此文件':'确认带历史复制此文件';$('file-op-preflight').onclick=preflightFileOp;$('file-op-destination').oninput=()=>invalidateFileOp('目标已修改，请重新预检。');
+}
+function fileOpRequest(){const row=fileOpSource(state.rows,state.selected);return {...shelfScope(),action:fileOpAction,id:row.id,destination:parseFileDestination($('file-op-destination').value,row.path)};}
+async function preflightFileOp(){
+ if(!fileOpsAvailable()||modalView!=='file-op'||!$('modal').open)return;invalidateFileOp();let request;try{request=fileOpRequest();}catch(error){$('file-op-result').textContent=error.message;return;}
+ const generation=fileOpGeneration,key=selectionKey();setBusy(true);$('file-op-preflight').disabled=true;$('file-op-result').textContent='正在核对源文件、目标命名空间和内容／属性；尚未修改文件。';
+ try{const result=await api('/api/file-op-preflight',request);
+  if(generation!==fileOpGeneration||key!==selectionKey()||!sameShelfScope(request,shelfScope())||modalView!=='file-op'||!$('modal').open||JSON.stringify(request)!==JSON.stringify(fileOpRequest()))return;
+  validateFileOpPlan(result,request,state.rows);const plan={request,result,key,expiresAt:Date.now()+result.expiresIn*1000};fileOpPlan=plan;
+  $('file-op-paths').innerHTML=`<div class="review-file"><strong>源</strong><span>${esc(result.source.path)}</span></div><div class="review-file"><strong>目标</strong><span>${esc(result.destination)}</span></div>`;
+  $('file-op-result').textContent='预检通过。请核对源与目标，再单独确认本地操作。计划 120 秒一次有效；操作后仍需用原版可信客户端审查并提交。';$('file-op-confirm').disabled=false;
+  setTimeout(()=>{if(fileOpPlan===plan)invalidateFileOp('预检已过期，请重新预检。');},120000);
+ }catch(error){if(generation===fileOpGeneration&&modalView==='file-op'&&$('modal').open)$('file-op-result').textContent=`预检失败：${error.message} 未执行文件操作。`;}
+ finally{setBusy(false);if($('file-op-preflight'))$('file-op-preflight').disabled=false;}
+}
+function preserveFileOpResult(message){$('file-op-last-result').textContent=message;$('file-op-last-result').classList.remove('hidden');if($('file-op-result'))$('file-op-result').textContent=message;log(message,'WARN');notify(message);}
+async function applyFileOp(){
+ const plan=fileOpPlan;if(!plan||fileOpApplying||!fileOpsAvailable()||modalView!=='file-op'||!$('modal').open)return;
+ try{if(Date.now()>=plan.expiresAt||plan.key!==selectionKey()||JSON.stringify(plan.request)!==JSON.stringify(fileOpRequest())){invalidateFileOp();return;}}catch(error){invalidateFileOp(error.message);return;}
+ const generation=fileOpGeneration;fileOpPlan=null;fileOpApplying=true;invalidateReads();setBusy(true);renderPreview();
+ for(const id of ['file-op-confirm','file-op-preflight','file-op-destination'])if($(id))$(id).disabled=true;
+ $('file-op-result').textContent='文件操作请求已发送；关闭不等于取消，不要重复操作。';let verifiedResult=null;
+ try{const payload=await api('/api/file-op-apply',{workspaceId:plan.request.workspaceId,selectionVersion:plan.request.selectionVersion,snapshotToken:plan.request.snapshotToken,planToken:plan.result.planToken,confirmed:true});
+  const result=validateFileOpResult(payload,plan.request,plan.result);verifiedResult=result;const stale=generation!==fileOpGeneration||!sameShelfScope(plan.request,shelfScope())||modalView!=='file-op'||!$('modal').open;
+  const message=fileOpResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});
+  preserveFileOpResult(message);
+  try{if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);}
+  finally{if($('file-op-result'))$('file-op-result').textContent=message;}
+ }catch(error){const rejected=Number.isInteger(error.httpStatus)&&error.httpStatus>=400&&error.httpStatus<500;
+  const message=verifiedResult?fileOpResultSummary(verifiedResult,{statusRefreshed:false,stale:true}):rejected?'文件操作在执行前被拒绝，请刷新并重新审查源与目标。':'文件操作结果未知，源或目标可能已改变。没有自动重试或回滚；请用原版可信 SVN 客户端核对两端，再显式刷新。';
+  preserveFileOpResult(message);try{failSnapshot(message);}finally{if($('file-op-result'))$('file-op-result').textContent=message;}
+ }finally{fileOpApplying=false;setBusy(false);render();}
+}
+
 let addGeneration=0,addPlan=null,addApplying=false;
 function invalidateAdd(message='选区或状态已改变，请重新预检。'){addGeneration++;addPlan=null;if($('add-confirm'))$('add-confirm').disabled=true;if($('add-result'))$('add-result').textContent=message;}
 function addsAvailable(){return state.mode==='live'&&state.addsEnabled===true&&!state.busy&&!state.failed&&typeof state.snapshotToken==='string'&&!!state.snapshotToken;}
@@ -494,15 +538,15 @@ async function api(path,body){
 }
 function updateMode(){
  const demo=state.mode==='demo',choose=state.mode==='select';
- $('mode-pill').innerHTML=`<span class="dot"></span>${state.failed?'读取失败 · 状态未知':demo?'演示数据 · 本地模拟':choose?'真实模式 · 待选工作区':state.mode==='live'?(state.locksEnabled?'真实状态 · 仓库锁已启用':state.commitsEnabled?'真实状态 · 仓库提交已启用':state.shelfWritesEnabled?'真实本地状态 · Shelf 可用':state.changelistWritesEnabled?'真实本地状态 · 本地归组可用':state.addsEnabled?'真实本地状态 · 添加文件已启用':'真实本地状态 · 只读'):'正在读取状态'}`;
+ $('mode-pill').innerHTML=`<span class="dot"></span>${state.failed?'读取失败 · 状态未知':demo?'演示数据 · 本地模拟':choose?'真实模式 · 待选工作区':state.mode==='live'?(state.locksEnabled?'真实状态 · 仓库锁已启用':state.commitsEnabled?'真实状态 · 仓库提交已启用':state.shelfWritesEnabled?'真实本地状态 · Shelf 可用':state.changelistWritesEnabled?'真实本地状态 · 本地归组可用':state.addsEnabled?'真实本地状态 · 添加文件已启用':state.fileOpsEnabled?'真实本地状态 · 文件操作已启用':'真实本地状态 · 只读'):'正在读取状态'}`;
  $('status-text').textContent=state.failed?'状态不可用，不代表工作副本干净':demo?'演示数据，未连接仓库':choose?'尚未选择工作副本，未运行 SVN':state.commitsEnabled?'本地状态 · 仓库提交须预检并确认':'状态仅来自本地 · 仓库按需读取';
  $('workspace-address').textContent=state.root;$('workspace-name').textContent=state.workspace;$('context-workspace').textContent=state.workspace;
- $('workspace-description').textContent=demo?'本地工作副本 · 示例':choose?'仅可选择授权候选':state.locksEnabled?'当前工作副本 · 仓库锁已启用':state.commitsEnabled?'当前工作副本 · 仓库提交已启用':state.shelfWritesEnabled?'当前工作副本 · Shelf 已启用':state.changelistWritesEnabled?'当前工作副本 · 本地标签可写':state.addsEnabled?'当前工作副本 · 添加文件已启用':'当前工作副本 · 只读';
+ $('workspace-description').textContent=demo?'本地工作副本 · 示例':choose?'仅可选择授权候选':state.locksEnabled?'当前工作副本 · 仓库锁已启用':state.commitsEnabled?'当前工作副本 · 仓库提交已启用':state.shelfWritesEnabled?'当前工作副本 · Shelf 已启用':state.changelistWritesEnabled?'当前工作副本 · 本地标签可写':state.addsEnabled?'当前工作副本 · 添加文件已启用':state.fileOpsEnabled?'当前工作副本 · 文件操作已启用':'当前工作副本 · 只读';
  $('branch-label').textContent=demo?'trunk（示例）':'未查询分支';$('revision-label').textContent=demo?'BASE r2841（示例）':'修订见文件行';$('history-indicator').textContent=demo?'示例':'按需读取';
 }
-function resetWorkspaceScope(){invalidateLock();invalidateAdd();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();state.selected.clear();state.focused=null;state.folder='';state.query='';state.filter='all';state.collapsed.clear();$('search').value='';}
+function resetWorkspaceScope(){invalidateLock();invalidateAdd();invalidateFileOp();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();state.selected.clear();state.focused=null;state.folder='';state.query='';state.filter='all';state.collapsed.clear();$('search').value='';}
 function applySnapshot(payload,initial=false){
- invalidateLock();invalidateAdd();state.addsEnabled=payload.addsEnabled===true;invalidateCommit();state.locksEnabled=payload.locksEnabled===true;state.commitsEnabled=payload.commitsEnabled===true;
+ invalidateLock();invalidateAdd();invalidateFileOp();state.addsEnabled=payload.addsEnabled===true;state.fileOpsEnabled=payload.fileOpsEnabled===true;invalidateCommit();state.locksEnabled=payload.locksEnabled===true;state.commitsEnabled=payload.commitsEnabled===true;
  invalidateShelf();invalidateChangelist();invalidateReads();state.shelfWritesEnabled=payload.shelfWritesEnabled===true;state.changelistWritesEnabled=payload.changelistWritesEnabled===true;state.snapshotToken=payload.snapshotToken;state.fileReadsEnabled=payload.fileReadsEnabled===true;state.propertyReadsEnabled=payload.propertyReadsEnabled===true;
  if(!['demo','live','select'].includes(payload.mode))throw Error('状态模式无效。');
  const rows=payload.mode==='demo'?structuredClone(demoRows):payload.rows;
@@ -518,10 +562,10 @@ function applySnapshot(payload,initial=false){
  if(initial&&state.mode==='demo')state.collapsed.add('');
  updateMode();render();$('read-time').textContent=state.mode==='select'?'等候选择':`已读取 ${new Date().toLocaleTimeString('en-GB')}`;
 }
-function failSnapshot(message){invalidateLock();invalidateAdd();state.addsEnabled=false;invalidateCommit();state.locksEnabled=false;state.commitsEnabled=false;invalidateShelf();state.shelfWritesEnabled=false;invalidateChangelist();invalidateReads();state.changelistWritesEnabled=false;state.snapshotToken=null;state.fileReadsEnabled=false;state.propertyReadsEnabled=false;state.failed=true;state.rows=[];state.selected.clear();state.focused=null;if(state.mode==='loading')state.mode='error';$('live-error').textContent=message;$('live-error').classList.remove('hidden');updateMode();render();$('read-time').textContent='状态未知';}
-function setBusy(busy){if(busy)closeFileMenu();state.busy=busy;updateShelfButtons();updateCommitButtons();updateLockButtons();updateAddButton();$('move-changelist').disabled=!changelistsAvailable();$('refresh').disabled=busy;$('open-workspace').disabled=busy;}
+function failSnapshot(message){invalidateLock();invalidateAdd();invalidateFileOp();state.addsEnabled=false;state.fileOpsEnabled=false;invalidateCommit();state.locksEnabled=false;state.commitsEnabled=false;invalidateShelf();state.shelfWritesEnabled=false;invalidateChangelist();invalidateReads();state.changelistWritesEnabled=false;state.snapshotToken=null;state.fileReadsEnabled=false;state.propertyReadsEnabled=false;state.failed=true;state.rows=[];state.selected.clear();state.focused=null;if(state.mode==='loading')state.mode='error';$('live-error').textContent=message;$('live-error').classList.remove('hidden');updateMode();render();$('read-time').textContent='状态未知';}
+function setBusy(busy){if(busy)closeFileMenu();state.busy=busy;updateShelfButtons();updateCommitButtons();updateLockButtons();updateAddButton();updateFileOpButtons();$('move-changelist').disabled=!changelistsAvailable();$('refresh').disabled=busy;$('open-workspace').disabled=busy;}
 async function refresh(initial=false){
- if(state.busy)return;invalidateLock();invalidateAdd();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();setBusy(true);renderPreview();$('read-time').textContent='正在读取…';
+ if(state.busy)return;invalidateLock();invalidateAdd();invalidateFileOp();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();setBusy(true);renderPreview();$('read-time').textContent='正在读取…';
  try{
   const config=standalone?{mode:'demo',workspace:'Project Atlas',root:'D:\\Workspace\\ProjectAtlas'}:await api('/api/config');
   // Identity is known even if the subsequent status read fails.
@@ -529,7 +573,7 @@ async function refresh(initial=false){
   if(config.mode==='live'||config.mode==='select')state.mode=config.mode;
   const payload=standalone?{mode:'demo'}:await api('/api/status');
   if(config.mode!==payload.mode||config.workspaceId!==payload.workspaceId||config.selectionVersion!==payload.selectionVersion)throw Error('工作区在读取期间发生变化，请重新刷新。');
-  applySnapshot({...config,...payload,propertyReadsEnabled:payload.propertyReadsEnabled===true,addsEnabled:payload.addsEnabled===true,locksEnabled:payload.locksEnabled===true,commitsEnabled:payload.commitsEnabled===true,shelfWritesEnabled:payload.shelfWritesEnabled===true,changelistWritesEnabled:payload.changelistWritesEnabled===true},initial);
+  applySnapshot({...config,...payload,propertyReadsEnabled:payload.propertyReadsEnabled===true,fileOpsEnabled:payload.fileOpsEnabled===true,addsEnabled:payload.addsEnabled===true,locksEnabled:payload.locksEnabled===true,commitsEnabled:payload.commitsEnabled===true,shelfWritesEnabled:payload.shelfWritesEnabled===true,changelistWritesEnabled:payload.changelistWritesEnabled===true},initial);
   log(state.mode==='demo'?`加载 ${state.rows.length} 项内置演示状态；未运行 SVN。`:state.mode==='select'?'尚未选择工作副本；请打开工作区选择器。':`完成本地 svn status：${state.rows.length} 项状态；未查询远程。`);
  }catch(error){failSnapshot('状态读取失败，未显示任何部分或缓存结果。请检查服务、工作副本和 SVN 安装后重试。');log('状态读取失败；没有返回部分状态，没有切换到演示数据。','WARN');}
  finally{setBusy(false);renderPreview();renderHistory();}
@@ -562,7 +606,7 @@ async function openWorkspaces(){
  if(!standalone)await loadWorkspaceCatalog();
 }
 async function selectWorkspace(id){
- if(state.busy)return;invalidateLock();invalidateAdd();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();setBusy(true);
+ if(state.busy)return;invalidateLock();invalidateAdd();invalidateFileOp();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads();setBusy(true);
  document.querySelectorAll('[data-workspace-index],#rescan-workspaces').forEach(b=>b.disabled=true);
  $('workspace-result').textContent='正在读取此候选的本地状态…';
  state.rows=[];state.selected.clear();state.focused=null;render();$('read-time').textContent='正在切换…';
@@ -597,6 +641,7 @@ $('pending-nav').onclick=clearFilters;$('pending-tab').onclick=clearFilters;$('c
 $('workspace-home').onclick=clearFilters;$('clear-filters').onclick=clearFilters;$('empty-reset').onclick=clearFilters;
 $('select-visible').onchange=e=>{for(const row of displayed()){e.target.checked?state.selected.add(row.id):state.selected.delete(row.id);}render();};
 $('collapse-all').onclick=()=>{const groups=groupsFor(matches()),all=groups.every(([name])=>state.collapsed.has(name));for(const [name]of groups){all?state.collapsed.delete(name):state.collapsed.add(name);}$('collapse-all').innerHTML=`${icon('collapse')}${all?'折叠分组':'展开分组'}`;render();};
+$('move-file').onclick=()=>openFileOp('move');$('copy-file').onclick=()=>openFileOp('copy');$('file-op-confirm').onclick=applyFileOp;
 $('add-selected').onclick=openAdd;$('add-confirm').onclick=applyAdd;
 $('lock-inspected').onclick=()=>{if(state.busy||state.failed||!state.snapshotToken)return;lockInspectionRequired=false;updateLockButtons();};
 $('lock-selected').onclick=()=>openLock('lock');$('unlock-selected').onclick=()=>openLock('unlock');$('lock-confirm').onclick=applyLock;
@@ -613,9 +658,9 @@ $('workspace-tab').onclick=()=>{$('workspace-tab').classList.add('active');$('re
 $('repository-tab').onclick=()=>{$('repository-tab').classList.add('active');$('workspace-tab').classList.remove('active');$('repository-notice').classList.remove('hidden');$('folder-tree').classList.add('hidden');};
 $('history-tab').onclick=showHistory;
 $('open-workspace').onclick=openWorkspaces;
-$('help').onclick=()=>modal('SVN Desk · Web 原型',`<p>现代 Web 视觉，保留工作区树、原生 changelist 分组、选中项审查、详情与独立日志的桌面工作流。</p><ul><li>真实可用：筛选、选中、折叠分组、目录范围、只读审查与布局切换。</li><li>演示：选定示例文件的差异、历史与工作副本身份。</li><li>可选桥接：真实本地 status、显式只读 diff 与仓库历史。</li><li>本地归组：需显式启用，预检后单独确认；演示模式仅模拟。Shelf：显式启用后支持真实本地备份与完整恢复；无演示模拟。仓库提交：需显式启用，完整范围预检后另行确认。未实现：普通还原、远程仓库浏览。</li></ul><p>快捷键：Ctrl/Cmd K 搜索 · F5 刷新 · ↑ ↓ 浏览 · 空格选择 · Shift+F10 / 菜单键打开文件菜单 · Esc 关闭菜单或弹窗</p><p>运行方式：浏览器原型。Tauri 壳仅提供源码，尚未编译或完成 Windows 验收。</p>`);
-$('modal').addEventListener('cancel',()=>{invalidateLock();invalidateAdd();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads(false);$('modal-content').innerHTML='';renderPreview();});
-$('modal').addEventListener('close',()=>{$('add-confirm').classList.add('hidden');if(addApplying)failSnapshot('添加请求仍在执行；关闭不等于取消。请等待结果，勿重复操作。');invalidateAdd();$('lock-confirm').classList.add('hidden');if(lockApplying)failSnapshot('锁定请求仍在执行；关闭不等于取消。请等待结果，勿重复操作。');invalidateLock();invalidateCommit();$('commit-confirm').classList.add('hidden');if(commitApplying)failSnapshot('提交请求已发送；关闭不等于取消，仓库可能已写入。请等待请求结束后显式刷新并检查仓库历史，切勿直接重试。');invalidateShelf();$('shelf-confirm').classList.add('hidden');if(shelfApplying)failSnapshot('Shelf 请求已发送；关闭不等于取消，可能已部分或全部生效。请等待请求结束后显式刷新并重新审查。');$('changelist-confirm').classList.add('hidden');invalidateChangelist();if(changelistApplying)failSnapshot('归组请求仍在执行，关闭窗口不等于取消。结果返回前状态未知；请查看操作日志。');workspaceRequest++;modalView='';invalidateReads(false);$('modal-content').innerHTML='';renderPreview();});
+$('help').onclick=()=>modal('SVN Desk · Web 原型',`<p>现代 Web 视觉，保留工作区树、原生 changelist 分组、选中项审查、详情与独立日志的桌面工作流。</p><ul><li>真实可用：筛选、选中、折叠分组、目录范围、只读审查与布局切换。</li><li>演示：选定示例文件的差异、历史与工作副本身份。</li><li>可选桥接：真实本地 status、显式只读 diff 与仓库历史。</li><li>本地归组：需显式启用，预检后单独确认；演示模式仅模拟。Shelf：显式启用后支持真实本地备份与完整恢复；无演示模拟。仓库提交：需显式启用，完整范围预检后另行确认。文件移动／重命名与带历史复制：单文件、默认关闭、预检后独立确认；需用原版可信客户端提交结构变更。未实现：普通还原、远程仓库浏览。</li></ul><p>快捷键：Ctrl/Cmd K 搜索 · F5 刷新 · ↑ ↓ 浏览 · 空格选择 · Shift+F10 / 菜单键打开文件菜单 · Esc 关闭菜单或弹窗</p><p>运行方式：浏览器原型。Tauri 壳仅提供源码，尚未编译或完成 Windows 验收。</p>`);
+$('modal').addEventListener('cancel',()=>{invalidateLock();invalidateAdd();invalidateFileOp();invalidateCommit();invalidateShelf();invalidateChangelist();invalidateReads(false);$('modal-content').innerHTML='';renderPreview();});
+$('modal').addEventListener('close',()=>{$('file-op-confirm').classList.add('hidden');if(fileOpApplying)failSnapshot('文件操作请求仍在执行；关闭不等于取消。请等待结果，勿重复操作。');$('add-confirm').classList.add('hidden');if(addApplying)failSnapshot('添加请求仍在执行；关闭不等于取消。请等待结果，勿重复操作。');invalidateAdd();invalidateFileOp();$('lock-confirm').classList.add('hidden');if(lockApplying)failSnapshot('锁定请求仍在执行；关闭不等于取消。请等待结果，勿重复操作。');invalidateLock();invalidateCommit();$('commit-confirm').classList.add('hidden');if(commitApplying)failSnapshot('提交请求已发送；关闭不等于取消，仓库可能已写入。请等待请求结束后显式刷新并检查仓库历史，切勿直接重试。');invalidateShelf();$('shelf-confirm').classList.add('hidden');if(shelfApplying)failSnapshot('Shelf 请求已发送；关闭不等于取消，可能已部分或全部生效。请等待请求结束后显式刷新并重新审查。');$('changelist-confirm').classList.add('hidden');invalidateChangelist();if(changelistApplying)failSnapshot('归组请求仍在执行，关闭窗口不等于取消。结果返回前状态未知；请查看操作日志。');workspaceRequest++;modalView='';invalidateReads(false);$('modal-content').innerHTML='';renderPreview();});
 $('modal-close').onclick=$('modal-done').onclick=()=>$('modal').close();$('modal').addEventListener('click',e=>{if(e.target===$('modal')){const r=$('modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('modal').close();}});
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('search').focus();}if(e.key==='F5'){e.preventDefault();refresh();}});
 log('启动 Web 原型；本地归组、Shelf 与仓库提交仅在分别显式启用、预检及独立确认后执行。','WARN');await refresh(true);

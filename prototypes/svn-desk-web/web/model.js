@@ -279,3 +279,42 @@ export function validatePropertyResponse(data,scope,expectedBaseAvailable){
  }
  if(bytes>262144)bad();return data;
 }
+
+
+// File operations act on the one selected source, never just a multi-selection's focus.
+export function fileOpSource(rows,selected){
+ const files=reviewSelection(rows,selected);
+ if(selected.size!==1||files.length!==1||typeof files[0].id!=='string'||typeof files[0].path!=='string'||!['normal','modified'].includes(files[0].item)||!['none','normal','modified'].includes(files[0].props)||['switched','file_external','tree_conflicted','wc_locked','copied','moved_from','moved_to'].some(k=>files[0][k])||files[0].kind&&!['file','unknown'].includes(files[0].kind))throw Error('请只选择一个已版本化普通文件；隐藏选中项也计入范围，目录、冲突和结构变更不可用。');
+ return files[0];
+}
+export function parseFileDestination(value,source){
+ const bad=()=>{throw Error('请输入不同的精确相对文件路径，目录分隔使用 /；不能覆盖、只改大小写或自动创建父目录。');};
+ if(typeof value!=='string'||!value||[...value].length>2048||/[\\:\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value))bad();
+ const parts=value.split('/');
+ if(parts.some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.svn'||/[ .]$/.test(p)||/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p)))bad();
+ if(typeof source!=='string'||value.toLowerCase()===source.replace(/\\/g,'/').toLowerCase())bad();
+ return value; // Do not trim or rewrite an approved destination.
+}
+export function validateFileOpPlan(data,request,rows){
+ const bad=()=>{throw Error('文件操作预检身份、源路径或精确目标不匹配，请重新预检。');};
+ const row=fileOpSource(rows,new Set([request.id]));parseFileDestination(request.destination,row.path);
+ if(!['move','copy'].includes(request.action)||data?.mode!=='live'||!sameShelfScope(data,request)||data.action!==request.action||data.localOnly!==true||data.commitRequired!==true||data.destination!==request.destination||data.expiresIn!==120||typeof data.planToken!=='string'||!data.planToken||data.planToken.length>64||/[^\x21-\x7e]/u.test(data.planToken)||!Array.isArray(data.files)||data.files.length!==1)bad();
+ for(const file of [data.source,data.files[0]])if(!file||!['id','path','item','props'].every(k=>file[k]===row[k]))bad();
+ if(!Array.isArray(data.affectedPaths)||JSON.stringify(data.affectedPaths)!==JSON.stringify([row.path,request.destination]))bad();
+ return data;
+}
+const FILE_OP_WARNINGS={'status-refresh-failed':'本地状态刷新失败','workspace-changed':'工作区发生变化'};
+export function validateFileOpResult(payload,request,plan){
+ const bad=()=>{throw Error('文件操作响应身份、范围或结果无效。');},r=payload?.fileOpResult;
+ if(payload?.mode!=='live'||payload.workspaceId!==request.workspaceId||payload.selectionVersion!==request.selectionVersion||typeof payload.statusRefreshed!=='boolean'||!r||r.action!==request.action||r.outcome!=='verified'||r.verified!==true||r.commitRequired!==true||r.destination!==plan.destination||!Array.isArray(r.files)||JSON.stringify(r.files)!==JSON.stringify([plan.source.path])||!Array.isArray(r.affectedPaths)||JSON.stringify(r.affectedPaths)!==JSON.stringify(plan.affectedPaths)||!Array.isArray(r.warnings)||r.warnings.some(w=>typeof w!=='string'||!Object.hasOwn(FILE_OP_WARNINGS,w))||new Set(r.warnings).size!==r.warnings.length)bad();
+ if(!Array.isArray(payload.rows)||payload.rows.some(row=>!row||typeof row.id!=='string'||typeof row.path!=='string'))bad();
+ if(payload.statusRefreshed){if(typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===request.snapshotToken||r.warnings.length)bad();}
+ else if(payload.snapshotToken!==null||payload.rows.length||!r.warnings.length)bad();
+ return r;
+}
+export function fileOpResultSummary(result,{statusRefreshed=false,stale=false}={}){
+ let message=`已核实本地${result.action==='move'?'移动／重命名':'带历史复制'}完成：${result.files[0]} → ${result.destination}。尚未提交到仓库。`;
+ if(result.warnings.length)message+=` 警告：${result.warnings.map(w=>FILE_OP_WARNINGS[w]).join('；')}。`;
+ if(!statusRefreshed||stale)message+=' 当前文件列表不可用，请显式刷新；已完成的操作不会因此撤销。';
+ return message+` 本原型提交入口不支持这些结构变更，请用原版可信 SVN 客户端审查并提交${result.action==='move'?'移动两端':'复制目标'}；标签不保证转移，不会自动重试或回滚。`;
+}

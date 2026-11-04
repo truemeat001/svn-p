@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback SVN Desk bridge; optional confirmed adds, labels, Shelf, commits and repository locks."""
+"""Loopback SVN Desk bridge; optional confirmed local file operations, adds, labels, Shelf, commits and repository locks."""
 from __future__ import annotations
 import argparse
 from dataclasses import asdict
@@ -25,6 +25,10 @@ from changelist_ops import (ChangelistService, ChangelistUnavailable, MutationUn
                             validate_request, status_rows, visible_rows)
 
 from add_ops import AddService, AddUnavailable, validate_request as validate_add_request
+
+from file_ops import (FileOperationService, FileOperationUnavailable, fileops_module,
+                      guarded_manager as guarded_fileops_manager,
+                      validate_request as validate_fileop_request)
 
 from commit_ops import (CommitService, CommitUnavailable, validate_request as validate_commit_request)
 from lock_ops import (LockService, LockUnavailable, lock_module, guarded_manager as guarded_lock_manager,
@@ -60,7 +64,7 @@ def reviewed_commit_backend(backend, history):
 
 class ReadOnlyAdapter:
     """Imports trusted bounded services. Never exposes a generic SVN command."""
-    def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None, *, enable_changelists=False, enable_shelves=False, shelf_storage=None, enable_commits=False, enable_locks=False, enable_adds=False):
+    def __init__(self, workspace: Path, backend_source: Path, executable: str | None = None, *, enable_changelists=False, enable_shelves=False, shelf_storage=None, enable_commits=False, enable_locks=False, enable_adds=False, enable_file_ops=False):
         self.workspace = local_path(workspace)
         self._identity = working_copy_identity(self.workspace)
         backend, status_stream, _, _ = trusted_modules(backend_source)
@@ -78,6 +82,9 @@ class ReadOnlyAdapter:
                                 if enable_commits and self._file_service and reviewed_commit_backend(backend, history) else None)
         self._add_service = (AddService(self.client, self._file_service.manager, self._check_workspace)
                              if enable_adds and self._file_service and reviewed_commit_backend(backend, history) else None)
+        fileops = fileops_module(backend_source) if enable_file_ops and self._file_service and reviewed_commit_backend(backend, history) else None
+        self._fileop_service = (FileOperationService(guarded_fileops_manager(fileops, history, self.client), self._check_workspace)
+                                if fileops else None)
         locks = lock_module(backend_source) if enable_locks and self._file_service and reviewed_commit_backend(backend, history) else None
         self._lock_service = (LockService(guarded_lock_manager(locks, history, self.client), self._check_workspace)
                               if locks else None)
@@ -92,14 +99,26 @@ class ReadOnlyAdapter:
         self._busy = threading.Lock()
 
     def _check_workspace(self):
-        if working_copy_identity(self.workspace) != self._identity:
-            raise ValueError("Working copy changed since opening.")
+        try:
+            if working_copy_identity(self.workspace) != self._identity:
+                raise ValueError("Working copy changed since opening.")
+        except (ValueError, OSError):
+            self._read_snapshot = None
+            for name in ('_changelist_service', '_shelf_service', '_commit_service',
+                         '_lock_service', '_add_service', '_fileop_service'):
+                service = getattr(self, name, None)
+                if service:
+                    service.invalidate()
+            raise
 
     def snapshot(self):
         if not self._busy.acquire(blocking=False):
             raise BlockingIOError("A status read is already running.")
         try:
             self._read_snapshot = None  # Refresh invalidates old capabilities even on failure.
+            fileop_service = getattr(self, '_fileop_service', None)
+            if fileop_service:
+                fileop_service.invalidate()
             add_service = getattr(self, '_add_service', None)
             if add_service:
                 add_service.invalidate()
@@ -117,7 +136,7 @@ class ReadOnlyAdapter:
                 shelf_service.invalidate()
             self._check_workspace()
             # No --show-updates, remote info/list/log, shell, diff or writes.
-            if service or commit_service or lock_service or add_service:
+            if service or commit_service or lock_service or add_service or fileop_service:
                 rows = self._status_rows()
                 self._check_workspace()
                 return self._publish_snapshot(rows)
@@ -141,8 +160,12 @@ class ReadOnlyAdapter:
 
     def _status_rows(self):
         rows = status_rows(self.client)
-        # Locks need clean files too. Enabling locks never makes status remote.
-        return list(rows.values()) if getattr(self, '_lock_service', None) else visible_rows(rows)
+        return self._rows_for_snapshot(rows)
+
+    def _rows_for_snapshot(self, rows):
+        # Locks and local moves/copies also need clean files; status stays local.
+        return (list(rows.values()) if getattr(self, '_lock_service', None)
+                or getattr(self, '_fileop_service', None) else visible_rows(rows))
 
     def _publish_snapshot(self, rows):
         token = secrets.token_urlsafe(24)
@@ -156,6 +179,7 @@ class ReadOnlyAdapter:
                 "commitsEnabled": getattr(self, '_commit_service', None) is not None,
                 "locksEnabled": getattr(self, '_lock_service', None) is not None,
                 "addsEnabled": getattr(self, '_add_service', None) is not None,
+                "fileOpsEnabled": getattr(self, '_fileop_service', None) is not None,
                 "readAt": datetime.now(timezone.utc).isoformat(),
                 "scope": "Local status only; repository connectivity not tested."}
 
@@ -177,6 +201,8 @@ class ReadOnlyAdapter:
                 return payload
             def invalidate():
                 self._read_snapshot = None
+                if getattr(self, '_fileop_service', None):
+                    self._fileop_service.invalidate()
                 if getattr(self, '_add_service', None):
                     self._add_service.invalidate()
                 if getattr(self, '_lock_service', None):
@@ -188,7 +214,7 @@ class ReadOnlyAdapter:
             result, rows = service.apply(data, self._read_snapshot, invalidate)
             try:
                 self._check_workspace()
-                return {**self._publish_snapshot(list(rows.values()) if getattr(self, '_lock_service', None) else visible_rows(rows)), 'changelistResult': result}
+                return {**self._publish_snapshot(self._rows_for_snapshot(rows)), 'changelistResult': result}
             except Exception as error:
                 self._read_snapshot = None
                 raise MutationUncertain('Post-write workspace validation failed.') from error
@@ -214,6 +240,8 @@ class ReadOnlyAdapter:
                 return result
             def invalidate():
                 self._read_snapshot = None
+                if getattr(self, '_fileop_service', None):
+                    self._fileop_service.invalidate()
                 if getattr(self, '_add_service', None):
                     self._add_service.invalidate()
                 if getattr(self, '_lock_service', None):
@@ -236,7 +264,7 @@ class ReadOnlyAdapter:
     def _commit_status_unknown(self, result, warning):
         """A failed follow-up read must not erase an already completed command."""
         self._read_snapshot = None
-        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
+        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
             service = getattr(self, name, None)
             if service:
                 service.invalidate()
@@ -244,7 +272,7 @@ class ReadOnlyAdapter:
         return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
                 'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
                 'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
-                'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False, 'addsEnabled': False, 'writesEnabled': False,
+                'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False, 'addsEnabled': False, 'fileOpsEnabled': False, 'writesEnabled': False,
                 'commitResult': {**result, 'warnings': warnings},
                 'scope': 'Command completed; subsequent local status could not be verified.'}
 
@@ -266,7 +294,7 @@ class ReadOnlyAdapter:
                 return payload
             def invalidate():
                 self._read_snapshot = None
-                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
+                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
                     current = getattr(self, name, None)
                     if current:
                         current.invalidate()
@@ -282,7 +310,7 @@ class ReadOnlyAdapter:
 
     def _lock_status_unknown(self, result, warning=None):
         self._read_snapshot = None
-        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
+        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
             service = getattr(self, name, None)
             if service:
                 service.invalidate()
@@ -290,7 +318,7 @@ class ReadOnlyAdapter:
         return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
                 'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
                 'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
-                'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False, 'addsEnabled': False, 'writesEnabled': False,
+                'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False, 'addsEnabled': False, 'fileOpsEnabled': False, 'writesEnabled': False,
                 'lockResult': {**result, 'warnings': warnings},
                 'scope': 'Repository lock result retained; local status requires explicit refresh.'}
 
@@ -312,7 +340,7 @@ class ReadOnlyAdapter:
                 return payload
             def invalidate():
                 self._read_snapshot = None
-                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
+                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
                     current = getattr(self, name, None)
                     if current:
                         current.invalidate()
@@ -330,7 +358,7 @@ class ReadOnlyAdapter:
 
     def _add_status_unknown(self, result, warning):
         self._read_snapshot = None
-        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
+        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
             service = getattr(self, name, None)
             if service:
                 service.invalidate()
@@ -339,7 +367,7 @@ class ReadOnlyAdapter:
                 'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
                 'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
                 'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False,
-                'addsEnabled': False, 'writesEnabled': False,
+                'addsEnabled': False, 'fileOpsEnabled': False, 'writesEnabled': False,
                 'addResult': {**result, 'warnings': warnings},
                 'scope': 'Verified local add retained; local status requires explicit refresh.'}
 
@@ -361,7 +389,7 @@ class ReadOnlyAdapter:
                 return payload
             def invalidate():
                 self._read_snapshot = None
-                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service'):
+                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
                     current = getattr(self, name, None)
                     if current:
                         current.invalidate()
@@ -369,10 +397,60 @@ class ReadOnlyAdapter:
             result = {**result, 'warnings': list(result.get('warnings', []))}
             try:
                 self._check_workspace()
-                published = list(rows.values()) if getattr(self, '_lock_service', None) else visible_rows(rows)
+                published = self._rows_for_snapshot(rows)
                 return {**self._publish_snapshot(published), 'addResult': result, 'statusRefreshed': True}
             except Exception:
                 return self._add_status_unknown(result, 'status-refresh-failed')
+        finally:
+            self._busy.release()
+
+    def _fileop_status_unknown(self, result, warning):
+        self._read_snapshot = None
+        for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
+            service = getattr(self, name, None)
+            if service:
+                service.invalidate()
+        warnings = list(dict.fromkeys([*result.get('warnings', []), warning]))
+        return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
+                'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
+                'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
+                'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False,
+                'addsEnabled': False, 'fileOpsEnabled': False, 'writesEnabled': False,
+                'fileOpResult': {**result, 'warnings': warnings},
+                'scope': 'Verified local file operation retained; local status requires explicit refresh.'}
+
+    def file_operation(self, kind, data):
+        if not self._busy.acquire(blocking=False):
+            raise BlockingIOError('A workspace operation is already running.')
+        try:
+            service = getattr(self, '_fileop_service', None)
+            if service is None:
+                raise FileOperationUnavailable('Exact-file local moves and copies are not enabled.')
+            self._check_workspace()
+            if kind == 'preflight':
+                payload = service.preflight(data, self._read_snapshot)
+                try:
+                    self._check_workspace()
+                except Exception:
+                    service.invalidate()
+                    raise
+                return payload
+            def invalidate():
+                self._read_snapshot = None
+                for name in ('_changelist_service', '_shelf_service', '_commit_service', '_lock_service', '_add_service', '_fileop_service'):
+                    current = getattr(self, name, None)
+                    if current:
+                        current.invalidate()
+            result, rows = service.apply(data, self._read_snapshot, invalidate)
+            result = {**result, 'warnings': list(result.get('warnings', []))}
+            if rows is None:
+                return self._fileop_status_unknown(result, 'status-refresh-failed')
+            try:
+                self._check_workspace()
+                published = self._rows_for_snapshot(rows)
+                return {**self._publish_snapshot(published), 'fileOpResult': result, 'statusRefreshed': True}
+            except Exception:
+                return self._fileop_status_unknown(result, 'status-refresh-failed')
         finally:
             self._busy.release()
 
@@ -560,11 +638,12 @@ class Handler(BaseHTTPRequestHandler):
         file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history',
                      '/api/file-properties': 'properties'}.get(url.path)
         changelist_kind = {'/api/changelist-preflight': 'preflight', '/api/changelist-apply': 'apply'}.get(url.path)
+        fileop_kind = {'/api/file-op-preflight': 'preflight', '/api/file-op-apply': 'apply'}.get(url.path)
         add_kind = {'/api/add-preflight': 'preflight', '/api/add-apply': 'apply'}.get(url.path)
         lock_kind = {'/api/lock-preflight': 'preflight', '/api/lock-apply': 'apply'}.get(url.path)
         commit_kind = {'/api/commit-preflight': 'preflight', '/api/commit-apply': 'apply'}.get(url.path)
         shelf_kind = {'/api/shelves-list': 'list', '/api/shelf-preflight': 'preflight', '/api/shelf-apply': 'apply'}.get(url.path)
-        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None and shelf_kind is None and commit_kind is None and lock_kind is None and add_kind is None) or self.server.catalog is None:
+        if (url.path != "/api/workspace-selection" and file_kind is None and changelist_kind is None and shelf_kind is None and commit_kind is None and lock_kind is None and add_kind is None and fileop_kind is None) or self.server.catalog is None:
             return self.respond(405, {"error": "SVN writes are not implemented."})
         if (self.headers.get_all("Content-Length") is None
                 or len(self.headers.get_all("Content-Length")) != 1
@@ -573,7 +652,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {"error": "A bounded JSON request is required."})
         try:
             size = self._request_body_size()
-            limit = MAX_REQUEST_BODY_BYTES if changelist_kind or shelf_kind or commit_kind or lock_kind or add_kind else 4096
+            limit = MAX_REQUEST_BODY_BYTES if changelist_kind or shelf_kind or commit_kind or lock_kind or add_kind or fileop_kind else 4096
             if not 1 <= size <= limit:
                 self._body_attempted = True  # Oversized/empty input is not drained.
                 return self.respond(413, {"error": "Selection request is too large or empty."})
@@ -586,7 +665,9 @@ class Handler(BaseHTTPRequestHandler):
                     obj[key] = value
                 return obj
             data = json.loads(body, object_pairs_hook=strict_object)
-            if add_kind:
+            if fileop_kind:
+                validate_fileop_request(fileop_kind, data)
+            elif add_kind:
                 validate_add_request(add_kind, data)
             elif lock_kind:
                 validate_lock_request(lock_kind, data)
@@ -625,6 +706,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, {'error': '不支持 BASE → BASE 比较。查看本地修改请选 BASE → WORKING，或使用明确数字修订；未运行比较。'})
         except (ValueError, OSError, RecursionError):
             return self.respond(400, {"error": "只接受明确工作区、当前状态行与受限修订；不接受任意路径、命令或重复字段。"})
+        if fileop_kind:
+            try:
+                return self.respond(200, self.server.catalog.file_operation(fileop_kind, data))
+            except FileOperationUnavailable:
+                return self.respond(403, {'error': '本地文件移动/复制未启用或配套后端不匹配。须由本机启动参数明确启用。'})
+            except StaleRead:
+                return self.respond(409, {'error': '文件操作计划、源文件、目标或状态已改变；未执行此确认。请明确刷新状态并重新预检。'})
+            except BlockingIOError:
+                return self.respond(409, {'error': '已有工作区操作正在运行；本次未执行文件移动/复制。'})
+            except Exception:
+                if fileop_kind == 'apply':
+                    return self.respond(503, {'error': '本地文件操作结果未能确认，文件或 SVN 调度可能已部分改变。没有自动重试或回滚；请明确刷新状态并检查后重新审查。'})
+                return self.respond(503, {'error': '本地文件操作预检未通过；未运行移动或复制。请检查单个源文件、相对目标、已版本化父目录和配套安全后端。'})
         if add_kind:
             try:
                 return self.respond(200, self.server.catalog.add_operation(add_kind, data))
@@ -724,6 +818,7 @@ def main():
     parser.add_argument("--settings-file", type=Path, help="Opt in to selection preferences outside all scan/WC directories; parent must exist")
     parser.add_argument("--backend-source", type=Path)
     parser.add_argument("--enable-changelists", action="store_true", help="Opt in to confirmed exact-file local SVN label assignment/removal; no commit/revert")
+    parser.add_argument("--enable-file-ops", action="store_true", help="Opt in to confirmed single-file local SVN move/rename or history-preserving copy; no force, parents or commit")
     parser.add_argument("--enable-adds", action="store_true", help="Opt in to confirmed exact-file local SVN add; no recursion, auto-props or commit")
     parser.add_argument("--enable-locks", action="store_true", help="Opt in to confirmed exact-file repository lock/unlock; preflight contacts server; never force")
     parser.add_argument("--enable-commits", action="store_true", help="Opt in to exact-file or complete named-changelist repository commits after separate one-use confirmation")
@@ -734,7 +829,7 @@ def main():
     authorized = bool(args.workspace or args.scan_parent)
     if authorized and not args.backend_source:
         parser.error("--workspace/--scan-parent requires --backend-source; demo is never used as a fallback.")
-    if (args.backend_source or args.svn or args.settings_file or args.enable_changelists or args.enable_shelves or args.shelf_storage or args.enable_commits or args.enable_locks or args.enable_adds) and not authorized:
+    if (args.backend_source or args.svn or args.settings_file or args.enable_changelists or args.enable_shelves or args.shelf_storage or args.enable_commits or args.enable_locks or args.enable_adds or args.enable_file_ops) and not authorized:
         parser.error("Backend, SVN and preferences require --workspace or --scan-parent.")
     if args.shelf_storage and not args.enable_shelves:
         parser.error("--shelf-storage requires --enable-shelves.")
@@ -745,11 +840,11 @@ def main():
             catalog = WorkspaceCatalog(roots=args.workspace, parents=args.scan_parent,
                 discovery=discovery, settings=settings, settings_file=args.settings_file,
                 adapter_factory=lambda path: ReadOnlyAdapter(path, args.backend_source, args.svn, enable_changelists=args.enable_changelists, enable_shelves=args.enable_shelves,
-                    shelf_storage=args.shelf_storage, enable_commits=args.enable_commits, enable_locks=args.enable_locks, enable_adds=args.enable_adds))
+                    shelf_storage=args.shelf_storage, enable_commits=args.enable_commits, enable_locks=args.enable_locks, enable_adds=args.enable_adds, enable_file_ops=args.enable_file_ops))
         server = PrototypeServer(args.port, catalog=catalog)
     except (ValueError, OSError, RuntimeError, ImportError):
         parser.exit(1, "Startup failed. Verify authorized directories, preferences path and trusted backend.\n")
-    print(f"SVN Desk {('CONFIRMED REPOSITORY LOCKS' if args.enable_locks else 'CONFIRMED REPOSITORY COMMITS' if args.enable_commits else 'CONFIRMED LOCAL SHELVES' if args.enable_shelves else 'CONFIRMED LOCAL CHANGELISTS' if args.enable_changelists else 'CONFIRMED LOCAL ADDS' if args.enable_adds else 'READ-ONLY WORKSPACES') if catalog else 'DEMO'}: {server.origin}", flush=True)
+    print(f"SVN Desk {('CONFIRMED REPOSITORY LOCKS' if args.enable_locks else 'CONFIRMED REPOSITORY COMMITS' if args.enable_commits else 'CONFIRMED LOCAL SHELVES' if args.enable_shelves else 'CONFIRMED LOCAL CHANGELISTS' if args.enable_changelists else 'CONFIRMED LOCAL ADDS' if args.enable_adds else 'CONFIRMED LOCAL FILE OPERATIONS' if args.enable_file_ops else 'READ-ONLY WORKSPACES') if catalog else 'DEMO'}: {server.origin}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

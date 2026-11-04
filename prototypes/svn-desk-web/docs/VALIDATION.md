@@ -366,3 +366,36 @@ tests skipped. Focused property tests: 23 passed. Independent review confirmed
 only Windows error 1314 is skipped; all other simulated link errors propagate.
 Windows full aggregate, GUI and native packaging acceptance remain pending.
 See [PROPERTY_WINDOWS_TEST_FIX.md](PROPERTY_WINDOWS_TEST_FIX.md).
+
+## Exact single-file move/rename and history-preserving copy · 2026-11-04
+
+Base `59a762b4d697dbbe3b658123b0b36031f9ad3456`. Independent default-off
+`--enable-file-ops` adds one exact source and one absent relative destination,
+with local preflight and separately confirmed 120-second one-use plans. The
+original FileOperationManager and all original backend files remain unchanged.
+The wrapper bounds original metadata/content reads and the one native dispatch.
+
+- 122 JavaScript model/controller/review tests passed.
+- 464 Python tests ran: 462 passed and 2 existing real-SVN tests skipped.
+- New file-operation service, HTTP/catalog and independent suites: 83 Python
+  tests. New model/controller/review suites: 18 JavaScript tests.
+- Independent review reproduced and fixed complete info-XML binding, destination
+  URL/copy provenance, unsafe move-source post-state, expiry in the last dispatch
+  callback, unexpected stdout under deterministic `--quiet`, malformed leaf XML
+  diagnostics, and preserved verified results even when both snapshot adoption
+  and error-state rendering fail. Each has a regression test.
+- Native destination peg handling differs correctly for copy and move; no
+  implicit parent creation, directory operation, forced overwrite, delete or
+  commit route was added. Existing Web commit still rejects structural changes;
+  users must review/commit the two move sides or copy target in a trusted client.
+- Final syntax checks, standalone rebuild and an independent frozen audit are
+  required before this source checkpoint is saved.
+
+Executed checks use synthetic temporary files, mock SVN, local HTTP and DOM
+adapters only. The browser contract is `npm run test:file-ops:ui`; it was syntax
+checked, not executed. Prior Chromium socket denial was not retried or bypassed.
+No real SVN, Windows filesystem, GUI, WebView2, native package, performance or
+new screenshot acceptance is claimed. The separate property-test compatibility
+checkpoint above does not validate this new workflow. Full limits, failure
+semantics and disposable-Windows acceptance checklist:
+[LOCAL_FILE_OPERATIONS.md](LOCAL_FILE_OPERATIONS.md).
