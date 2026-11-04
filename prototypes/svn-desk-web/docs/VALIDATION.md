@@ -214,3 +214,32 @@ run diagnosed the base commit; it does not validate the new repair. Windows real
 retest, browser execution and native packaging remain pending. Restart the bridge
 on the new full checkpoint, then repeat unchanged-file and real-change rejection
 checks in a self-created disposable repository before acceptance.
+
+## Commit diagnostic preservation · 2026-11-04
+
+Base `b22f584bc81903076e3320d2b3a0c0e0925e389c`. The supplied Windows real-SVN
+report verified the XML-order fix on Python 3.10 and 3.14, with unchanged metadata
+now stable. Its real commit matrix found a separate warning-reporting defect:
+a revision was created, but a post-commit hook failure in stdout was hidden because
+SVN exited 0 with empty stderr. The repair retains completion and prominently
+qualifies diagnostics instead of implying rollback or inviting duplicate submission.
+
+- 39 JavaScript model tests passed.
+- 261 Python tests ran: 259 passed and 2 existing explicit real-SVN tests skipped.
+- 20 diagnostic-focused tests passed (8 implementation and 12 independent review
+  tests), plus new service/HTTP tests for completed hook warnings, failed status
+  refresh and workspace replacement after dispatch.
+- Independent review found and verified a fix for catalog configuration overriding
+  disabled read/write capabilities after a failed follow-up status check.
+- Output caps, ASCII bounded revision parsing, localized/unknown output, raw secret
+  suppression, nonzero/exception uncertainty, consumed tokens, and fixed frontend
+  warning messages are covered. Python/JavaScript syntax checks passed and the
+  standalone demo was rebuilt from the same frontend sources.
+
+Only synthetic temporary fixtures, mock native output and loopback HTTP were used
+for this repair. The supplied Windows run concerns the base, not acceptance of this
+new fix. Browser contracts are updated but browser execution remains unperformed
+because of the existing Chromium socket restriction. Windows real-SVN and native
+packaging retests remain pending. No user project or credentials were accessed.
+See [COMMIT_DIAGNOSTICS.md](COMMIT_DIAGNOSTICS.md) for the result contract and the
+required disposable-repository retest sequence.

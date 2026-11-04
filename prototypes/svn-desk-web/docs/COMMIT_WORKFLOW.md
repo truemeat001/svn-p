@@ -1,7 +1,8 @@
 # Confirmed exact-scope repository commits
 
 Original slice base: `ca75b71d9a4f9a1a17470407b69452423fb64eeb`. The XML-order
-repair follows `68bae524950675ccdd21353b778456363022a322`. This is another opt-in
+repair follows `68bae524950675ccdd21353b778456363022a322`; diagnostic preservation
+follows `b22f584bc81903076e3320d2b3a0c0e0925e389c`. This is another opt-in
 modern web slice, not a released client or complete migration. The original
 `svn_client` implementation is unchanged.
 
@@ -80,7 +81,8 @@ scope, a one-use token, and literal `confirmed: true`; it cannot change the plan
   original message redaction and optional `--keep-changelists` behavior.
 - Catalog/adapter locks prevent simultaneous in-app selection, read and mutation.
   Beginning a write invalidates all status, changelist, Shelf and commit capabilities.
-  Successful dispatch is followed by fresh status; any post-check failure is unknown.
+  Completed commands are followed by fresh status. Post-check failure preserves
+  completion while making the local status unknown and revoking capabilities.
 
 Preflight does not contact the repository, establish authorization/remote locks,
 prove the server is up-to-date, or run server hooks. Actual confirmation uses the
@@ -92,17 +94,26 @@ files or running another client between review and completion.
 
 ## Failure semantics
 
-Zero exit with any stderr is not treated as confirmed success. Once dispatch may
-have started, timeout, errors, lost responses and post-status failure are **unknown**:
+A zero exit preserves command completion, including when SVN reports diagnostics
+on stdout or stderr. A uniquely recognized positive revision is explicitly
+**SVN-reported**, not independently verified from repository history. Post-commit
+hook failure and unknown/localized/additional output are prominently qualified;
+they must not be shown as a rollback or a reason to repeat the commit. If a later
+status read or workspace check fails, completion and warning information survive
+while snapshot/read/write capabilities are cleared.
+
+Nonzero exit, exceptions, timeout or an unverifiable/lost response remain **unknown**:
 the repository may already have accepted the commit. There is no automatic retry,
-rollback, revert or compensating write. Check repository history with a trusted
-client before deciding to make another attempt.
+rollback, revert or compensating write. Check repository history and the server
+hook logs with trusted tools before deciding what to do next. Raw diagnostics
+never reach browser messages or action logs. See [COMMIT_DIAGNOSTICS.md](COMMIT_DIAGNOSTICS.md).
 
 Closing an active dialog does not cancel SVN. The UI clears old state, blocks
-refresh until the in-flight request settles, discards late success, and then asks
-for explicit refresh/history inspection. Repeated clicks cannot dispatch the same
-plan twice. Successful UI text says only that the command completed and local
-status was reread; it does not parse localized output or invent a revision number.
+refresh until the in-flight request settles and discards stale status. A valid late
+completion is retained in the operation log/toast without reopening the dialog,
+and still requires explicit refresh/history inspection. Repeated clicks cannot
+dispatch the same plan twice. The UI displays only a validated SVN-reported revision
+and fixed warning summaries; it never guesses a revision from localized text.
 
 ## Validation and remaining acceptance
 
@@ -140,7 +151,9 @@ New synthetic regressions reproduce unstable raw serialization, verify all attri
 permutations and eight equivalent reads, run selected and complete-changelist
 confirmation while order alternates, and reject real metadata/property changes.
 Independent review verified the old order-sensitive behavior fails the regression.
-This repair has not yet been retested with Windows real SVN. Update the complete
+The subsequent Windows test of `b22f584` passed the XML-order correction on Python
+3.10 and 3.14, but found the separate post-commit warning issue described in
+[COMMIT_DIAGNOSTICS.md](COMMIT_DIAGNOSTICS.md). Update the complete
 checkpoint and restart the bridge before testing; old in-memory plans are not
 reused or migrated. Counts are recorded in `VALIDATION.md`.
 

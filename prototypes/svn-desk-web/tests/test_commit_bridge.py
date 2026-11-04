@@ -178,7 +178,13 @@ class CommitAdapterTests(unittest.TestCase):
 
     def test_failed_post_commit_status_clears_snapshot(self):
         self.adapter.client.status.side_effect = RuntimeError('failed')
-        with self.assertRaises(MutationUncertain): self.adapter.commit_operation('apply',scope(planToken='p',confirmed=True))
+        self.adapter._commit_service.apply.return_value = {'commandCompleted':True,'outcome':'committed','reportedRevision':'3','warnings':[]}
+        result = self.adapter.commit_operation('apply',scope(planToken='p',confirmed=True))
+        self.assertFalse(result['statusRefreshed'])
+        self.assertIsNone(result['snapshotToken'])
+        self.assertEqual(result['rows'],[])
+        self.assertEqual(result['commitResult']['reportedRevision'],'3')
+        self.assertIn('status-refresh-failed',result['commitResult']['warnings'])
         self.assertIsNone(self.adapter._read_snapshot)
         self.adapter._commit_service.apply.assert_called_once()
         self.assertFalse(self.adapter._busy.locked())
@@ -266,6 +272,49 @@ class CommitHTTPServiceTests(unittest.TestCase):
         self.assertEqual(self.post('/api/commit-apply',self.confirm(plan))[0],409)
         self.fixture.client.command.assert_called_once()
         self.assertNotIn('other.txt',self.fixture.client.command.call_args.args[0])
+
+    def test_http_hook_warning_retains_reported_commit_and_one_use(self):
+        self.fixture.client.command.return_value = self.fixture.backend.CommandResult((),0,
+            'Committed revision 3.\nWarning: post-commit hook failed (exit code 1) with output:\nPRIVATE HOOK','')
+        status,plan = self.post('/api/commit-preflight',self.data); self.assertEqual(status,200)
+        status,result = self.post('/api/commit-apply',self.confirm(plan))
+        self.assertEqual(status,200,result); self.assertTrue(result['statusRefreshed'])
+        self.assertEqual(result['commitResult']['outcome'],'committed')
+        self.assertEqual(result['commitResult']['reportedRevision'],'3')
+        self.assertIn('post-commit-hook',result['commitResult']['warnings'])
+        self.assertNotIn('PRIVATE',repr(result))
+        self.assertEqual(self.post('/api/commit-apply',self.confirm(plan))[0],409)
+        self.fixture.client.command.assert_called_once()
+
+    def test_http_status_failure_keeps_known_commit_and_disables_snapshot(self):
+        self.fixture.client.command.return_value = self.fixture.backend.CommandResult((),0,'Committed revision 3.','')
+        def status_rows(**kwargs):
+            if self.fixture.client.command.call_count: raise RuntimeError('PRIVATE STATUS ERROR')
+            return list(self.fixture.entries)
+        self.fixture.client.status.side_effect = status_rows
+        status,plan = self.post('/api/commit-preflight',self.data); self.assertEqual(status,200)
+        status,result = self.post('/api/commit-apply',self.confirm(plan))
+        self.assertEqual(status,200,result); self.assertFalse(result['statusRefreshed'])
+        self.assertIsNone(result['snapshotToken']); self.assertEqual(result['rows'],[])
+        self.assertEqual(result['commitResult']['reportedRevision'],'3')
+        self.assertIn('status-refresh-failed',result['commitResult']['warnings'])
+        self.assertNotIn('PRIVATE',repr(result))
+        self.assertEqual(self.post('/api/commit-apply',self.confirm(plan))[0],409)
+        self.fixture.client.command.assert_called_once()
+
+    def test_http_workspace_replacement_after_dispatch_keeps_completion(self):
+        def dispatch(args,**kwargs):
+            (self.fixture.root/'.svn').rename(self.fixture.root/'old-metadata')
+            (self.fixture.root/'.svn').mkdir()
+            return self.fixture.backend.CommandResult((),0,'Committed revision 3.','')
+        self.fixture.client.command.side_effect = dispatch
+        status,plan = self.post('/api/commit-preflight',self.data); self.assertEqual(status,200)
+        status,result = self.post('/api/commit-apply',self.confirm(plan))
+        self.assertEqual(status,200,result); self.assertFalse(result['statusRefreshed'])
+        self.assertIsNone(result['snapshotToken']); self.assertEqual(result['rows'],[])
+        self.assertEqual(result['commitResult']['reportedRevision'],'3')
+        self.assertIn('workspace-changed',result['commitResult']['warnings'])
+        self.fixture.client.command.assert_called_once()
 
     def test_property_change_after_http_review_never_commits(self):
         status,plan = self.post('/api/commit-preflight',self.data); self.assertEqual(status,200)

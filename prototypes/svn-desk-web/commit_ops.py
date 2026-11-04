@@ -22,6 +22,7 @@ import time
 from changelist_ops import (ChangelistService, FingerprintBudget, content_fingerprint,
                             identity_fields, status_rows, MutationUncertain)
 from file_reads import StaleRead, strict_relative_path, file_identity
+from commit_diagnostics import classify_commit_output
 
 PLAN_SECONDS = 120
 MAX_MESSAGE_BYTES = 8192
@@ -276,10 +277,11 @@ class CommitService:
                     # argv/targets files; user input can never supply options.
                     targets = self.client._local_targets(paths)
                     result = self.client._command_with_targets(options, targets, _message_index=1)
-                if result.returncode != 0 or result.stderr:
-                    raise MutationUncertain('Commit returned diagnostics.')
-                # Deliberately discard stdout, stderr, argv and commit message.
+                diagnostics = classify_commit_output(result)
+                # Preserve completion and bounded fixed warning codes, never raw
+                # stdout/stderr, argv, hook text, credentials or commit message.
                 return {'operation': plan['operation'], 'name': plan['name'],
-                        'keepChangelist': plan['keepChangelist'], 'files': [row['path'] for row in plan['expected'].values()], 'commandCompleted': True}
+                        'keepChangelist': plan['keepChangelist'],
+                        'files': [row['path'] for row in plan['expected'].values()], **diagnostics}
             except Exception:
                 raise MutationUncertain('Commit outcome is uncertain; refresh and inspect repository history before any new attempt.') from None

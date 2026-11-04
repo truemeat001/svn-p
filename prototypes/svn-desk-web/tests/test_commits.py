@@ -218,7 +218,7 @@ class CommitTests(unittest.TestCase):
         with self.assertRaises(StaleRead): self.apply(plan)
 
     def test_command_error_warning_timeout_uncertain_sanitized_and_consumed(self):
-        for failure in [TimeoutError('PRIVATE MESSAGE'), RuntimeError('PRIVATE STDERR'), None]:
+        for failure in [TimeoutError('PRIVATE MESSAGE'), RuntimeError('PRIVATE STDERR')]:
             self.client.command.reset_mock(); self.invalidated.reset_mock()
             self.client.command.side_effect = failure
             self.client.command.return_value = self.backend.CommandResult((), 0, 'SECRET', 'PRIVATE STDERR')
@@ -227,6 +227,17 @@ class CommitTests(unittest.TestCase):
             self.assertNotIn('PRIVATE', str(error.exception)); self.assertIsNone(error.exception.__cause__)
             self.client.command.assert_called_once(); self.invalidated.assert_called_once()
             with self.assertRaises(StaleRead): self.apply(plan)
+
+    def test_zero_exit_with_stderr_preserves_completion_and_warns(self):
+        self.client.command.return_value = self.backend.CommandResult((),0,'Committed revision 3.','PRIVATE STDERR')
+        plan = self.preflight(); result = self.apply(plan)
+        self.assertEqual(result['outcome'],'committed')
+        self.assertEqual(result['reportedRevision'],'3')
+        self.assertIn('stderr-output',result['warnings'])
+        self.assertNotIn('PRIVATE',repr(result))
+        self.assertFalse(result['automaticRetryAllowed'])
+        with self.assertRaises(StaleRead): self.apply(plan)
+        self.client.command.assert_called_once()
 
     def test_expiry_during_revalidation_never_dispatches(self):
         plan = self.preflight()

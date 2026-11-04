@@ -198,6 +198,21 @@ class ReadOnlyAdapter:
         finally:
             self._busy.release()
 
+    def _commit_status_unknown(self, result, warning):
+        """A failed follow-up read must not erase an already completed command."""
+        self._read_snapshot = None
+        for name in ('_changelist_service', '_shelf_service', '_commit_service'):
+            service = getattr(self, name, None)
+            if service:
+                service.invalidate()
+        warnings = list(dict.fromkeys([*result.get('warnings', []), warning]))
+        return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
+                'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
+                'fileReadsEnabled': False, 'changelistWritesEnabled': False,
+                'shelfWritesEnabled': False, 'commitsEnabled': False, 'writesEnabled': False,
+                'commitResult': {**result, 'warnings': warnings},
+                'scope': 'Command completed; subsequent local status could not be verified.'}
+
     def commit_operation(self, kind, data):
         if not self._busy.acquire(blocking=False):
             raise BlockingIOError('A workspace operation is already running.')
@@ -224,10 +239,9 @@ class ReadOnlyAdapter:
             try:
                 rows = visible_rows(status_rows(self.client))
                 self._check_workspace()
-                return {**self._publish_snapshot(rows), 'commitResult': result}
-            except Exception as error:
-                invalidate()
-                raise MutationUncertain('Post-commit status could not be verified.') from error
+                return {**self._publish_snapshot(rows), 'commitResult': result, 'statusRefreshed': True}
+            except Exception:
+                return self._commit_status_unknown(result, 'status-refresh-failed')
         finally:
             self._busy.release()
 

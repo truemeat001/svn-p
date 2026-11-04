@@ -1,4 +1,4 @@
-import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse,parseChangelistTarget,validateChangelistPlan,canRelabelFile,canShelfFile,parseShelfName,sameShelfScope,validateShelfFiles,validateShelfPlan,commitScopeRows,parseCommitMessage,validateCommitPlan} from './model.js';
+import {STATES,stateFor,filteredRows,groupsFor,summary,reviewSelection,safeText as esc,fileName,parentPath,isStaleWorkspaceCatalog,parseRevision,parseComparisonPair,canReadFile,sameReadScope,validateFileResponse,parseChangelistTarget,validateChangelistPlan,canRelabelFile,canShelfFile,parseShelfName,sameShelfScope,validateShelfFiles,validateShelfPlan,commitScopeRows,parseCommitMessage,validateCommitPlan,validateCommitResult,commitResultSummary} from './model.js';
 import {demoRows,demoDiff,demoHistory} from './demo-data.js';
 const $=id=>document.getElementById(id);
 const paths={
@@ -322,11 +322,13 @@ async function applyCommit(){
  $('commit-result').textContent='正在提交到仓库。关闭不等于取消；不要重复操作。';
  try{
   const payload=await api('/api/commit-apply',{workspaceId:plan.request.workspaceId,selectionVersion:plan.request.selectionVersion,snapshotToken:plan.request.snapshotToken,planToken:plan.result.planToken,confirmed:true});
-  if(generation!==commitGeneration||modalView!=='commit'||!$('modal').open||!sameShelfScope(plan.request,shelfScope()))throw Error('窗口或工作范围已改变，未采用迟到响应。');
-  const result=payload?.commitResult,expected=plan.result.files.map(f=>f.path).sort();
-  if(payload.mode!=='live'||payload.workspaceId!==plan.request.workspaceId||payload.selectionVersion!==plan.request.selectionVersion||typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===plan.request.snapshotToken||!result||!['operation','name','keepChangelist'].every(k=>result[k]===plan.request[k])||result.commandCompleted!==true||!Array.isArray(result.files)||JSON.stringify([...result.files].sort())!==JSON.stringify(expected))throw Error('提交响应身份或文件范围无效。');
-  applySnapshot(payload);const message='提交命令已完成，已重新读取本地状态。';$('commit-result').textContent=message;log(message);notify(message);
- }catch(error){const message=`提交结果未知：${error.message} 仓库可能已写入。请显式刷新本地状态并检查仓库历史，再决定下一步；不会自动重试。`;failSnapshot(message);if($('commit-result'))$('commit-result').textContent=message;log(message,'WARN');notify('提交结果未知，请刷新并检查仓库历史；不要直接重试。');}
+  const result=validateCommitResult(payload,plan.request,plan.result.files);
+  const stale=generation!==commitGeneration||modalView!=='commit'||!$('modal').open||!sameShelfScope(plan.request,shelfScope());
+  const message=commitResultSummary(result,{statusRefreshed:payload.statusRefreshed,stale});
+  if(stale||!payload.statusRefreshed)failSnapshot(message);else applySnapshot(payload);
+  if($('commit-result')){$('commit-result').textContent=message;$('commit-result').setAttribute('role',result.warnings.length||result.outcome!=='committed'||stale?'alert':'status');}
+  log(message,result.warnings.length||result.outcome!=='committed'||stale?'WARN':'INFO');notify(message);
+ }catch(error){const message='提交结果未知：未收到可验证的提交响应。仓库可能已写入。请显式刷新本地状态并检查仓库历史，再决定下一步；不会自动重试。';failSnapshot(message);if($('commit-result'))$('commit-result').textContent=message;log(message,'WARN');notify('提交结果未知，请刷新并检查仓库历史；不要直接重试。');}
  finally{commitApplying=false;setBusy(false);render();}
 }
 

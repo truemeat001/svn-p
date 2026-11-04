@@ -356,8 +356,13 @@ class WorkspaceCatalog:
                     if service:
                         service.invalidate()
                 if kind == 'apply':
+                    result = payload.get('commitResult')
+                    if isinstance(result, dict) and result.get('commandCompleted') is True:
+                        return {**self.config(), **adapter._commit_status_unknown(result, 'workspace-changed')}
                     raise MutationUncertain('Workspace changed after commit execution.') from error
                 raise
+            if payload.get('statusRefreshed') is False:
+                return {**self.config(), **payload}  # Revoked capabilities win over configured services.
             return {**payload, **self.config()}
 
     def select(self, identifier):

@@ -134,3 +134,36 @@ export function validateCommitPlan(data,request,rows){
  for(const file of data.files){const row=expected.get(file?.id);if(!row||file.path!==row.path||file.fromChangelist!==(row.changelist||null)||file.item!==row.item||file.props!==row.props)bad();expected.delete(file.id);}
  if(expected.size)bad();return data;
 }
+
+const COMMIT_WARNINGS = {
+ 'post-commit-hook':'提交后钩子执行失败',
+ 'additional-output':'SVN 返回了额外诊断信息',
+ 'stderr-output':'SVN 返回了标准错误诊断信息',
+ 'unrecognized-output':'无法识别 SVN 输出',
+ 'output-limit':'SVN 输出达到上限',
+ 'status-refresh-failed':'提交后的本地状态刷新失败',
+ 'workspace-changed':'提交期间工作区发生变化',
+};
+// Validate against the captured preflight, not mutable UI state. Never render raw output.
+export function validateCommitResult(payload,request,files){
+ const bad=()=>{throw Error('提交响应身份、结果或文件范围无效。');};
+ const result=payload?.commitResult;
+ if(payload?.mode!=='live'||payload.workspaceId!==request.workspaceId||payload.selectionVersion!==request.selectionVersion||typeof payload.statusRefreshed!=='boolean'||!result||!['operation','name','keepChangelist'].every(k=>result[k]===request[k])||result.commandCompleted!==true||result.automaticRetryAllowed!==false||!Array.isArray(result.files)||result.files.some(p=>typeof p!=='string')||JSON.stringify([...result.files].sort())!==JSON.stringify(files.map(f=>f.path).sort()))bad();
+ if(!['committed','completed-unverified'].includes(result.outcome)||!(result.reportedRevision===null||typeof result.reportedRevision==='string'&&/^[1-9][0-9]{0,18}$/.test(result.reportedRevision)&&BigInt(result.reportedRevision)<=9223372036854775807n)||((result.outcome==='committed')!==(result.reportedRevision!==null)))bad();
+ if(!Array.isArray(result.warnings)||result.warnings.some(w=>typeof w!=='string'||!Object.hasOwn(COMMIT_WARNINGS,w))||new Set(result.warnings).size!==result.warnings.length)bad();
+ if(!Array.isArray(payload.rows)||payload.rows.some(r=>!r||typeof r.id!=='string'||typeof r.path!=='string'))bad();
+ if(payload.statusRefreshed){if(typeof payload.snapshotToken!=='string'||!payload.snapshotToken||payload.snapshotToken===request.snapshotToken||result.warnings.includes('status-refresh-failed')||result.warnings.includes('workspace-changed'))bad();}
+ else if(payload.snapshotToken!==null||payload.rows.length!==0||!result.warnings.some(w=>['status-refresh-failed','workspace-changed'].includes(w)))bad();
+ return result;
+}
+export function commitResultSummary(result,{statusRefreshed=false,stale=false}={}){
+ const hook=result.warnings.includes('post-commit-hook');
+ let message=result.outcome==='committed'
+  ?hook?`SVN报告已提交r${result.reportedRevision}，但提交后钩子执行失败，勿重复提交。`:`SVN报告已提交r${result.reportedRevision}，勿重复提交。`
+  :'提交命令已完成，但未识别到有效修订号；请检查仓库历史确认结果，勿重复提交。';
+ if(result.outcome==='committed')message+=' 修订号来自 SVN 报告，尚未独立核实仓库历史。';
+ const warnings=result.warnings.filter(w=>w!=='post-commit-hook'||result.outcome!=='committed').map(w=>COMMIT_WARNINGS[w]);
+ if(warnings.length)message+=` 警告：${warnings.join('；')}。`;
+ message+=stale?' 窗口或工作范围已改变，未采用返回状态；请显式刷新本地状态并检查仓库历史。':statusRefreshed?' 已重新读取本地状态。':' 本地状态不可用；请显式刷新本地状态并检查仓库历史。';
+ return message+' 不会自动重试。';
+}
