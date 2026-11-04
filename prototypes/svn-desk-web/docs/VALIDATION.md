@@ -312,3 +312,37 @@ was attempted with installed Chromium, but the browser aborted at startup with
 bypass was attempted. No real SVN/`svnadmin`, Windows/native package or new
 screenshot acceptance is claimed. See [LOCAL_ADDS.md](LOCAL_ADDS.md) for limits
 and the disposable-repository Windows acceptance sequence.
+
+## d01bf15 Windows add follow-up · 2026-11-04
+
+Subsequent isolated Windows real-SVN verification of `d01bf15` reported two Python
+versions with 324 passed and 10 skipped each, 57 real-SVN behavior checks passed,
+one additional command-audit recheck passed, and 84 Node tests passed. GUI was
+not accepted. This evidence applies to the exact add checkpoint, not to later
+property-view changes.
+
+## Local single-file property comparison · 2026-11-04
+
+Base `d01bf15cdf1e65d617716fde77f6d5d954c59235`. The property tab, file details
+and context menu now offer an explicit local WORKING/BASE property read. The
+original backend and its command allowlist remain unchanged. No property write,
+remote revision, inherited-property or generic command route was added.
+
+- 104 JavaScript model/controller/independent tests passed.
+- 380 Python tests ran: 378 passed, 2 existing explicit real-SVN tests skipped.
+- New backend and HTTP tests cover exact snapshot scope, repeated observations,
+  fixed local argv, default read-only capability, revocation on mutation failure,
+  malformed XML/base64, bounds, binary metadata and explicit unavailable BASE.
+- Independent tests feed actual Python display serialization into the frontend
+  validator, including astral Unicode, controls, empty/absent and binary values.
+- Review added binding between returned BASE availability and the status captured
+  when the user requested the read. Both mismatch directions are rejected.
+- Python/JavaScript syntax checks and standalone rebuild passed. All tests use
+  synthetic temporary files, mock SVN, local HTTP or DOM adapters.
+
+The browser script is `npm run test:properties:ui`. It was not executed because
+the immediately preceding checkpoint confirmed this environment blocks Chromium
+startup at socket creation. The denied launch was not retried or bypassed. Real
+SVN, Windows/native and browser acceptance remain pending for this slice; the
+prior Windows add result above does not validate these new property reads.
+See [FILE_PROPERTIES.md](FILE_PROPERTIES.md) for exact limits and acceptance steps.

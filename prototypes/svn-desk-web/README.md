@@ -21,8 +21,8 @@ python3 server.py
 - 本地 changelist 分组/折叠、文件多选、当前可见项选择、隐藏选中项计数、完整只读审查。
 - 明确未版本化普通文件的本地 SVN 添加：独立启用，完整选区预检和一次确认，不递归、不添加父目录、不自动提交。
 - 可选本地 changelist 标签移动与移回默认组：启动时明确启用，完整选区预检，再单独确认；归组不触发提交或还原；本地 Shelf 与仓库提交分别显式启用。
-- 选中行详情、diff / properties、分页文件历史和独立有界操作日志；离线模式仍明确使用示例数据。
-- 文件右键菜单与 Shift+F10 / 菜单键：完整选区审查、归组、添加文件、Shelf、提交、仓库锁/解锁，以及焦点文件差异/历史；复用现有预检与确认，打开菜单不执行 SVN。
+- 选中行详情、diff、显式单文件 WORKING/BASE 属性对照、分页文件历史和独立有界操作日志；离线模式仍明确使用示例数据。
+- 文件右键菜单与 Shift+F10 / 菜单键：完整选区审查、归组、添加文件、Shelf、提交、仓库锁/解锁，以及焦点文件差异/历史/属性；复用现有预检与确认，打开菜单不执行 SVN。
 - F5 刷新、Ctrl/Cmd K 搜索、方向键浏览、空格切换选择、Esc 关闭菜单或弹窗。
 - 详情/差异/日志面板显示切换，窄桌面视口布局；**最低布局宽度 520px，非手机产品。**
 - 可选本地只读 status、明确单文件 diff / history 桥接，以及授权目录中的工作区发现、选择、专用偏好保存与恢复。历史与非 BASE→WORKING 的修订比较只在显式点击后访问仓库。默认没有 SVN 写能力；可选写入口是经过预检和确认的本地文件添加、本地 changelist 标签、本地 Shelf 备份/恢复，以及单独启用、另行确认的明确范围仓库提交和文件锁/解锁。
@@ -48,7 +48,7 @@ python3 server.py --workspace "/path/to/working-copy-root" \
 
 本流程明确禁用 auto-props，SVN 仍可能按文件类型设置默认属性；提交前请核对属性和差异。状态/内容改变、关闭窗口或超过 120 秒需重新预检；失败可能已添加部分文件，不自动重试或回滚。已核实结果会在后续状态不可用时保留。
 
-**本轮已完成合成服务/HTTP/模型/控制器及独立回归，真实 SVN、Windows 和浏览器执行仍待验。** Chromium 启动仍被环境 socket 权限限制阻止。完整边界与可丢弃仓库验收步骤见 [本地文件添加](docs/LOCAL_ADDS.md)。
+**d01bf15 的后续 Windows 隔离真实 SVN 验证已通过：两版 Python 各 324 通过、10 跳过；真实 SVN 行为 57 项通过，另 1 项命令审计复核通过；Node 84 项通过。GUI 仍未验收。** 该结果只验证 d01bf15，不代表后续属性切片通过。完整边界与验收步骤见 [本地文件添加](docs/LOCAL_ADDS.md)。
 
 ### 本地 changelist 分组与移回
 
@@ -105,11 +105,17 @@ python3 server.py --workspace "/path/to/disposable-test-wc" \
 
 ### 文件右键与键盘菜单
 
-右键已选文件会保留完整多选（包含被筛选/折叠隐藏的成员）；右键未选文件会明确改为只选该文件。菜单顶部显示焦点路径、选中总数和隐藏数。差异/历史只针对焦点文件；审查、归组、添加文件、Shelf、提交针对完整选区，提交与锁操作不会扩为整个 changelist。
+右键已选文件会保留完整多选（包含被筛选/折叠隐藏的成员）；右键未选文件会明确改为只选该文件。菜单顶部显示焦点路径、选中总数和隐藏数。差异/历史/属性只针对焦点文件；审查、归组、添加文件、Shelf、提交针对完整选区，提交与锁操作不会扩为整个 changelist。
 
 Shift+F10 或菜单键打开同一菜单。↑/↓、Home/End 浏览可用项，Enter/空格触发，Esc 收起并返回当前文件行；Tab 离开。刷新、筛选、选择/工作区变化、外部点击、失焦或缩放会使菜单失效。不可用功能显示禁用及启用条件；菜单本身不读取仓库或发送写请求。
 
 本轮通过模型与实际控制器/监听器的 DOM-adapter 回归，**不是浏览器或 Windows 验收通过**。Chromium 启动仍被本环境 socket 限制阻止；原生键盘默认行为、布局与 CSP 需运行随附浏览器测试再验收。见 [文件菜单说明与验收](docs/FILE_CONTEXT_MENU.md)。
+
+### 单文件本地属性对照
+
+「属性」标签、文件详情和右键菜单现在可显式读取当前普通文件的 WORKING / BASE 属性。不需要写权限，不自动查询仓库或继承属性；只读取焦点文件。新增文件明确标注没有 BASE，普通文件的 BASE 读取失败不会显示为空。
+
+展示属性新增/移除/修改、空值与二进制摘要；变更按完整原始字节比较。文本有明确截断/遮蔽/控制字符转义提示。刷新、切换或关闭使旧请求失效，失败不会残留旧结果。**本轮合成服务、HTTP、模型、控制器和独立跨语言契约测试通过；真实 SVN、Windows、浏览器执行仍待验。** 范围、上限与验收步骤见 [文件属性审查](docs/FILE_PROPERTIES.md)。
 
 ### 单文件差异与历史
 
@@ -142,7 +148,7 @@ python3 server.py --scan-parent "/path/to/projects" \
 ## 安全边界
 
 - 仅监听 `127.0.0.1`；精确 Host、Origin / Fetch Metadata、每次启动临时 session token、无 CORS、no-store、CSP、iframe 禁止。
-- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history` POST；独立启用的文件添加仅提供 `/api/add-preflight` 与 `/api/add-apply`，接受明确未版本化文件选区和单次确认，不递归、不添加父目录或提交；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`，以及独立启用的 `/api/shelves-list`、`/api/shelf-preflight` 与 `/api/shelf-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。独立启用的提交仅提供 `/api/commit-preflight` 与 `/api/commit-apply`，接受明确范围与单次确认。独立启用的仓库锁仅提供 `/api/lock-preflight` 与 `/api/lock-apply`，接受明确选区和一次确认，预检会访问服务器；没有 force/窃锁/破锁入口。无通用命令、任意文件读取、上传、还原、Shelf 删除或服务器 Shelf 入口。
+- 只允许明确静态资源、`/api/config`、`/api/status`、`/api/workspaces` 的 GET，以及严格 JSON 的 `/api/workspace-selection`、`/api/file-diff`、`/api/file-history`、`/api/file-properties` POST；独立启用的文件添加仅提供 `/api/add-preflight` 与 `/api/add-apply`，接受明确未版本化文件选区和单次确认，不递归、不添加父目录或提交；另有显式启用后的 `/api/changelist-preflight` 与 `/api/changelist-apply`，以及独立启用的 `/api/shelves-list`、`/api/shelf-preflight` 与 `/api/shelf-apply`。选择请求只接受候选 ID，文件请求只接受工作区身份、快照令牌、状态行 ID 与受限修订；本地归组只接受受限选区及一次性确认令牌。独立启用的提交仅提供 `/api/commit-preflight` 与 `/api/commit-apply`，接受明确范围与单次确认。独立启用的仓库锁仅提供 `/api/lock-preflight` 与 `/api/lock-apply`，接受明确选区和一次确认，预检会访问服务器；没有 force/窃锁/破锁入口。无通用命令、任意文件读取、上传、还原、Shelf 删除或服务器 Shelf 入口。
 - 原始 SVN 错误输出不会返回网页或记录到日志；动态路径/标签按文本转义。
 - 这是本机应用桥接，不是对不可信本机进程的安全沙箱，不应暴露到局域网或互联网。
 - Python 标准库服务用于原型，不是生产 HTTP 部署方案。

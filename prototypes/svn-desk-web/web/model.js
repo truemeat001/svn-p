@@ -256,3 +256,26 @@ export function addResultSummary(result,{statusRefreshed=false,stale=false}={}){
  if(!statusRefreshed||stale)message+=' 当前文件列表不可用，请显式刷新；已完成的添加不会因此撤销。';
  return message+' 未启用 auto-props；提交前请核对文件属性和差异。';
 }
+
+export function canReadProperties(row){
+ return !!row&&['normal','none','modified','added'].includes(row.item)&&['none','normal','modified'].includes(row.props)&&!['switched','file_external','tree_conflicted','wc_locked','copied','moved_from','moved_to'].some(k=>row[k])&&(!row.kind||['file','unknown'].includes(row.kind));
+}
+export function validatePropertyResponse(data,scope,expectedBaseAvailable){
+ const bad=()=>{throw Error('属性响应身份、范围或显示格式无效；未显示部分结果。');};
+ if(typeof expectedBaseAvailable!=='boolean'||data?.baseAvailable!==expectedBaseAvailable||data?.mode!=='live'||!sameReadScope(data,scope)||data.localOnly!==true||data.displayOnly!==true||typeof data.baseAvailable!=='boolean'||data.baseUnavailableReason!==(data.baseAvailable?null:'added-file')||!Array.isArray(data.properties)||data.properties.length>128||new TextEncoder().encode(JSON.stringify(data)).length>524288)bad();
+ const names=new Set();let bytes=0;
+ const value=v=>{
+  if(v===null)return;
+  if(!v||!['text','binary'].includes(v.kind)||!Number.isSafeInteger(v.byteLength)||v.byteLength<0||v.byteLength>65536||typeof v.sha256!=='string'||!/^[a-f0-9]{64}$/.test(v.sha256)||typeof v.textTruncated!=='boolean'||typeof v.redacted!=='boolean'||!Number.isSafeInteger(v.escapedControls)||v.escapedControls<0||v.escapedControls>65536)bad();
+  bytes+=v.byteLength;
+  if(v.kind==='binary'){if(v.text!==null||v.textTruncated||v.redacted||v.escapedControls)bad();}
+  else if(typeof v.text!=='string'||new TextEncoder().encode(v.text).length>4096||/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\uD800-\uDFFF]/u.test(v.text))bad();
+ };
+ for(const property of data.properties){
+  if(!property||typeof property.name!=='string'||!property.name||property.name.length>256||/[\u0000-\u0020\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\uD800-\uDFFF]/u.test(property.name)||names.has(property.name))bad();names.add(property.name);
+  value(property.base);value(property.working);
+  const expected=!data.baseAvailable?'unbased':property.base===null?'added':property.working===null?'deleted':property.base.sha256===property.working.sha256&&property.base.byteLength===property.working.byteLength?'unchanged':'modified';
+  if(property.base===null&&property.working===null||!data.baseAvailable&&(property.base!==null||property.working===null)||property.change!==expected)bad();
+ }
+ if(bytes>262144)bad();return data;
+}

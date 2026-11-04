@@ -10,7 +10,7 @@ function harness(){
  const calls=[],elements=new Map(),state={mode:'live',rows:[{id:'a',path:'dir/<img>.txt'},{id:'b',path:'b.txt'},{id:'c',path:'c.txt'}],selected:new Set(['a','b']),focused:'a',workspaceId:'wc',selectionVersion:1,snapshotToken:'snap',busy:false,failed:false};
  function element(id){if(!elements.has(id))elements.set(id,{open:false,disabled:false,classList:{add(){},remove(){}},replaceChildren(){this.innerHTML='';},innerHTML:'',offsetWidth:330,offsetHeight:420,style:{},querySelector(){return {focus(){calls.push(['focus',id]);},getBoundingClientRect(){return {left:10,top:20,height:30};}};}});return elements.get(id);}
  const context=vm.createContext({state,$:element,innerWidth:1440,innerHeight:960,esc:model.safeText,fileName:model.fileName,...model,
-  render:()=>calls.push(['render']),displayed:()=>[state.rows[0]],readsAvailable:()=>true,changelistsAvailable:()=>true,shelfCreateAvailable:()=>true,
+  render:()=>calls.push(['render']),displayed:()=>[state.rows[0]],readsAvailable:()=>true,propertyReadsAvailable:()=>true,showProperties:()=>calls.push(['properties',state.focused]),changelistsAvailable:()=>true,shelfCreateAvailable:()=>true,
   showDiff:()=>calls.push(['diff',state.focused]),showHistory:()=>calls.push(['history',state.focused]),review:()=>calls.push(['review',[...state.selected]]),
   openAdd:()=>calls.push(['add',[...state.selected]]),openChangelists:()=>calls.push(['changelist',[...state.selected]]),openCreateShelf:()=>calls.push(['shelf',[...state.selected]]),openCommit:operation=>calls.push(['commit',operation,[...state.selected]])});
  vm.runInContext(controller,context);

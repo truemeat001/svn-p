@@ -19,6 +19,8 @@ from workspace_bridge import WorkspaceCatalog, local_path, working_copy_identity
 from file_reads import (FileReadService, StaleRead, UnsupportedComparison,
                         comparison_revisions, history_module, revision)
 
+from property_reads import PropertyReadService
+
 from changelist_ops import (ChangelistService, ChangelistUnavailable, MutationUncertain,
                             validate_request, status_rows, visible_rows)
 
@@ -68,6 +70,8 @@ class ReadOnlyAdapter:
         self.client = backend.SvnClient(self.workspace, executable=executable, timeout=25)
         history = history_module(backend_source)
         self._file_service = FileReadService(self.client, history) if history else None
+        self._property_service = (PropertyReadService(self.client, history, self._file_service.manager)
+                                  if self._file_service else None)
         self._changelist_service = (ChangelistService(self.client, self._file_service.manager, self._check_workspace)
                                    if enable_changelists and self._file_service else None)
         self._commit_service = (CommitService(self.client, self._file_service.manager, self._check_workspace)
@@ -146,6 +150,7 @@ class ReadOnlyAdapter:
         return {"mode": "live", "workspace": self.workspace.name,
                 "root": str(self.workspace), "rows": rows,
                 "snapshotToken": token, "fileReadsEnabled": getattr(self, '_file_service', None) is not None,
+                "propertyReadsEnabled": getattr(self, '_property_service', None) is not None,
                 "changelistWritesEnabled": getattr(self, '_changelist_service', None) is not None,
                 "shelfWritesEnabled": getattr(self, '_shelf_service', None) is not None,
                 "commitsEnabled": getattr(self, '_commit_service', None) is not None,
@@ -238,7 +243,7 @@ class ReadOnlyAdapter:
         warnings = list(dict.fromkeys([*result.get('warnings', []), warning]))
         return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
                 'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
-                'fileReadsEnabled': False, 'changelistWritesEnabled': False,
+                'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
                 'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False, 'addsEnabled': False, 'writesEnabled': False,
                 'commitResult': {**result, 'warnings': warnings},
                 'scope': 'Command completed; subsequent local status could not be verified.'}
@@ -284,7 +289,7 @@ class ReadOnlyAdapter:
         warnings = list(dict.fromkeys([*result.get('warnings', []), *([warning] if warning else [])]))
         return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
                 'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
-                'fileReadsEnabled': False, 'changelistWritesEnabled': False,
+                'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
                 'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False, 'addsEnabled': False, 'writesEnabled': False,
                 'lockResult': {**result, 'warnings': warnings},
                 'scope': 'Repository lock result retained; local status requires explicit refresh.'}
@@ -332,7 +337,7 @@ class ReadOnlyAdapter:
         warnings = list(dict.fromkeys([*result.get('warnings', []), warning]))
         return {'mode': 'live', 'workspace': self.workspace.name, 'root': str(self.workspace),
                 'rows': [], 'snapshotToken': None, 'statusRefreshed': False,
-                'fileReadsEnabled': False, 'changelistWritesEnabled': False,
+                'fileReadsEnabled': False, 'propertyReadsEnabled': False, 'changelistWritesEnabled': False,
                 'shelfWritesEnabled': False, 'commitsEnabled': False, 'locksEnabled': False,
                 'addsEnabled': False, 'writesEnabled': False,
                 'addResult': {**result, 'warnings': warnings},
@@ -382,9 +387,15 @@ class ReadOnlyAdapter:
             row = snapshot[1].get(data['id'])
             if row is None:
                 raise StaleRead('Row is not in the current status snapshot.')
-            if self._file_service is None:
-                raise ValueError('A strict bounded history backend is required.')
-            result = self._file_service.read(kind, row, data)
+            if kind == 'properties':
+                service = getattr(self, '_property_service', None)
+                if service is None:
+                    raise ValueError('Strict bounded property reads are unavailable.')
+                result = service.read(row)
+            else:
+                if self._file_service is None:
+                    raise ValueError('A strict bounded history backend is required.')
+                result = self._file_service.read(kind, row, data)
             self._check_workspace()
             return {**result, 'id': data['id'], 'snapshotToken': snapshot[0]}
         finally:
@@ -546,7 +557,8 @@ class Handler(BaseHTTPRequestHandler):
         url = self.validated_url()
         if url is None:
             return
-        file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history'}.get(url.path)
+        file_kind = {'/api/file-diff': 'diff', '/api/file-history': 'history',
+                     '/api/file-properties': 'properties'}.get(url.path)
         changelist_kind = {'/api/changelist-preflight': 'preflight', '/api/changelist-apply': 'apply'}.get(url.path)
         add_kind = {'/api/add-preflight': 'preflight', '/api/add-apply': 'apply'}.get(url.path)
         lock_kind = {'/api/lock-preflight': 'preflight', '/api/lock-apply': 'apply'}.get(url.path)
@@ -590,7 +602,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Invalid selection.')
             else:
                 expected = {'workspaceId', 'selectionVersion', 'snapshotToken', 'id'}
-                expected |= {'fromRevision', 'toRevision'} if file_kind == 'diff' else {'startRevision'}
+                if file_kind == 'diff':
+                    expected |= {'fromRevision', 'toRevision'}
+                elif file_kind == 'history':
+                    expected |= {'startRevision'}
                 if (not isinstance(data, dict) or set(data) != expected
                         or not isinstance(data['selectionVersion'], int)
                         or isinstance(data['selectionVersion'], bool)
@@ -602,7 +617,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('Invalid read field.')
                 if file_kind == 'diff':
                     comparison_revisions(data)
-                else:
+                elif file_kind == 'history':
                     revision(data['startRevision'])
         except TimeoutError:
             return self.respond(408, {'error': '请求体未在有界时限内完整到达；未执行操作。'})
@@ -683,6 +698,8 @@ class Handler(BaseHTTPRequestHandler):
             except BlockingIOError:
                 return self.respond(409, {'error': '已有工作区读取正在运行，请完成后明确重试。'})
             except Exception:
+                if file_kind == 'properties':
+                    return self.respond(503, {'error': '文件属性只读查询失败；未返回部分结果，失败不代表没有属性。请检查当前文件、配套严格后端或输出上限。'})
                 return self.respond(503, {'error': '文件只读查询失败；未返回部分结果，失败不代表无差异或无历史。请检查文件范围、配套严格后端、修订、仓库访问或输出上限。'})
         try:
             return self.respond(200, self.server.catalog.select(data['id']))
